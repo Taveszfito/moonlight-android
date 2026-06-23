@@ -93,6 +93,13 @@ public class ServerHelper {
     public static Intent createStartIntent(Activity parent, NvApp app, ComputerDetails computer,
                                            ComputerManagerService.ComputerManagerBinder managerBinder,
                                            boolean withVDisplay) {
+        return createStartIntent(parent, app, computer, managerBinder, withVDisplay, false);
+    }
+
+    public static Intent createStartIntent(Activity parent, NvApp app, ComputerDetails computer,
+                                           ComputerManagerService.ComputerManagerBinder managerBinder,
+                                           boolean withVDisplay,
+                                           boolean forceRelaunch) {
         Intent gameIntent = null;
         PreferenceConfiguration prefConfig = PreferenceConfiguration.readPreferences(parent);
         // Try to add secondary DisplayContext if supported and connected
@@ -113,6 +120,7 @@ public class ServerHelper {
         gameIntent.putExtra(Game.EXTRA_PC_UUID, computer.uuid);
         gameIntent.putExtra(Game.EXTRA_PC_NAME, computer.name);
         gameIntent.putExtra(Game.EXTRA_VDISPLAY, withVDisplay);
+        gameIntent.putExtra(Game.EXTRA_FORCE_RELAUNCH, forceRelaunch);
         gameIntent.putExtra(Game.EXTRA_SERVER_COMMANDS, (ArrayList<String>) computer.serverCommands);
 
         try {
@@ -145,12 +153,24 @@ public class ServerHelper {
             ComputerManagerService.ComputerManagerBinder managerBinder,
             boolean withVDisplay
     ) {
+        doStart(parent, app, computer, managerBinder, withVDisplay, false);
+    }
+
+    @RequiresApi(api = Build.VERSION_CODES.O)
+    public static void doStart(
+            Activity parent,
+            NvApp app,
+            ComputerDetails computer,
+            ComputerManagerService.ComputerManagerBinder managerBinder,
+            boolean withVDisplay,
+            boolean forceRelaunch
+    ) {
         if (computer.state == ComputerDetails.State.OFFLINE || computer.activeAddress == null) {
             Toast.makeText(parent, parent.getString(R.string.pair_pc_offline), Toast.LENGTH_SHORT).show();
             return;
         }
 
-        Intent intent = createStartIntent(parent, app, computer, managerBinder, withVDisplay);
+        Intent intent = createStartIntent(parent, app, computer, managerBinder, withVDisplay, forceRelaunch);
         parent.startActivity(intent);
     }
 

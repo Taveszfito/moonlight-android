@@ -7,6 +7,8 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
+import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
 import android.media.MediaCodecInfo;
 import android.net.Uri;
 import android.os.Build;
@@ -25,6 +27,7 @@ import androidx.preference.ListPreference;
 import androidx.preference.Preference;
 import androidx.preference.PreferenceCategory;
 import androidx.preference.PreferenceFragmentCompat;
+import androidx.preference.PreferenceGroup;
 import androidx.preference.PreferenceManager;
 import androidx.preference.PreferenceScreen;
 
@@ -41,6 +44,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.widget.EditText;
+import android.widget.LinearLayout;
 import android.widget.Toast;
 
 import com.google.gson.Gson;
@@ -63,6 +67,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Iterator;
+import java.util.Locale;
 import java.util.Map;
 
 public class StreamSettings extends AppCompatActivity {
@@ -166,6 +171,7 @@ public class StreamSettings extends AppCompatActivity {
         private boolean nativeFramerateShown = false;
 
         private PreferenceConfiguration prevPrefConfig;
+        private String currentSettingsQuery = "";
 
         public SettingsFragment(PreferenceConfiguration prefCfg) {
             prevPrefConfig = prefCfg;
@@ -318,9 +324,16 @@ public class StreamSettings extends AppCompatActivity {
         @NonNull
         @Override
         public View onCreateView(@NonNull LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
-            View view = super.onCreateView(inflater, container, savedInstanceState);
-            UiHelper.applyStatusBarPadding(view);
-            return view;
+            View preferencesView = super.onCreateView(inflater, container, savedInstanceState);
+
+            LinearLayout root = new LinearLayout(requireContext());
+            root.setOrientation(LinearLayout.VERTICAL);
+            root.addView(createSettingsSearchBox());
+            root.addView(preferencesView, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+
+            UiHelper.applyStatusBarPadding(root);
+            return root;
         }
 
         public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState, boolean unused) {
@@ -330,6 +343,109 @@ public class StreamSettings extends AppCompatActivity {
         @Override
         public void onCreatePreferences(Bundle bundle, String s) {
             initializePreferences();
+        }
+
+        private boolean preferenceMatchesQuery(Preference preference, String query) {
+            return containsQuery(preference.getTitle(), query) ||
+                    containsQuery(preference.getSummary(), query) ||
+                    containsQuery(preference.getKey(), query);
+        }
+
+        private boolean containsQuery(CharSequence value, String query) {
+            return value != null &&
+                    value.toString().toLowerCase(Locale.getDefault()).contains(query);
+        }
+
+        private EditText createSettingsSearchBox() {
+            EditText searchBox = new EditText(requireContext());
+            int horizontalPadding = dp(16);
+            int verticalPadding = dp(10);
+            searchBox.setSingleLine(true);
+            searchBox.setHint(R.string.settings_search_hint);
+            searchBox.setTextColor(Color.WHITE);
+            searchBox.setHintTextColor(0xFFB8B8B8);
+            searchBox.setTextSize(16);
+            searchBox.setInputType(InputType.TYPE_CLASS_TEXT);
+            searchBox.setPadding(horizontalPadding, 0, horizontalPadding, 0);
+
+            GradientDrawable background = new GradientDrawable();
+            background.setColor(0xFF2B2B2F);
+            background.setCornerRadius(dp(12));
+            background.setStroke(dp(1), 0xFF4A4A50);
+            searchBox.setBackground(background);
+
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(48));
+            params.setMargins(dp(16), verticalPadding, dp(16), verticalPadding);
+            searchBox.setLayoutParams(params);
+
+            searchBox.addTextChangedListener(new android.text.TextWatcher() {
+                @Override
+                public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+
+                @Override
+                public void onTextChanged(CharSequence s, int start, int before, int count) {
+                    currentSettingsQuery = s == null ? "" : s.toString();
+                    filterSettings(currentSettingsQuery);
+                }
+
+                @Override
+                public void afterTextChanged(android.text.Editable s) {}
+            });
+
+            return searchBox;
+        }
+
+        private int dp(int value) {
+            return Math.round(value * getResources().getDisplayMetrics().density);
+        }
+
+        private void setPreferenceTreeVisible(Preference preference, boolean visible) {
+            preference.setVisible(visible);
+            if (preference instanceof PreferenceGroup) {
+                PreferenceGroup group = (PreferenceGroup) preference;
+                for (int i = 0; i < group.getPreferenceCount(); i++) {
+                    setPreferenceTreeVisible(group.getPreference(i), visible);
+                }
+            }
+        }
+
+        private boolean filterPreference(Preference preference, String query) {
+            if (TextUtils.isEmpty(query)) {
+                setPreferenceTreeVisible(preference, true);
+                return true;
+            }
+
+            boolean selfMatches = preferenceMatchesQuery(preference, query);
+            if (preference instanceof PreferenceGroup) {
+                PreferenceGroup group = (PreferenceGroup) preference;
+                if (selfMatches) {
+                    setPreferenceTreeVisible(preference, true);
+                    return true;
+                }
+
+                boolean hasVisibleChild = false;
+                for (int i = 0; i < group.getPreferenceCount(); i++) {
+                    hasVisibleChild |= filterPreference(group.getPreference(i), query);
+                }
+                preference.setVisible(hasVisibleChild);
+                return hasVisibleChild;
+            }
+
+            preference.setVisible(selfMatches);
+            return selfMatches;
+        }
+
+        private void filterSettings(String query) {
+            PreferenceScreen screen = getPreferenceScreen();
+            if (screen == null) {
+                return;
+            }
+
+            String normalizedQuery = query == null ? "" : query.trim().toLowerCase(Locale.getDefault());
+            for (int i = 0; i < screen.getPreferenceCount(); i++) {
+                filterPreference(screen.getPreference(i), normalizedQuery);
+            }
         }
 
         public void initializePreferences() {

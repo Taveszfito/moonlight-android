@@ -31,8 +31,8 @@ android {
             maxSdk 25
 
             externalNativeBuild {
-                ndkBuild {
-                    arguments "PRODUCT_FLAVOR=root"
+                cmake {
+                    arguments "-DPRODUCT_FLAVOR=root"
                 }
             }
 
@@ -47,8 +47,8 @@ android {
 
         nonRoot_game {
             externalNativeBuild {
-                ndkBuild {
-                    arguments "PRODUCT_FLAVOR=nonRoot"
+                cmake {
+                    arguments "-DPRODUCT_FLAVOR=nonRoot"
                 }
             }
 
@@ -145,8 +145,8 @@ android {
     }
 
     externalNativeBuild {
-        ndkBuild {
-            path "src/main/jni/Android.mk"
+        cmake {
+            path "src/main/jni/CMakeLists.txt"
         }
     }
 

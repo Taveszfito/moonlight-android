@@ -306,6 +306,12 @@
             app:iconSpaceReserved="false" />
         <CheckBoxPreference
             android:defaultValue="false"
+            android:key="checkbox_gyro_to_right_stick"
+            android:summary="@string/summary_checkbox_gyro_to_right_stick"
+            android:title="@string/title_checkbox_gyro_to_right_stick"
+            app:iconSpaceReserved="false" />
+        <CheckBoxPreference
+            android:defaultValue="false"
             android:key="checkbox_gamepad_motion_fallback"
             android:summary="@string/summary_checkbox_gamepad_motion_fallback"
             android:title="@string/title_checkbox_gamepad_motion_fallback"

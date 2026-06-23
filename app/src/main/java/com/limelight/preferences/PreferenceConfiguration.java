@@ -33,6 +33,9 @@ public class PreferenceConfiguration {
     public static final String CUSTOM_BITRATE_PREF_STRING = "edit_diy_bitrate";
     public static final String CUSTOM_REFRESH_RATE_PREF_STRING = "custom_refresh_rate";
     public static final String CUSTOM_RESOLUTION_PREF_STRING = "edit_diy_w_h";
+    public static final String VOLUME_BUTTON_MODE_PREF_STRING = "list_volume_button_mode";
+    public static final String VOLUME_BUTTON_MODE_ANDROID = "android";
+    public static final String VOLUME_BUTTON_MODE_WINDOWS = "windows";
 
     private static final String LEGACY_RES_FPS_PREF_STRING = "list_resolution_fps";
     private static final String LEGACY_ENABLE_51_SURROUND_PREF_STRING = "checkbox_51_surround";
@@ -91,6 +94,12 @@ public class PreferenceConfiguration {
     private static final String FULL_RANGE_PREF_STRING = "checkbox_full_range";
     private static final String GAMEPAD_TOUCHPAD_AS_MOUSE_PREF_STRING = "checkbox_gamepad_touchpad_as_mouse";
     private static final String GAMEPAD_MOTION_SENSORS_PREF_STRING = "checkbox_gamepad_motion_sensors";
+    private static final String GYRO_TO_RIGHT_STICK_PREF_STRING = "checkbox_gyro_to_right_stick";
+    public static final String GYRO_AIM_PITCH_SENSITIVITY_PREF_STRING = "gyro_aim_pitch_sensitivity";
+    public static final String GYRO_AIM_SIDE_SENSITIVITY_PREF_STRING = "gyro_aim_side_sensitivity";
+    public static final String GYRO_AIM_VERTICAL_SENSITIVITY_PREF_STRING = "gyro_aim_vertical_sensitivity";
+    public static final String GYRO_AIM_DEADZONE_COMPENSATION_PREF_STRING = "gyro_aim_deadzone_compensation";
+    public static final String GYRO_AIM_LINK_SIDE_AXES_PREF_STRING = "gyro_aim_link_side_axes";
     private static final String GAMEPAD_MOTION_FALLBACK_PREF_STRING = "checkbox_gamepad_motion_fallback";
     private static final String FORCE_MOTION_SENSORS_FALLBACK_PREF_STRING = "checkbox_force_device_motion";
     private static final String FULL_SCREEN_PREF_STRING = "checkbox_full_screen";
@@ -186,6 +195,12 @@ public class PreferenceConfiguration {
     private static final boolean DEFAULT_FULL_RANGE = false;
     private static final boolean DEFAULT_GAMEPAD_TOUCHPAD_AS_MOUSE = false;
     private static final boolean DEFAULT_GAMEPAD_MOTION_SENSORS = true;
+    private static final boolean DEFAULT_GYRO_TO_RIGHT_STICK = false;
+    public static final int DEFAULT_GYRO_AIM_PITCH_SENSITIVITY = 100;
+    public static final int DEFAULT_GYRO_AIM_SIDE_SENSITIVITY = 100;
+    public static final int DEFAULT_GYRO_AIM_VERTICAL_SENSITIVITY = 100;
+    public static final int DEFAULT_GYRO_AIM_DEADZONE_COMPENSATION = 0;
+    public static final boolean DEFAULT_GYRO_AIM_LINK_SIDE_AXES = false;
     private static final boolean DEFAULT_GAMEPAD_MOTION_FALLBACK = false;
     private static final boolean DEFAULT_FORCE_MOTION_SENSORS_FALLBACK = false;
     private static final boolean DEFAULT_ENABLE_RUMBLE = true;
@@ -213,6 +228,7 @@ public class PreferenceConfiguration {
     private static final float DEFAULT_ZOOM_SCALE = 1.0f;
     private static final float DEFAULT_PAN_OFFSET = 0.0f;
     private static final boolean DEFAULT_FULL_SCREEN = true;
+    private static final String DEFAULT_VOLUME_BUTTON_MODE = VOLUME_BUTTON_MODE_ANDROID;
 
     public static final int FRAME_PACING_MIN_LATENCY = 0;
     public static final int FRAME_PACING_BALANCED = 1;
@@ -249,6 +265,7 @@ public class PreferenceConfiguration {
     public String language;
     public int renderMode;
     public boolean smallIconMode, multiController, usbDriver, flipFaceButtons;
+    public String volumeButtonMode;
     public boolean onscreenController;
     public boolean hideOSCWhenHasGamepad;
     public boolean enableBatteryReport;
@@ -371,6 +388,7 @@ public class PreferenceConfiguration {
     public boolean reduceRefreshRate;
     public boolean fullRange;
     public boolean gamepadMotionSensors;
+    public boolean gyroToRightStick;
     public boolean gamepadTouchpadAsMouse;
     public boolean gamepadMotionSensorsFallbackToDevice;
     public boolean forceMotionSensorsFallbackToDevice;
@@ -933,6 +951,7 @@ private static int getFramePacingValue(Context context) {
         config.vibrateFallbackToDevice = prefs.getBoolean(VIBRATE_FALLBACK_PREF_STRING, DEFAULT_VIBRATE_FALLBACK);
         config.vibrateFallbackToDeviceStrength = prefs.getInt(VIBRATE_FALLBACK_STRENGTH_PREF_STRING, DEFAULT_VIBRATE_FALLBACK_STRENGTH);
         config.flipFaceButtons = prefs.getBoolean(FLIP_FACE_BUTTONS_PREF_STRING, DEFAULT_FLIP_FACE_BUTTONS);
+        config.volumeButtonMode = prefs.getString(VOLUME_BUTTON_MODE_PREF_STRING, DEFAULT_VOLUME_BUTTON_MODE);
 //        config.touchscreenTrackpad = prefs.getBoolean(TOUCHSCREEN_TRACKPAD_PREF_STRING, DEFAULT_TOUCHSCREEN_TRACKPAD);
         config.enableLatencyToast = prefs.getBoolean(LATENCY_TOAST_PREF_STRING, DEFAULT_LATENCY_TOAST);
         config.enableBackMenu = prefs.getBoolean(CHECKBOX_ENABLE_QUIT_DIALOG,true);
@@ -1017,6 +1036,7 @@ private static int getFramePacingValue(Context context) {
         config.fullRange = prefs.getBoolean(FULL_RANGE_PREF_STRING, DEFAULT_FULL_RANGE);
         config.gamepadTouchpadAsMouse = prefs.getBoolean(GAMEPAD_TOUCHPAD_AS_MOUSE_PREF_STRING, DEFAULT_GAMEPAD_TOUCHPAD_AS_MOUSE);
         config.gamepadMotionSensors = prefs.getBoolean(GAMEPAD_MOTION_SENSORS_PREF_STRING, DEFAULT_GAMEPAD_MOTION_SENSORS);
+        config.gyroToRightStick = prefs.getBoolean(GYRO_TO_RIGHT_STICK_PREF_STRING, DEFAULT_GYRO_TO_RIGHT_STICK);
         config.gamepadMotionSensorsFallbackToDevice = prefs.getBoolean(GAMEPAD_MOTION_FALLBACK_PREF_STRING, DEFAULT_GAMEPAD_MOTION_FALLBACK);
         config.forceMotionSensorsFallbackToDevice = prefs.getBoolean(FORCE_MOTION_SENSORS_FALLBACK_PREF_STRING, DEFAULT_FORCE_MOTION_SENSORS_FALLBACK);
         config.enableRumble = prefs.getBoolean(ENABLE_RUMBLE_PREF_STRING, DEFAULT_ENABLE_RUMBLE);

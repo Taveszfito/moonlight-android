@@ -777,7 +777,10 @@ public class PcView extends AppCompatActivity implements AdapterFragmentCallback
                     return true;
                 }
 
-                ServerHelper.doStart(this, new NvApp("app", null, computer.details.runningGameId, false), computer.details, managerBinder, false);
+                ServerHelper.doStart(this, new NvApp("app", null, computer.details.runningGameId, false),
+                        computer.details, managerBinder,
+                        PreferenceConfiguration.readPreferences(this).useVirtualDisplay,
+                        true);
                 return true;
 
             case QUIT_ID:

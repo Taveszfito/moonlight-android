@@ -177,6 +177,22 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     private KeyBoardLayoutController keyBoardLayoutController;
 
     private PreferenceConfiguration prefConfig;
+    private final Handler volumeButtonRepeatHandler = new Handler(Looper.getMainLooper());
+    private final Runnable volumeButtonRepeatRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (repeatingVolumeKeyCode == KeyEvent.KEYCODE_UNKNOWN || !isWindowsVolumeButtonMode()) {
+                return;
+            }
+
+            sendHostVolumeHotkey(repeatingVolumeKeyCode);
+            volumeButtonRepeatCount++;
+            long nextDelay = Math.max(45, 240 - (volumeButtonRepeatCount * 22L));
+            volumeButtonRepeatHandler.postDelayed(this, nextDelay);
+        }
+    };
+    private int repeatingVolumeKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+    private int volumeButtonRepeatCount;
     private SharedPreferences tombstonePrefs;
 
     private int displayWidth;
@@ -265,6 +281,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     public static final String EXTRA_APP_HDR = "HDR";
     public static final String EXTRA_SERVER_CERT = "ServerCert";
     public static final String EXTRA_VDISPLAY = "VirtualDisplay";
+    public static final String EXTRA_FORCE_RELAUNCH = "ForceRelaunch";
     public static final String EXTRA_SERVER_COMMANDS = "ServerCommands";
     public static final String EXTRA_DISPLAY_ID = "DisplayID";
 
@@ -278,6 +295,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     private String uniqueId;
     private X509Certificate serverCert;
     private boolean vDisplay;
+    private boolean forceRelaunch;
     private ArrayList<String> serverCommands;
 
     private ViewParent rootView;
@@ -571,6 +589,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         appId = Game.this.getIntent().getIntExtra(EXTRA_APP_ID, StreamConfiguration.INVALID_APP_ID);
         uniqueId = Game.this.getIntent().getStringExtra(EXTRA_UNIQUEID);
         vDisplay = Game.this.getIntent().getBooleanExtra(EXTRA_VDISPLAY, false);
+        forceRelaunch = Game.this.getIntent().getBooleanExtra(EXTRA_FORCE_RELAUNCH, false);
         serverCommands = Game.this.getIntent().getStringArrayListExtra(EXTRA_SERVER_COMMANDS);
         boolean appSupportsHdr = Game.this.getIntent().getBooleanExtra(EXTRA_APP_HDR, false);
         byte[] derCertData = Game.this.getIntent().getByteArrayExtra(EXTRA_SERVER_CERT);
@@ -784,6 +803,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 .setLaunchRefreshRate(prefConfig.fps)
                 .setRefreshRate(chosenFrameRate)
                 .setVirtualDisplay(vDisplay)
+                .setForceRelaunch(forceRelaunch)
                 .setResolutionScaleFactor(prefConfig.resolutionScaleFactor)
                 .setApp(app)
                 .setEnableUltraLowLatency(prefConfig.enableUltraLowLatency)
@@ -2033,6 +2053,10 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             return false;
         }
 
+        if (handleVolumeButtonDown(event)) {
+            return true;
+        }
+
         int deviceId = event.getDeviceId();
         if (prefConfig.ignoreSynthEvents && deviceId <= 0) {
             return false;
@@ -2122,6 +2146,10 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         // Pass-through virtual navigation keys
         if ((event.getFlags() & KeyEvent.FLAG_VIRTUAL_HARD_KEY) != 0) {
             return false;
+        }
+
+        if (handleVolumeButtonUp(event)) {
+            return true;
         }
 
         int deviceId = event.getDeviceId();
@@ -2228,6 +2256,102 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 conn.sendKeyboardInput(key, KeyboardPacket.KEY_UP, modifier[0], (byte) 0);
             }
         }), GameMenu.KEY_UP_DELAY);
+    }
+
+    private boolean handleVolumeButtonDown(KeyEvent event) {
+        if (!isVolumeButtonKey(event.getKeyCode()) || !isWindowsVolumeButtonMode()) {
+            return false;
+        }
+
+        if (repeatingVolumeKeyCode != event.getKeyCode()) {
+            startVolumeButtonRepeat(event.getKeyCode());
+        }
+        return true;
+    }
+
+    private boolean handleVolumeButtonUp(KeyEvent event) {
+        if (!isVolumeButtonKey(event.getKeyCode()) || !isWindowsVolumeButtonMode()) {
+            return false;
+        }
+
+        if (repeatingVolumeKeyCode == event.getKeyCode()) {
+            stopVolumeButtonRepeat();
+        }
+        return true;
+    }
+
+    private boolean isVolumeButtonKey(int keyCode) {
+        return keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
+                keyCode == KeyEvent.KEYCODE_VOLUME_DOWN;
+    }
+
+    private boolean isWindowsVolumeButtonMode() {
+        return prefConfig != null &&
+                PreferenceConfiguration.VOLUME_BUTTON_MODE_WINDOWS.equals(prefConfig.volumeButtonMode) &&
+                conn != null;
+    }
+
+    private void sendHostVolumeHotkey(int keyCode) {
+        sendKeys(new short[]{
+                KeyboardTranslator.VK_LCONTROL,
+                KeyboardTranslator.VK_LMENU,
+                (short) (keyCode == KeyEvent.KEYCODE_VOLUME_UP ? KeyboardTranslator.VK_U : KeyboardTranslator.VK_J)
+        });
+    }
+
+    private void startVolumeButtonRepeat(int keyCode) {
+        stopVolumeButtonRepeat();
+        repeatingVolumeKeyCode = keyCode;
+        volumeButtonRepeatCount = 0;
+        sendHostVolumeHotkey(keyCode);
+        volumeButtonRepeatHandler.postDelayed(volumeButtonRepeatRunnable, 350);
+    }
+
+    private void stopVolumeButtonRepeat() {
+        volumeButtonRepeatHandler.removeCallbacks(volumeButtonRepeatRunnable);
+        repeatingVolumeKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+        volumeButtonRepeatCount = 0;
+    }
+
+    public String getVolumeButtonModeLabel() {
+        return PreferenceConfiguration.VOLUME_BUTTON_MODE_WINDOWS.equals(prefConfig.volumeButtonMode) ?
+                getString(R.string.game_menu_volume_button_mode_windows) :
+                getString(R.string.game_menu_volume_button_mode_android);
+    }
+
+    public void selectVolumeButtonMode() {
+        String[] labels = new String[]{
+                getString(R.string.game_menu_volume_button_mode_android),
+                getString(R.string.game_menu_volume_button_mode_windows)
+        };
+        String[] values = new String[]{
+                PreferenceConfiguration.VOLUME_BUTTON_MODE_ANDROID,
+                PreferenceConfiguration.VOLUME_BUTTON_MODE_WINDOWS
+        };
+        int checkedItem = PreferenceConfiguration.VOLUME_BUTTON_MODE_WINDOWS.equals(prefConfig.volumeButtonMode) ? 1 : 0;
+
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.game_menu_volume_button_mode_title)
+                .setSingleChoiceItems(labels, checkedItem, (dialog, which) -> {
+                    PreferenceManager.getDefaultSharedPreferences(this).edit()
+                            .putString(PreferenceConfiguration.VOLUME_BUTTON_MODE_PREF_STRING, values[which])
+                            .apply();
+                    prefConfig.volumeButtonMode = values[which];
+                    stopVolumeButtonRepeat();
+                    dialog.dismiss();
+                    showGameMenu(null);
+                })
+                .show();
+    }
+
+    public boolean isGyroAimQuickSettingsEnabled() {
+        return prefConfig != null && prefConfig.gyroToRightStick;
+    }
+
+    public void reloadGyroAimSettings() {
+        if (controllerHandler != null) {
+            controllerHandler.reloadGyroAimSettings();
+        }
     }
 
     public boolean handleFocusChange(boolean hasFocus) {

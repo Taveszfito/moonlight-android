@@ -536,17 +536,18 @@ public class AppView extends AppCompatActivity implements AdapterFragmentCallbac
 
             case START_OR_RESUME_ID:
             case START_WITH_VDISPLAY: {
-                boolean withVDiaplay = itemId == START_WITH_VDISPLAY;
+                boolean isResume = lastRunningAppId == app.app.getAppId();
+                boolean withVDiaplay = itemId == START_WITH_VDISPLAY ||
+                        (isResume && prefConfig.useVirtualDisplay);
                 if (withVDiaplay && !(computer.vDisplaySupported && computer.vDisplayDriverReady)) {
                     UiHelper.displayVdisplayConfirmationDialog(
                             AppView.this,
                             computer,
-                            () -> ServerHelper.doStart(AppView.this, app.app, computer, managerBinder, true),
+                            () -> ServerHelper.doStart(AppView.this, app.app, computer, managerBinder, true, isResume),
                             null
                     );
                 } else {
-                    // Resume is the same as start for us
-                    ServerHelper.doStart(AppView.this, app.app, computer, managerBinder, withVDiaplay);
+                    ServerHelper.doStart(AppView.this, app.app, computer, managerBinder, withVDiaplay, isResume);
                 }
                 return true;
             }
@@ -752,7 +753,7 @@ public class AppView extends AppCompatActivity implements AdapterFragmentCallbac
                 // Only open the context menu if something is running, otherwise start it
                 if (lastRunningAppId != 0) {
                     if (prefConfig.resumeWithoutConfirm && lastRunningAppId == app.app.getAppId()) {
-                        ServerHelper.doStart(AppView.this, app.app, computer, managerBinder, prefConfig.useVirtualDisplay);
+                        ServerHelper.doStart(AppView.this, app.app, computer, managerBinder, prefConfig.useVirtualDisplay, true);
                     } else {
                         openContextMenu(arg1);
                     }

@@ -33,6 +33,8 @@ import android.view.MotionEvent;
 import android.view.Surface;
 import android.widget.Toast;
 
+import androidx.preference.PreferenceManager;
+
 import com.limelight.GameMenu;
 import com.limelight.LimeLog;
 import com.limelight.R;
@@ -65,6 +67,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     private static final int MINIMUM_BUTTON_DOWN_TIME_MS = 25;
 
     private static final int QUICK_MENU_FIRST_STAGE_MS = 200;
+    private static final short GYRO_AIM_REPORT_RATE_HZ = 100;
+    private static final float GYRO_AIM_STICK_ALPHA = 0.45f;
+    private static final float GYRO_AIM_SENSOR_SENSITIVITY = 0.22f;
+    private static final float GYRO_AIM_DRIVER_SENSITIVITY = 0.004f;
+    private static final float GYRO_AIM_HORIZONTAL_GAIN = 1.15f;
+    private static final float GYRO_AIM_COMPENSATION_INPUT_THRESHOLD = 0.0015f;
 
     private static final int EMULATING_SPECIAL = 0x1;
     private static final int EMULATING_SELECT = 0x2;
@@ -132,6 +140,11 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
     private final PreferenceConfiguration prefConfig;
     private short currentControllers, initialControllers;
+    private float gyroAimPitchSensitivity = 1.0f;
+    private float gyroAimSideSensitivity = 1.0f;
+    private float gyroAimVerticalSensitivity = 1.0f;
+    private float gyroAimDeadzoneCompensation = 0.0f;
+    private boolean gyroAimLinkSideAxes;
 
     public ControllerHandler(Activity activityContext, NvConnection conn, GameGestures gestures, PreferenceConfiguration prefConfig) {
         this.activityContext = activityContext;
@@ -158,6 +171,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
         this.sceManager = new SceManager(activityContext);
         this.sceManager.start();
+        reloadGyroAimSettings();
 
         int deadzonePercentage = prefConfig.deadzonePercentage;
 
@@ -227,6 +241,23 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
     public boolean hasController() {
         return hasGameController;
+    }
+
+    public void reloadGyroAimSettings() {
+        android.content.SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(activityContext);
+        gyroAimPitchSensitivity = prefs.getInt(PreferenceConfiguration.GYRO_AIM_PITCH_SENSITIVITY_PREF_STRING,
+                PreferenceConfiguration.DEFAULT_GYRO_AIM_PITCH_SENSITIVITY) / 100.0f;
+        gyroAimSideSensitivity = prefs.getInt(PreferenceConfiguration.GYRO_AIM_SIDE_SENSITIVITY_PREF_STRING,
+                PreferenceConfiguration.DEFAULT_GYRO_AIM_SIDE_SENSITIVITY) / 100.0f;
+        gyroAimVerticalSensitivity = prefs.getInt(PreferenceConfiguration.GYRO_AIM_VERTICAL_SENSITIVITY_PREF_STRING,
+                PreferenceConfiguration.DEFAULT_GYRO_AIM_VERTICAL_SENSITIVITY) / 100.0f;
+        gyroAimDeadzoneCompensation = prefs.getInt(PreferenceConfiguration.GYRO_AIM_DEADZONE_COMPENSATION_PREF_STRING,
+                PreferenceConfiguration.DEFAULT_GYRO_AIM_DEADZONE_COMPENSATION) / 100.0f;
+        gyroAimLinkSideAxes = prefs.getBoolean(PreferenceConfiguration.GYRO_AIM_LINK_SIDE_AXES_PREF_STRING,
+                PreferenceConfiguration.DEFAULT_GYRO_AIM_LINK_SIDE_AXES);
+        if (gyroAimLinkSideAxes) {
+            gyroAimVerticalSensitivity = gyroAimSideSensitivity;
+        }
     }
 
     @Override
@@ -778,7 +809,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         if ((Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU ||
                 (Build.VERSION.SDK_INT == Build.VERSION_CODES.S &&
                         (context.vendorId == 0x054c || context.vendorId == 0x057e))) && // Sony or Nintendo
-                prefConfig.gamepadMotionSensors) {
+                (prefConfig.gamepadMotionSensors || prefConfig.gyroToRightStick)) {
             if (dev.getSensorManager().getDefaultSensor(Sensor.TYPE_ACCELEROMETER) != null || dev.getSensorManager().getDefaultSensor(Sensor.TYPE_GYROSCOPE) != null) {
                 context.sensorManager = dev.getSensorManager();
             }
@@ -1356,6 +1387,270 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         }
     }
 
+    private short clampStickValue(int value) {
+        return (short) Math.max(Short.MIN_VALUE + 1, Math.min(Short.MAX_VALUE, value));
+    }
+
+    private float clampUnit(float value) {
+        return Math.max(-1.0f, Math.min(1.0f, value));
+    }
+
+    private void updateCombinedRightStick(GenericControllerContext context) {
+        context.rightStickX = clampStickValue(context.baseRightStickX + context.gyroRightStickX);
+        context.rightStickY = clampStickValue(context.baseRightStickY + context.gyroRightStickY);
+    }
+
+    private void setBaseRightStick(GenericControllerContext context, short x, short y) {
+        context.baseRightStickX = x;
+        context.baseRightStickY = y;
+        updateCombinedRightStick(context);
+    }
+
+    private void setGyroRightStick(GenericControllerContext context, float x, float y) {
+        context.gyroAimStickX += (x - context.gyroAimStickX) * GYRO_AIM_STICK_ALPHA;
+        context.gyroAimStickY += (y - context.gyroAimStickY) * GYRO_AIM_STICK_ALPHA;
+
+        float outputX = context.gyroAimStickX;
+        float outputY = context.gyroAimStickY;
+        if (gyroAimDeadzoneCompensation > 0.0f) {
+            float magnitude = (float) Math.sqrt((outputX * outputX) + (outputY * outputY));
+            if (magnitude > GYRO_AIM_COMPENSATION_INPUT_THRESHOLD &&
+                    magnitude < gyroAimDeadzoneCompensation) {
+                float scale = gyroAimDeadzoneCompensation / magnitude;
+                outputX *= scale;
+                outputY *= scale;
+            }
+        }
+
+        context.gyroRightStickX = (short) (clampUnit(outputX) * 0x7FFE);
+        context.gyroRightStickY = (short) (clampUnit(outputY) * 0x7FFE);
+        updateCombinedRightStick(context);
+    }
+
+    private void resetGyroRightStick(GenericControllerContext context) {
+        context.gyroAimStickX = 0;
+        context.gyroAimStickY = 0;
+        context.gyroRightStickX = 0;
+        context.gyroRightStickY = 0;
+        updateCombinedRightStick(context);
+    }
+
+    private void setGyroRightStickFromMotion(GenericControllerContext context,
+                                             float gyroX, float gyroY, float gyroZ,
+                                             float sensitivity) {
+        float verticalSensitivity = gyroAimLinkSideAxes ? gyroAimSideSensitivity : gyroAimVerticalSensitivity;
+        float yaw = (gyroY * gyroAimSideSensitivity) + (gyroZ * verticalSensitivity);
+        float pitch = gyroX;
+        setGyroRightStick(context,
+                yaw * sensitivity * GYRO_AIM_HORIZONTAL_GAIN,
+                pitch * sensitivity * gyroAimPitchSensitivity);
+    }
+
+    private float[] getCorrectedMotionValues(float[] values, boolean needsDeviceOrientationCorrection) {
+        int x = 0;
+        int y = 1;
+        int z = 2;
+        int xFactor = 1;
+        int yFactor = 1;
+        int zFactor = 1;
+
+        if (needsDeviceOrientationCorrection) {
+            int deviceRotation = activityContext.getWindowManager().getDefaultDisplay().getRotation();
+            switch (deviceRotation) {
+                case Surface.ROTATION_0:
+                case Surface.ROTATION_180:
+                    x = 0;
+                    y = 2;
+                    z = 1;
+                    break;
+
+                case Surface.ROTATION_90:
+                case Surface.ROTATION_270:
+                    x = 1;
+                    y = 2;
+                    z = 0;
+                    break;
+            }
+
+            switch (deviceRotation) {
+                case Surface.ROTATION_0:
+                    zFactor = -1;
+                    break;
+                case Surface.ROTATION_90:
+                    xFactor = -1;
+                    zFactor = -1;
+                    break;
+                case Surface.ROTATION_180:
+                    xFactor = -1;
+                    break;
+                case Surface.ROTATION_270:
+                    break;
+            }
+        }
+
+        return new float[] {
+                values[x] * xFactor,
+                values[y] * yFactor,
+                values[z] * zFactor
+        };
+    }
+
+    private SensorEventListener createGyroAimListener(final InputDeviceContext context,
+                                                      final boolean needsDeviceOrientationCorrection) {
+        return new SensorEventListener() {
+            @Override
+            public void onSensorChanged(SensorEvent sensorEvent) {
+                float[] values = getCorrectedMotionValues(sensorEvent.values, needsDeviceOrientationCorrection);
+                setGyroRightStickFromMotion(context,
+                        values[0], values[1], values[2],
+                        GYRO_AIM_SENSOR_SENSITIVITY);
+                sendControllerInputPacket(context);
+            }
+
+            @Override
+            public void onAccuracyChanged(Sensor sensor, int accuracy) {}
+        };
+    }
+
+    private void stopGyroAim(GenericControllerContext context) {
+        context.gyroAimActive = false;
+        resetGyroRightStick(context);
+
+        if (context instanceof InputDeviceContext) {
+            InputDeviceContext deviceContext = (InputDeviceContext) context;
+            if (deviceContext.gyroAimListener != null && deviceContext.sensorManager != null) {
+                deviceContext.sensorManager.unregisterListener(deviceContext.gyroAimListener);
+                deviceContext.gyroAimListener = null;
+            }
+        }
+    }
+
+    private boolean startGyroAim(GenericControllerContext context) {
+        assignControllerNumberIfNeeded(context);
+
+        if (context instanceof InputDeviceContext && !(context instanceof UsbDeviceContext)) {
+            InputDeviceContext deviceContext = (InputDeviceContext) context;
+            if (deviceContext.sensorManager == null &&
+                    prefConfig.gamepadMotionSensorsFallbackToDevice &&
+                    context.controllerNumber == 0) {
+                deviceContext.sensorManager = deviceSensorManager;
+            }
+
+            if (deviceContext.sensorManager == null) {
+                return false;
+            }
+
+            Sensor gyroSensor = deviceContext.sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
+            if (gyroSensor == null) {
+                return false;
+            }
+
+            if (deviceContext.gyroAimListener != null) {
+                deviceContext.sensorManager.unregisterListener(deviceContext.gyroAimListener);
+            }
+
+            boolean useDeviceSensors = deviceContext.sensorManager == deviceSensorManager;
+            deviceContext.gyroAimListener = createGyroAimListener(deviceContext,
+                    useDeviceSensors);
+            deviceContext.sensorManager.registerListener(deviceContext.gyroAimListener,
+                    gyroSensor, 1000000 / GYRO_AIM_REPORT_RATE_HZ);
+        }
+
+        context.gyroAimActive = true;
+        return true;
+    }
+
+    private void toggleGyroAim(GenericControllerContext context) {
+        if (context.gyroAimActive) {
+            stopGyroAim(context);
+            Toast.makeText(activityContext, "Gyro aim: OFF", Toast.LENGTH_SHORT).show();
+        }
+        else if (startGyroAim(context)) {
+            Toast.makeText(activityContext, "Gyro aim: ON", Toast.LENGTH_SHORT).show();
+        }
+        else {
+            Toast.makeText(activityContext, "Gyro aim unavailable", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private boolean isGyroAimShareKey(int keyCode) {
+        return keyCode == KeyEvent.KEYCODE_MEDIA_RECORD ||
+                keyCode == KeyEvent.KEYCODE_BUTTON_SELECT;
+    }
+
+    private void updateGyroAimComboState(GenericControllerContext context, int keyCode, boolean pressed) {
+        if (isGyroAimShareKey(keyCode)) {
+            context.gyroAimShareDown = pressed;
+        }
+        else if (keyCode == KeyEvent.KEYCODE_BUTTON_Y) {
+            context.gyroAimTriangleDown = pressed;
+        }
+
+        if (!context.gyroAimShareDown || !context.gyroAimTriangleDown) {
+            context.gyroAimToggleComboLatched = false;
+        }
+    }
+
+    private boolean handleGyroAimToggleCombo(GenericControllerContext context) {
+        if (!prefConfig.gyroToRightStick) {
+            return false;
+        }
+
+        if (context.gyroAimShareDown && context.gyroAimTriangleDown && !context.gyroAimToggleComboLatched) {
+            context.gyroAimToggleComboLatched = true;
+            context.inputMap &= ~(ControllerPacket.MISC_FLAG | ControllerPacket.Y_FLAG | ControllerPacket.X_FLAG);
+            toggleGyroAim(context);
+            sendControllerInputPacket(context);
+            return true;
+        }
+
+        return false;
+    }
+
+    private boolean handleGyroAimComboButtonDown(GenericControllerContext context, int keyCode) {
+        if (!prefConfig.gyroToRightStick) {
+            return false;
+        }
+
+        if (isGyroAimShareKey(keyCode)) {
+            context.gyroAimShareDown = true;
+            context.gyroAimToggleComboLatched = false;
+            return true;
+        }
+
+        if (keyCode == KeyEvent.KEYCODE_BUTTON_Y && context.gyroAimShareDown) {
+            context.gyroAimTriangleDown = true;
+            context.gyroAimToggleComboLatched = true;
+            context.gyroAimSuppressTriangleUp = true;
+            toggleGyroAim(context);
+            sendControllerInputPacket(context);
+            return true;
+        }
+
+        return false;
+    }
+
+    private boolean handleGyroAimComboButtonUp(GenericControllerContext context, int keyCode) {
+        if (!prefConfig.gyroToRightStick) {
+            return false;
+        }
+
+        if (isGyroAimShareKey(keyCode)) {
+            context.gyroAimShareDown = false;
+            context.gyroAimToggleComboLatched = false;
+            return true;
+        }
+
+        if (keyCode == KeyEvent.KEYCODE_BUTTON_Y &&
+                (context.gyroAimShareDown || context.gyroAimSuppressTriangleUp)) {
+            context.gyroAimTriangleDown = false;
+            context.gyroAimSuppressTriangleUp = false;
+            return true;
+        }
+
+        return false;
+    }
+
     private final int REMAP_IGNORE = -1;
     private final int REMAP_CONSUME = -2;
 
@@ -1714,8 +2009,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
             handleDeadZone(rightStickVector, context.rightStickDeadzoneRadius);
 
-            context.rightStickX = (short) (rightStickVector.getX() * 0x7FFE);
-            context.rightStickY = (short) (-rightStickVector.getY() * 0x7FFE);
+            setBaseRightStick(context,
+                    (short) (rightStickVector.getX() * 0x7FFE),
+                    (short) (-rightStickVector.getY() * 0x7FFE));
         }
 
         if (context.leftTriggerAxis != -1 && context.rightTriggerAxis != -1) {
@@ -2469,6 +2765,10 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             return (keyCode == REMAP_CONSUME);
         }
 
+        if (handleGyroAimComboButtonUp(context, keyCode)) {
+            return true;
+        }
+
         if (prefConfig.flipFaceButtons) {
             keyCode = handleFlipFaceButtons(keyCode);
         }
@@ -2716,6 +3016,10 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             return (keyCode == REMAP_CONSUME);
         }
 
+        if (handleGyroAimComboButtonDown(context, keyCode)) {
+            return true;
+        }
+
         if (prefConfig.flipFaceButtons) {
             keyCode = handleFlipFaceButtons(keyCode);
         }
@@ -2877,6 +3181,10 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             return false;
         }
 
+        if (handleGyroAimToggleCombo(context)) {
+            return true;
+        }
+
         // Start+Back+LB+RB is the quit combo
         if (context.inputMap == (ControllerPacket.BACK_FLAG | ControllerPacket.PLAY_FLAG |
                                  ControllerPacket.LB_FLAG | ControllerPacket.RB_FLAG)) {
@@ -2947,8 +3255,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         defaultContext.leftStickX = leftStickX;
         defaultContext.leftStickY = leftStickY;
 
-        defaultContext.rightStickX = rightStickX;
-        defaultContext.rightStickY = rightStickY;
+        setBaseRightStick(defaultContext, rightStickX, rightStickY);
 
         defaultContext.leftTrigger = leftTrigger;
         defaultContext.rightTrigger = rightTrigger;
@@ -2979,8 +3286,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
         handleDeadZone(rightStickVector, context.rightStickDeadzoneRadius);
 
-        context.rightStickX = (short) (rightStickVector.getX() * 0x7FFE);
-        context.rightStickY = (short) (-rightStickVector.getY() * 0x7FFE);
+        setBaseRightStick(context,
+                (short) (rightStickVector.getX() * 0x7FFE),
+                (short) (-rightStickVector.getY() * 0x7FFE));
 
         if (leftTrigger <= context.triggerDeadzone) {
             leftTrigger = 0;
@@ -3002,6 +3310,15 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         GenericControllerContext context = usbDeviceContexts.get(controllerId);
         if (context == null) {
             return;
+        }
+
+        if (context.gyroAimActive) {
+            if (motionType == MoonBridge.LI_MOTION_TYPE_GYRO) {
+                setGyroRightStickFromMotion(context,
+                        motionX, motionY, motionZ,
+                        GYRO_AIM_DRIVER_SENSITIVITY);
+                sendControllerInputPacket(context);
+            }
         }
 
         conn.sendControllerMotionEvent((byte)context.controllerNumber, motionType, motionX, motionY, motionZ);
@@ -3048,8 +3365,19 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         public byte rightTrigger = 0x00;
         public short rightStickX = 0x0000;
         public short rightStickY = 0x0000;
+        public short baseRightStickX = 0x0000;
+        public short baseRightStickY = 0x0000;
+        public short gyroRightStickX = 0x0000;
+        public short gyroRightStickY = 0x0000;
         public short leftStickX = 0x0000;
         public short leftStickY = 0x0000;
+        public float gyroAimStickX;
+        public float gyroAimStickY;
+        public boolean gyroAimActive;
+        public boolean gyroAimShareDown;
+        public boolean gyroAimTriangleDown;
+        public boolean gyroAimToggleComboLatched;
+        public boolean gyroAimSuppressTriangleUp;
 
         public boolean mouseEmulationActive;
         public boolean mouseEmulationXDown = false;
@@ -3108,6 +3436,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
         public void destroy() {
             mouseEmulationActive = false;
+            stopGyroAim(this);
             mainThreadHandler.removeCallbacks(mouseEmulationRunnable);
         }
 
@@ -3125,6 +3454,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
         public SensorManager sensorManager;
         public SensorEventListener gyroListener;
+        public SensorEventListener gyroAimListener;
         public short gyroReportRateHz;
         public SensorEventListener accelListener;
         public short accelReportRateHz;

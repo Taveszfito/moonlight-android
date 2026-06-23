@@ -31,6 +31,7 @@ public class StreamConfiguration {
     private int colorSpace;
     private boolean persistGamepadsAfterDisconnect;
     private boolean enableUltraLowLatency;
+    private boolean forceRelaunch;
 
     public static class Builder {
         private StreamConfiguration config = new StreamConfiguration();
@@ -146,6 +147,11 @@ public class StreamConfiguration {
             return this;
         }
 
+        public StreamConfiguration.Builder setForceRelaunch(boolean forceRelaunch) {
+            config.forceRelaunch = forceRelaunch;
+            return this;
+        }
+
         public StreamConfiguration build() {
             return config;
         }
@@ -169,6 +175,7 @@ public class StreamConfiguration {
         this.supportedVideoFormats = MoonBridge.VIDEO_FORMAT_H264;
         this.attachedGamepadMask = 0;
         this.enableUltraLowLatency = false;
+        this.forceRelaunch = false;
     }
     
     public int getWidth() {
@@ -196,6 +203,8 @@ public class StreamConfiguration {
     }
 
     public boolean getVirtualDisplay() { return virtualDisplay; }
+
+    public boolean getForceRelaunch() { return forceRelaunch; }
 
     public int getResolutionScaleFactor() { return resolutionScaleFactor; }
     
