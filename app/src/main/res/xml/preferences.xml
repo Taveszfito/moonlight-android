@@ -312,6 +312,12 @@
             app:iconSpaceReserved="false" />
         <CheckBoxPreference
             android:defaultValue="false"
+            android:key="checkbox_controller_kbm_mode"
+            android:summary="@string/summary_checkbox_controller_kbm_mode"
+            android:title="@string/title_checkbox_controller_kbm_mode"
+            app:iconSpaceReserved="false" />
+        <CheckBoxPreference
+            android:defaultValue="false"
             android:key="checkbox_gamepad_motion_fallback"
             android:summary="@string/summary_checkbox_gamepad_motion_fallback"
             android:title="@string/title_checkbox_gamepad_motion_fallback"

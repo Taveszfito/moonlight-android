@@ -5,22 +5,33 @@ import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.graphics.Color;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.Editable;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
+import android.text.TextWatcher;
 import android.text.TextUtils;
+import android.text.style.ForegroundColorSpan;
 import android.view.ContextThemeWrapper;
 import android.view.DragEvent;
 import android.view.Gravity;
+import android.view.KeyCharacterMap;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
+import android.widget.EditText;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.SeekBar;
+import android.widget.ScrollView;
+import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -29,6 +40,7 @@ import androidx.preference.PreferenceManager;
 
 import com.limelight.binding.input.GameInputDevice;
 import com.limelight.binding.input.KeyboardTranslator;
+import com.limelight.binding.input.ControllerKbmMapper;
 import com.limelight.preferences.PreferenceConfiguration;
 import com.limelight.utils.KeyConfigHelper;
 import com.limelight.utils.KeyMapper;
@@ -73,6 +85,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
     private static final String ADV_TASK_MANAGER = "advanced_task_manager";
     private static final String ADV_VOLUME_BUTTONS = "advanced_volume_buttons";
     private static final String ADV_GYRO_AIM_SETTINGS = "advanced_gyro_aim_settings";
+    private static final String ADV_CONTROLLER_KBM = "advanced_controller_kbm";
     private static final String ADV_SEND_KEYS = "advanced_send_keys";
     private static final String ADV_TOUCH_SENSITIVITY = "advanced_touch_sensitivity";
 
@@ -635,6 +648,675 @@ public class GameMenu implements Game.GameMenuCallbacks {
         currentDialog.show();
     }
 
+    private String getControllerKbmSourceLabel(String source) {
+        switch (source) {
+            case ControllerKbmMapper.SOURCE_A: return "A / Cross";
+            case ControllerKbmMapper.SOURCE_B: return "B / Circle";
+            case ControllerKbmMapper.SOURCE_X: return "X / Square";
+            case ControllerKbmMapper.SOURCE_Y: return "Y / Triangle";
+            case ControllerKbmMapper.SOURCE_DPAD_UP: return "D-pad Up";
+            case ControllerKbmMapper.SOURCE_DPAD_DOWN: return "D-pad Down";
+            case ControllerKbmMapper.SOURCE_DPAD_LEFT: return "D-pad Left";
+            case ControllerKbmMapper.SOURCE_DPAD_RIGHT: return "D-pad Right";
+            case ControllerKbmMapper.SOURCE_LB: return "LB / L1";
+            case ControllerKbmMapper.SOURCE_RB: return "RB / R1";
+            case ControllerKbmMapper.SOURCE_L3: return "Left Stick Click";
+            case ControllerKbmMapper.SOURCE_R3: return "Right Stick Click";
+            case ControllerKbmMapper.SOURCE_START: return "Start / Options";
+            case ControllerKbmMapper.SOURCE_SELECT: return "Select / Create";
+            case ControllerKbmMapper.SOURCE_GUIDE: return "Guide / PS";
+            case ControllerKbmMapper.SOURCE_SHARE: return "Share / Capture";
+            case ControllerKbmMapper.SOURCE_TOUCHPAD: return "Touchpad Click";
+            case ControllerKbmMapper.SOURCE_PADDLE_1: return "Rear Paddle 1";
+            case ControllerKbmMapper.SOURCE_PADDLE_2: return "Rear Paddle 2";
+            case ControllerKbmMapper.SOURCE_PADDLE_3: return "Rear Paddle 3";
+            case ControllerKbmMapper.SOURCE_PADDLE_4: return "Rear Paddle 4";
+            case ControllerKbmMapper.SOURCE_LT: return "LT / L2";
+            case ControllerKbmMapper.SOURCE_RT: return "RT / R2";
+            case ControllerKbmMapper.SOURCE_LEFT_STICK: return "Left Stick";
+            case ControllerKbmMapper.SOURCE_RIGHT_STICK: return "Right Stick";
+            default:
+                if (source.startsWith("keycode_")) {
+                    try {
+                        return KeyEvent.keyCodeToString(
+                                Integer.parseInt(source.substring("keycode_".length())));
+                    }
+                    catch (NumberFormatException ignored) {}
+                }
+                if (source.startsWith("scancode_")) {
+                    return "Controller scan code " + source.substring("scancode_".length());
+                }
+                return source;
+        }
+    }
+
+    private String getControllerKbmActionLabel(String action) {
+        if (action == null || action.isEmpty()) {
+            return getString(R.string.game_menu_controller_kbm_unassigned);
+        }
+        if (action.startsWith(ControllerKbmMapper.ACTION_KEY_PREFIX)) {
+            try {
+                int keyCode = Integer.parseInt(
+                        action.substring(ControllerKbmMapper.ACTION_KEY_PREFIX.length()));
+                return KeyEvent.keyCodeToString(keyCode).replace("KEYCODE_", "");
+            }
+            catch (NumberFormatException ignored) {
+                return getString(R.string.game_menu_controller_kbm_unassigned);
+            }
+        }
+        switch (action) {
+            case ControllerKbmMapper.ACTION_MOUSE_LEFT:
+                return getString(R.string.game_menu_controller_kbm_mouse_left);
+            case ControllerKbmMapper.ACTION_MOUSE_RIGHT:
+                return getString(R.string.game_menu_controller_kbm_mouse_right);
+            case ControllerKbmMapper.ACTION_MOUSE_MIDDLE:
+                return getString(R.string.game_menu_controller_kbm_mouse_middle);
+            case ControllerKbmMapper.ACTION_MOUSE_BACK:
+                return getString(R.string.game_menu_controller_kbm_mouse_back);
+            case ControllerKbmMapper.ACTION_MOUSE_FORWARD:
+                return getString(R.string.game_menu_controller_kbm_mouse_forward);
+            case ControllerKbmMapper.ACTION_WHEEL_UP:
+                return getString(R.string.game_menu_controller_kbm_wheel_up);
+            case ControllerKbmMapper.ACTION_WHEEL_DOWN:
+                return getString(R.string.game_menu_controller_kbm_wheel_down);
+            case ControllerKbmMapper.ACTION_MOUSE_MOVE:
+                return getString(R.string.game_menu_controller_kbm_mouse_move);
+            case ControllerKbmMapper.ACTION_SCROLL:
+                return getString(R.string.game_menu_controller_kbm_scroll);
+            case ControllerKbmMapper.ACTION_BASIC_WASD:
+                return getString(R.string.game_menu_controller_kbm_basic_wasd);
+            case ControllerKbmMapper.ACTION_BASIC_ARROWS:
+                return getString(R.string.game_menu_controller_kbm_basic_arrows);
+            default:
+                return action;
+        }
+    }
+
+    private void showControllerKbmKeyboardCapture(GameInputDevice device,
+                                                   ControllerKbmMapper mapper, String source) {
+        EditText input = new EditText(getThemedContext());
+        input.setFocusableInTouchMode(true);
+        input.setHint(R.string.game_menu_controller_kbm_press_keyboard_key);
+        final boolean[] captured = { false };
+
+        AlertDialog dialog = new AlertDialog.Builder(getThemedContext())
+                .setTitle(R.string.game_menu_controller_kbm_keyboard_key)
+                .setView(input)
+                .setNegativeButton(R.string.game_menu_cancel,
+                        (ignored, which) -> showControllerKbmMenu(device))
+                .create();
+        dialog.setOnKeyListener((ignored, keyCode, event) -> {
+            if (captured[0] || event.getAction() != KeyEvent.ACTION_DOWN) {
+                return true;
+            }
+            captured[0] = true;
+            mapper.setAction(source, ControllerKbmMapper.ACTION_KEY_PREFIX + keyCode);
+            dialog.dismiss();
+            showControllerKbmMenu(device);
+            return true;
+        });
+        input.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence text, int start, int before, int count) {}
+
+            @Override
+            public void afterTextChanged(Editable text) {
+                if (captured[0] || text.length() == 0) {
+                    return;
+                }
+
+                // Soft keyboards usually commit text directly into EditText and only emit a
+                // KeyEvent for the final Enter. Convert the first committed character back to
+                // the Android key that would produce it, and finish before Enter can overwrite it.
+                KeyEvent[] events = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD)
+                        .getEvents(new char[] { text.charAt(0) });
+                if (events == null) {
+                    return;
+                }
+                for (KeyEvent event : events) {
+                    if (event.getAction() == KeyEvent.ACTION_DOWN &&
+                            !KeyEvent.isModifierKey(event.getKeyCode())) {
+                        captured[0] = true;
+                        mapper.setAction(source, ControllerKbmMapper.ACTION_KEY_PREFIX +
+                                event.getKeyCode());
+                        dialog.dismiss();
+                        showControllerKbmMenu(device);
+                        return;
+                    }
+                }
+            }
+        });
+        dialog.setOnShowListener(ignored -> input.requestFocus());
+        currentDialog = dialog;
+        dialog.show();
+    }
+
+    private void showControllerKbmActionPicker(GameInputDevice device,
+                                                ControllerKbmMapper mapper, String source) {
+        final String[] labels;
+        final String[] actions;
+        if (mapper.isAxisSource(source)) {
+            labels = new String[] {
+                    getString(R.string.game_menu_controller_kbm_unassigned),
+                    getString(R.string.game_menu_controller_kbm_mouse_move),
+                    getString(R.string.game_menu_controller_kbm_scroll),
+                    getString(R.string.game_menu_controller_kbm_basic_wasd),
+                    getString(R.string.game_menu_controller_kbm_basic_arrows)
+            };
+            actions = new String[] {
+                    ControllerKbmMapper.ACTION_UNASSIGNED,
+                    ControllerKbmMapper.ACTION_MOUSE_MOVE,
+                    ControllerKbmMapper.ACTION_SCROLL,
+                    ControllerKbmMapper.ACTION_BASIC_WASD,
+                    ControllerKbmMapper.ACTION_BASIC_ARROWS
+            };
+        }
+        else {
+            labels = new String[] {
+                    getString(R.string.game_menu_controller_kbm_unassigned),
+                    getString(R.string.game_menu_controller_kbm_keyboard_key),
+                    getString(R.string.game_menu_controller_kbm_mouse_left),
+                    getString(R.string.game_menu_controller_kbm_mouse_right),
+                    getString(R.string.game_menu_controller_kbm_mouse_middle),
+                    getString(R.string.game_menu_controller_kbm_mouse_back),
+                    getString(R.string.game_menu_controller_kbm_mouse_forward),
+                    getString(R.string.game_menu_controller_kbm_wheel_up),
+                    getString(R.string.game_menu_controller_kbm_wheel_down)
+            };
+            actions = new String[] {
+                    ControllerKbmMapper.ACTION_UNASSIGNED,
+                    ControllerKbmMapper.ACTION_KEY_PREFIX,
+                    ControllerKbmMapper.ACTION_MOUSE_LEFT,
+                    ControllerKbmMapper.ACTION_MOUSE_RIGHT,
+                    ControllerKbmMapper.ACTION_MOUSE_MIDDLE,
+                    ControllerKbmMapper.ACTION_MOUSE_BACK,
+                    ControllerKbmMapper.ACTION_MOUSE_FORWARD,
+                    ControllerKbmMapper.ACTION_WHEEL_UP,
+                    ControllerKbmMapper.ACTION_WHEEL_DOWN
+            };
+        }
+
+        currentDialog = new AlertDialog.Builder(getThemedContext())
+                .setTitle(getControllerKbmSourceLabel(source))
+                .setItems(labels, (dialog, which) -> {
+                    if (ControllerKbmMapper.ACTION_KEY_PREFIX.equals(actions[which])) {
+                        showControllerKbmKeyboardCapture(device, mapper, source);
+                    }
+                    else {
+                        mapper.setAction(source, actions[which]);
+                        showControllerKbmMenu(device);
+                    }
+                })
+                .setNegativeButton(R.string.game_menu_cancel,
+                        (dialog, which) -> showControllerKbmMenu(device))
+                .create();
+        currentDialog.show();
+    }
+
+    private void addControllerKbmSlider(LinearLayout layout, SharedPreferences prefs,
+                                         int labelRes, String key, int defaultValue,
+                                         int maxValue) {
+        TextView label = new TextView(getThemedContext());
+        SeekBar seekBar = new SeekBar(getThemedContext());
+        int value = prefs.getInt(key, defaultValue);
+        label.setText(getString(labelRes) + ": " + value + "%");
+        label.setTextSize(16);
+        seekBar.setMax(maxValue);
+        seekBar.setProgress(value);
+        seekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                if (fromUser) {
+                    prefs.edit().putInt(key, progress).apply();
+                    label.setText(getString(labelRes) + ": " + progress + "%");
+                }
+            }
+            @Override public void onStartTrackingTouch(SeekBar bar) {}
+            @Override public void onStopTrackingTouch(SeekBar bar) {}
+        });
+        layout.addView(label);
+        layout.addView(seekBar);
+    }
+
+    private void addControllerKbmRateSlider(LinearLayout layout, SharedPreferences prefs,
+                                             int labelRes, String key, int defaultValue,
+                                             int maxValue) {
+        TextView label = new TextView(getThemedContext());
+        SeekBar seekBar = new SeekBar(getThemedContext());
+        int value = prefs.getInt(key, defaultValue);
+        label.setText(getString(labelRes) + ": " + value + "/s");
+        label.setTextSize(16);
+        seekBar.setMax(maxValue);
+        seekBar.setProgress(value);
+        seekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                if (fromUser) {
+                    int rate = Math.max(1, progress);
+                    if (rate != progress) {
+                        bar.setProgress(rate);
+                        return;
+                    }
+                    prefs.edit().putInt(key, rate).apply();
+                    label.setText(getString(labelRes) + ": " + rate + "/s");
+                }
+            }
+            @Override public void onStartTrackingTouch(SeekBar bar) {}
+            @Override public void onStopTrackingTouch(SeekBar bar) {}
+        });
+        layout.addView(label);
+        layout.addView(seekBar);
+    }
+
+    private void showControllerKbmSettings(GameInputDevice device, ControllerKbmMapper mapper) {
+        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(game);
+        ScrollView scrollView = new ScrollView(getThemedContext());
+        LinearLayout layout = new LinearLayout(getThemedContext());
+        layout.setOrientation(LinearLayout.VERTICAL);
+        int padding = (int) (18 * game.getResources().getDisplayMetrics().density);
+        layout.setPadding(padding, padding / 2, padding, 0);
+        scrollView.addView(layout);
+
+        addControllerKbmSlider(layout, prefs, R.string.game_menu_controller_kbm_stick_speed,
+                ControllerKbmMapper.PREF_STICK_SPEED,
+                ControllerKbmMapper.DEFAULT_STICK_SPEED, 300);
+
+        Switch continuousStickSwitch = new Switch(getThemedContext());
+        continuousStickSwitch.setText(R.string.game_menu_controller_kbm_continuous_stick_mouse);
+        continuousStickSwitch.setChecked(prefs.getBoolean(
+                ControllerKbmMapper.PREF_CONTINUOUS_STICK_MOUSE, true));
+        continuousStickSwitch.setOnCheckedChangeListener((button, checked) ->
+                prefs.edit().putBoolean(
+                        ControllerKbmMapper.PREF_CONTINUOUS_STICK_MOUSE, checked).apply());
+        layout.addView(continuousStickSwitch);
+
+        addControllerKbmSlider(layout, prefs, R.string.game_menu_controller_kbm_trigger_threshold,
+                ControllerKbmMapper.PREF_TRIGGER_THRESHOLD,
+                ControllerKbmMapper.DEFAULT_TRIGGER_THRESHOLD, 100);
+
+        TextView triggerBehaviorLabel = new TextView(getThemedContext());
+        triggerBehaviorLabel.setText(R.string.game_menu_controller_kbm_trigger_behavior);
+        triggerBehaviorLabel.setTextSize(16);
+        layout.addView(triggerBehaviorLabel);
+
+        Spinner triggerBehaviorSpinner = new Spinner(getThemedContext());
+        String[] triggerBehaviorLabels = {
+                getString(R.string.game_menu_controller_kbm_trigger_hold),
+                getString(R.string.game_menu_controller_kbm_trigger_single),
+                getString(R.string.game_menu_controller_kbm_trigger_repeat)
+        };
+        String[] triggerBehaviorValues = {
+                ControllerKbmMapper.TRIGGER_BEHAVIOR_HOLD,
+                ControllerKbmMapper.TRIGGER_BEHAVIOR_SINGLE,
+                ControllerKbmMapper.TRIGGER_BEHAVIOR_REPEAT
+        };
+        ArrayAdapter<String> triggerBehaviorAdapter = new ArrayAdapter<>(
+                getThemedContext(), android.R.layout.simple_spinner_item,
+                triggerBehaviorLabels);
+        triggerBehaviorAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        triggerBehaviorSpinner.setAdapter(triggerBehaviorAdapter);
+        String currentTriggerBehavior = prefs.getString(
+                ControllerKbmMapper.PREF_TRIGGER_BEHAVIOR,
+                ControllerKbmMapper.TRIGGER_BEHAVIOR_HOLD);
+        triggerBehaviorSpinner.setSelection(
+                ControllerKbmMapper.TRIGGER_BEHAVIOR_SINGLE.equals(currentTriggerBehavior) ? 1 :
+                        ControllerKbmMapper.TRIGGER_BEHAVIOR_REPEAT.equals(currentTriggerBehavior) ? 2 : 0);
+        layout.addView(triggerBehaviorSpinner);
+
+        addControllerKbmRateSlider(layout, prefs,
+                R.string.game_menu_controller_kbm_trigger_repeat_rate,
+                ControllerKbmMapper.PREF_TRIGGER_REPEAT_RATE,
+                ControllerKbmMapper.DEFAULT_TRIGGER_REPEAT_RATE, 20);
+        TextView repeatRateLabel = (TextView) layout.getChildAt(layout.getChildCount() - 2);
+        SeekBar repeatRateSeekBar = (SeekBar) layout.getChildAt(layout.getChildCount() - 1);
+        boolean repeatSelected = ControllerKbmMapper.TRIGGER_BEHAVIOR_REPEAT.equals(
+                currentTriggerBehavior);
+        repeatRateLabel.setEnabled(repeatSelected);
+        repeatRateSeekBar.setEnabled(repeatSelected);
+        triggerBehaviorSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                String value = triggerBehaviorValues[position];
+                prefs.edit().putString(ControllerKbmMapper.PREF_TRIGGER_BEHAVIOR, value).apply();
+                boolean repeat = ControllerKbmMapper.TRIGGER_BEHAVIOR_REPEAT.equals(value);
+                repeatRateLabel.setEnabled(repeat);
+                repeatRateSeekBar.setEnabled(repeat);
+            }
+
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
+        });
+
+        Switch gyroSwitch = new Switch(getThemedContext());
+        gyroSwitch.setText(R.string.game_menu_controller_kbm_gyro);
+        gyroSwitch.setChecked(prefs.getBoolean(ControllerKbmMapper.PREF_GYRO_ENABLED, false));
+        layout.addView(gyroSwitch);
+        addControllerKbmSlider(layout, prefs, R.string.game_menu_controller_kbm_gyro_sensitivity,
+                ControllerKbmMapper.PREF_GYRO_SENSITIVITY,
+                ControllerKbmMapper.DEFAULT_GYRO_SENSITIVITY, 300);
+        TextView gyroLabel = (TextView) layout.getChildAt(layout.getChildCount() - 2);
+        SeekBar gyroSensitivity = (SeekBar) layout.getChildAt(layout.getChildCount() - 1);
+
+        Switch gyroInvertX = new Switch(getThemedContext());
+        gyroInvertX.setText(R.string.game_menu_controller_kbm_gyro_invert_x);
+        gyroInvertX.setChecked(prefs.getBoolean(ControllerKbmMapper.PREF_GYRO_INVERT_X,
+                ControllerKbmMapper.DEFAULT_GYRO_INVERT_X));
+        gyroInvertX.setOnCheckedChangeListener((button, checked) ->
+                prefs.edit().putBoolean(ControllerKbmMapper.PREF_GYRO_INVERT_X, checked).apply());
+        layout.addView(gyroInvertX);
+
+        Switch gyroInvertY = new Switch(getThemedContext());
+        gyroInvertY.setText(R.string.game_menu_controller_kbm_gyro_invert_y);
+        gyroInvertY.setChecked(prefs.getBoolean(ControllerKbmMapper.PREF_GYRO_INVERT_Y, false));
+        gyroInvertY.setOnCheckedChangeListener((button, checked) ->
+                prefs.edit().putBoolean(ControllerKbmMapper.PREF_GYRO_INVERT_Y, checked).apply());
+        layout.addView(gyroInvertY);
+
+        Switch gyroInvertZ = new Switch(getThemedContext());
+        gyroInvertZ.setText(R.string.game_menu_controller_kbm_gyro_invert_z);
+        gyroInvertZ.setChecked(prefs.getBoolean(ControllerKbmMapper.PREF_GYRO_INVERT_Z, false));
+        gyroInvertZ.setOnCheckedChangeListener((button, checked) ->
+                prefs.edit().putBoolean(ControllerKbmMapper.PREF_GYRO_INVERT_Z, checked).apply());
+        layout.addView(gyroInvertZ);
+
+        gyroLabel.setEnabled(gyroSwitch.isChecked());
+        gyroSensitivity.setEnabled(gyroSwitch.isChecked());
+        gyroInvertX.setEnabled(gyroSwitch.isChecked());
+        gyroInvertY.setEnabled(gyroSwitch.isChecked());
+        gyroInvertZ.setEnabled(gyroSwitch.isChecked());
+        gyroSwitch.setOnCheckedChangeListener((button, checked) -> {
+            prefs.edit().putBoolean(ControllerKbmMapper.PREF_GYRO_ENABLED, checked).apply();
+            gyroLabel.setEnabled(checked);
+            gyroSensitivity.setEnabled(checked);
+            gyroInvertX.setEnabled(checked);
+            gyroInvertY.setEnabled(checked);
+            gyroInvertZ.setEnabled(checked);
+            game.refreshControllerKbmGyro();
+        });
+
+        currentDialog = new AlertDialog.Builder(getThemedContext())
+                .setTitle(R.string.game_menu_controller_kbm_settings)
+                .setView(scrollView)
+                .setPositiveButton(R.string.game_menu_done,
+                        (dialog, which) -> showControllerKbmMenu(device))
+                .create();
+        currentDialog.show();
+    }
+
+    private void showControllerKbmAddButton(GameInputDevice device, ControllerKbmMapper mapper) {
+        AlertDialog dialog = new AlertDialog.Builder(getThemedContext())
+                .setTitle(R.string.game_menu_controller_kbm_add_button)
+                .setMessage(R.string.game_menu_controller_kbm_press_button)
+                .setNegativeButton(R.string.game_menu_cancel,
+                        (ignored, which) -> showControllerKbmMenu(device))
+                .create();
+        dialog.setOnKeyListener((ignored, keyCode, event) -> {
+            if (event.getAction() != KeyEvent.ACTION_DOWN) {
+                return true;
+            }
+            String source = mapper.sourceForKeyEvent(event);
+            if (!mapper.addCustomSource(source)) {
+                Toast.makeText(game, R.string.game_menu_controller_kbm_duplicate_button,
+                        Toast.LENGTH_SHORT).show();
+                return true;
+            }
+            dialog.dismiss();
+            showControllerKbmMenu(device);
+            return true;
+        });
+        currentDialog = dialog;
+        dialog.show();
+    }
+
+    private CharSequence getControllerKbmPresetDisplayName(ControllerKbmMapper.Preset preset) {
+        SpannableStringBuilder text = new SpannableStringBuilder(preset.baseName);
+        if (preset.duplicateIndex > 0) {
+            int start = text.length();
+            text.append(" (").append(String.valueOf(preset.duplicateIndex)).append(")");
+            text.setSpan(new ForegroundColorSpan(Color.GRAY), start, text.length(),
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        return text;
+    }
+
+    private void showControllerKbmSavePreset(GameInputDevice device, ControllerKbmMapper mapper) {
+        EditText nameInput = new EditText(getThemedContext());
+        nameInput.setSingleLine(true);
+        nameInput.setHint(R.string.game_menu_controller_kbm_preset_name);
+
+        AlertDialog dialog = new AlertDialog.Builder(getThemedContext())
+                .setTitle(R.string.game_menu_controller_kbm_save_preset)
+                .setView(nameInput)
+                .setPositiveButton(android.R.string.ok, null)
+                .setNegativeButton(R.string.game_menu_cancel,
+                        (ignored, which) -> showControllerKbmMenu(device))
+                .create();
+        dialog.setOnShowListener(ignored -> {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+                ControllerKbmMapper.Preset preset =
+                        mapper.savePreset(nameInput.getText().toString());
+                if (preset != null) {
+                    dialog.dismiss();
+                    showControllerKbmMenu(device);
+                }
+                else {
+                    nameInput.setError(getString(R.string.game_menu_controller_kbm_preset_name));
+                }
+            });
+            nameInput.requestFocus();
+        });
+        currentDialog = dialog;
+        dialog.show();
+    }
+
+    private void confirmControllerKbmPresetDelete(GameInputDevice device,
+                                                   ControllerKbmMapper mapper,
+                                                   ControllerKbmMapper.Preset preset) {
+        new AlertDialog.Builder(getThemedContext())
+                .setTitle(R.string.game_menu_controller_kbm_delete_preset)
+                .setMessage(game.getString(R.string.game_menu_controller_kbm_delete_preset_confirm,
+                        preset.getDisplayName()))
+                .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+                    mapper.deletePreset(preset.id);
+                    showControllerKbmLoadPreset(device, mapper);
+                })
+                .setNegativeButton(R.string.game_menu_cancel,
+                        (dialog, which) -> showControllerKbmLoadPreset(device, mapper))
+                .show();
+    }
+
+    private void showControllerKbmLoadPreset(GameInputDevice device, ControllerKbmMapper mapper) {
+        List<ControllerKbmMapper.Preset> presets = mapper.getPresets();
+        if (presets.isEmpty()) {
+            new AlertDialog.Builder(getThemedContext())
+                    .setTitle(R.string.game_menu_controller_kbm_load_preset)
+                    .setMessage(R.string.game_menu_controller_kbm_no_presets)
+                    .setPositiveButton(android.R.string.ok,
+                            (dialog, which) -> showControllerKbmMenu(device))
+                    .show();
+            return;
+        }
+
+        ListView list = new ListView(getThemedContext());
+        ArrayAdapter<ControllerKbmMapper.Preset> adapter =
+                new ArrayAdapter<ControllerKbmMapper.Preset>(
+                        getThemedContext(), android.R.layout.simple_list_item_1, presets) {
+                    @Override
+                    public View getView(int position, View convertView, ViewGroup parent) {
+                        ControllerKbmMapper.Preset preset = getItem(position);
+                        LinearLayout row = new LinearLayout(getThemedContext());
+                        row.setGravity(Gravity.CENTER_VERTICAL);
+                        int padding = (int) (12 *
+                                game.getResources().getDisplayMetrics().density);
+
+                        TextView name = new TextView(getThemedContext());
+                        name.setText(getControllerKbmPresetDisplayName(preset));
+                        name.setTextSize(18);
+                        name.setPadding(padding, padding, padding, padding);
+                        row.addView(name, new LinearLayout.LayoutParams(
+                                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+                        View.OnClickListener loadPreset = view -> {
+                            game.loadControllerKbmPreset(preset);
+                            if (currentDialog != null) {
+                                currentDialog.dismiss();
+                            }
+                            showControllerKbmMenu(device);
+                        };
+                        row.setOnClickListener(loadPreset);
+                        name.setOnClickListener(loadPreset);
+
+                        ImageButton delete = new ImageButton(getThemedContext());
+                        delete.setImageResource(android.R.drawable.ic_menu_delete);
+                        delete.setBackgroundColor(0x00000000);
+                        delete.setFocusable(false);
+                        delete.setFocusableInTouchMode(false);
+                        delete.setContentDescription(
+                                getString(R.string.game_menu_controller_kbm_delete_preset));
+                        delete.setOnClickListener(view -> {
+                            if (currentDialog != null) {
+                                currentDialog.dismiss();
+                            }
+                            confirmControllerKbmPresetDelete(device, mapper, preset);
+                        });
+                        row.addView(delete);
+                        return row;
+                    }
+                };
+        list.setAdapter(adapter);
+        list.setOnItemClickListener((parent, view, position, id) -> {
+            ControllerKbmMapper.Preset preset = adapter.getItem(position);
+            if (preset != null) {
+                game.loadControllerKbmPreset(preset);
+            }
+            if (currentDialog != null) {
+                currentDialog.dismiss();
+            }
+            showControllerKbmMenu(device);
+        });
+
+        currentDialog = new AlertDialog.Builder(getThemedContext())
+                .setTitle(R.string.game_menu_controller_kbm_load_preset)
+                .setView(list)
+                .setNegativeButton(R.string.game_menu_cancel,
+                        (dialog, which) -> showControllerKbmMenu(device))
+                .create();
+        currentDialog.show();
+    }
+
+    private void confirmControllerKbmReset(GameInputDevice device, ControllerKbmMapper mapper) {
+        new AlertDialog.Builder(getThemedContext())
+                .setTitle(R.string.game_menu_controller_kbm_reset)
+                .setMessage(R.string.game_menu_controller_kbm_reset_confirm)
+                .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+                    game.resetControllerKbmMappings();
+                    showControllerKbmMenu(device);
+                })
+                .setNegativeButton(R.string.game_menu_cancel,
+                        (dialog, which) -> showControllerKbmMenu(device))
+                .show();
+    }
+
+    private void showControllerKbmMenu(GameInputDevice device) {
+        ControllerKbmMapper mapper = game.getControllerKbmMapper();
+        if (mapper == null) {
+            return;
+        }
+        List<MenuOption> options = new ArrayList<>();
+        options.add(new MenuOption(getString(R.string.game_menu_controller_kbm_settings),
+                () -> showControllerKbmSettings(device, mapper)));
+        for (String source : mapper.getSources()) {
+            options.add(new MenuOption(getControllerKbmSourceLabel(source) + "  →  " +
+                    getControllerKbmActionLabel(mapper.getAction(source)),
+                    () -> showControllerKbmActionPicker(device, mapper, source)));
+        }
+        options.add(new MenuOption(getString(R.string.game_menu_controller_kbm_add_button),
+                () -> showControllerKbmAddButton(device, mapper)));
+        options.add(new MenuOption(MENU_CANCEL, getString(R.string.game_menu_cancel),
+                () -> showAdvancedMenu(device)));
+
+        LinearLayout layout = new LinearLayout(getThemedContext());
+        layout.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout header = new LinearLayout(getThemedContext());
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        int padding = (int) (12 * game.getResources().getDisplayMetrics().density);
+        header.setPadding(padding, padding / 2, padding, padding / 2);
+
+        ControllerKbmMapper.Preset matchingPreset = mapper.getMatchingPreset();
+        TextView title = new TextView(getThemedContext());
+        SpannableStringBuilder titleText = new SpannableStringBuilder(
+                getString(R.string.game_menu_controller_kbm));
+        titleText.append("\n").append(getString(R.string.game_menu_controller_kbm_current_preset)
+                .replace("%1$s", ""));
+        if (matchingPreset != null) {
+            titleText.append(getControllerKbmPresetDisplayName(matchingPreset));
+        }
+        else {
+            titleText.append(getString(R.string.game_menu_controller_kbm_temporary));
+        }
+        title.setText(titleText);
+        title.setTextSize(18);
+        header.addView(title, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        ImageButton savePreset = new ImageButton(getThemedContext());
+        savePreset.setImageResource(android.R.drawable.ic_menu_save);
+        savePreset.setBackgroundColor(0x00000000);
+        savePreset.setContentDescription(
+                getString(R.string.game_menu_controller_kbm_save_preset));
+        savePreset.setOnClickListener(view -> {
+            if (currentDialog != null) currentDialog.dismiss();
+            showControllerKbmSavePreset(device, mapper);
+        });
+        header.addView(savePreset);
+
+        ImageButton loadPreset = new ImageButton(getThemedContext());
+        loadPreset.setImageResource(android.R.drawable.ic_menu_upload);
+        loadPreset.setBackgroundColor(0x00000000);
+        loadPreset.setContentDescription(
+                getString(R.string.game_menu_controller_kbm_load_preset));
+        loadPreset.setOnClickListener(view -> {
+            if (currentDialog != null) currentDialog.dismiss();
+            showControllerKbmLoadPreset(device, mapper);
+        });
+        header.addView(loadPreset);
+
+        ImageButton reset = new ImageButton(getThemedContext());
+        reset.setImageResource(android.R.drawable.ic_menu_revert);
+        reset.setBackgroundColor(0x00000000);
+        reset.setContentDescription(getString(R.string.game_menu_controller_kbm_reset));
+        reset.setOnClickListener(view -> {
+            if (currentDialog != null) currentDialog.dismiss();
+            confirmControllerKbmReset(device, mapper);
+        });
+        header.addView(reset);
+        layout.addView(header);
+
+        ListView list = new ListView(getThemedContext());
+        ArrayAdapter<MenuOption> adapter = createMenuAdapter(
+                options, false, new HashSet<>(), () -> {});
+        list.setAdapter(adapter);
+        list.setOnItemClickListener((parent, view, position, id) -> {
+            MenuOption option = adapter.getItem(position);
+            if (option == null) return;
+            if (currentDialog != null) {
+                currentDialog.dismiss();
+                currentDialog = null;
+            }
+            run(option);
+        });
+        layout.addView(list);
+
+        if (currentDialog != null) currentDialog.dismiss();
+        currentDialog = new AlertDialog.Builder(getThemedContext()).setView(layout).create();
+        currentDialog.show();
+        Window window = currentDialog.getWindow();
+        if (window != null) {
+            window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+        }
+    }
+
     private void showAdvancedMenu(GameInputDevice device) {
         List<MenuOption> options = new ArrayList<>();
         if (game.allowChangeMouseMode) {
@@ -660,6 +1342,11 @@ public class GameMenu implements Game.GameMenuCallbacks {
         if (game.isGyroAimQuickSettingsEnabled()) {
             options.add(new MenuOption(ADV_GYRO_AIM_SETTINGS, getString(R.string.game_menu_gyro_aim_settings),
                     () -> showGyroAimSettingsMenu(device)));
+        }
+        if (game.isControllerKbmModeEnabled()) {
+            options.add(new MenuOption(ADV_CONTROLLER_KBM,
+                    getString(R.string.game_menu_controller_kbm),
+                    () -> showControllerKbmMenu(device)));
         }
         options.add(new MenuOption(ADV_SEND_KEYS, getString(R.string.game_menu_send_keys), () -> {
             hideMenu();

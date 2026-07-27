@@ -69,10 +69,14 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     private static final int QUICK_MENU_FIRST_STAGE_MS = 200;
     private static final short GYRO_AIM_REPORT_RATE_HZ = 100;
     private static final float GYRO_AIM_STICK_ALPHA = 0.45f;
+    private static final float GYRO_AIM_RESPONSE_EXPONENT = 0.65f;
+    private static final long GYRO_AIM_PEAK_HOLD_NS = 30_000_000L;
     private static final float GYRO_AIM_SENSOR_SENSITIVITY = 0.22f;
     private static final float GYRO_AIM_DRIVER_SENSITIVITY = 0.004f;
     private static final float GYRO_AIM_HORIZONTAL_GAIN = 1.15f;
     private static final float GYRO_AIM_COMPENSATION_INPUT_THRESHOLD = 0.0015f;
+    private static final float KBM_GYRO_SENSOR_SCALE = 250.0f;
+    private static final float KBM_GYRO_DRIVER_SCALE = 4.36f;
 
     private static final int EMULATING_SPECIAL = 0x1;
     private static final int EMULATING_SELECT = 0x2;
@@ -131,6 +135,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     private final Vibrator deviceVibrator;
     private final VibratorManager deviceVibratorManager;
     private final SensorManager deviceSensorManager;
+    private final ControllerKbmMapper controllerKbmMapper;
     private final SceManager sceManager;
     private final Handler mainThreadHandler;
     private final HandlerThread backgroundHandlerThread;
@@ -153,6 +158,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         this.prefConfig = prefConfig;
         this.deviceVibrator = (Vibrator) activityContext.getSystemService(Context.VIBRATOR_SERVICE);
         this.deviceSensorManager = (SensorManager) activityContext.getSystemService(Context.SENSOR_SERVICE);
+        this.controllerKbmMapper = new ControllerKbmMapper(activityContext, conn, prefConfig);
         this.inputManager = (InputManager) activityContext.getSystemService(Context.INPUT_SERVICE);
         this.mainThreadHandler = new Handler(Looper.getMainLooper());
 
@@ -220,7 +226,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         // its initial InputEvent, we will move these from this set onto the
         // currentControllers set which will allow them to properly unplug
         // if they are removed.
-        initialControllers = getAttachedControllerMask(activityContext);
+        initialControllers = prefConfig.controllerKbmMode ? 0 : getAttachedControllerMask(activityContext);
 
         // Register ourselves for input device notifications
         inputManager.registerInputDeviceListener(this, null);
@@ -257,6 +263,53 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 PreferenceConfiguration.DEFAULT_GYRO_AIM_LINK_SIDE_AXES);
         if (gyroAimLinkSideAxes) {
             gyroAimVerticalSensitivity = gyroAimSideSensitivity;
+        }
+    }
+
+    public ControllerKbmMapper getControllerKbmMapper() {
+        return controllerKbmMapper;
+    }
+
+    private void releaseControllerKbmOutputs() {
+        for (int i = 0; i < inputDeviceContexts.size(); i++) {
+            controllerKbmMapper.releaseAll(inputDeviceContexts.valueAt(i));
+        }
+        for (int i = 0; i < usbDeviceContexts.size(); i++) {
+            controllerKbmMapper.releaseAll(usbDeviceContexts.valueAt(i));
+        }
+    }
+
+    public void loadControllerKbmPreset(ControllerKbmMapper.Preset preset) {
+        releaseControllerKbmOutputs();
+        controllerKbmMapper.loadPreset(preset);
+    }
+
+    public void resetControllerKbmMappings() {
+        releaseControllerKbmOutputs();
+        controllerKbmMapper.resetMappings();
+    }
+
+    public void refreshControllerKbmGyro() {
+        boolean enabled = controllerKbmMapper.isGyroEnabled();
+        for (int i = 0; i < inputDeviceContexts.size(); i++) {
+            GenericControllerContext context = inputDeviceContexts.valueAt(i);
+            if (enabled) {
+                context.kbmGyroPaused = false;
+                ensureControllerKbmGyro(context);
+            }
+            else {
+                stopGyroAim(context);
+            }
+        }
+        for (int i = 0; i < usbDeviceContexts.size(); i++) {
+            GenericControllerContext context = usbDeviceContexts.valueAt(i);
+            if (enabled) {
+                context.kbmGyroPaused = false;
+                ensureControllerKbmGyro(context);
+            }
+            else {
+                stopGyroAim(context);
+            }
         }
     }
 
@@ -449,7 +502,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         // If this device sent data as a gamepad, zero the values before removing.
         // We must do this after clearing the currentControllers entry so this
         // causes the device to be removed on the server PC.
-        if (context.assignedControllerNumber) {
+        if (context.assignedControllerNumber && !prefConfig.controllerKbmMode) {
             conn.sendControllerInput(context.controllerNumber, getActiveControllerMask(),
                     (short) 0,
                     (byte) 0, (byte) 0,
@@ -596,7 +649,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         context.assignedControllerNumber = true;
 
         // Report attributes of this new controller to the host
-        context.sendControllerArrival();
+        if (!prefConfig.controllerKbmMode) {
+            context.sendControllerArrival();
+        }
     }
 
     private UsbDeviceContext createUsbDeviceContextForDevice(AbstractController device) {
@@ -1105,6 +1160,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     }
 
     private short getActiveControllerMask() {
+        if (prefConfig.controllerKbmMode) {
+            return 0;
+        }
         if (prefConfig.multiController) {
             return (short)(currentControllers | initialControllers | (prefConfig.onscreenController ? 1 : 0));
         }
@@ -1244,6 +1302,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     }
 
     private void sendControllerInputPacket(GenericControllerContext originalContext) {
+        if (prefConfig.controllerKbmMode) {
+            return;
+        }
         assignControllerNumberIfNeeded(originalContext);
 
         // Take the context's controller number and fuse all inputs with the same number
@@ -1407,6 +1468,58 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     }
 
     private void setGyroRightStick(GenericControllerContext context, float x, float y) {
+        float inputMagnitude = (float) Math.sqrt((x * x) + (y * y));
+        if (inputMagnitude <= GYRO_AIM_COMPENSATION_INPUT_THRESHOLD) {
+            x = 0.0f;
+            y = 0.0f;
+            inputMagnitude = 0.0f;
+        }
+        else {
+            // Games commonly apply a deadzone and an accelerating response curve to sticks.
+            // A concave curve counteracts that behavior by giving precise gyro movements more
+            // usable stick travel while still reaching full output for fast movements.
+            float normalizedMagnitude = Math.min(1.0f,
+                    (inputMagnitude - GYRO_AIM_COMPENSATION_INPUT_THRESHOLD) /
+                            (1.0f - GYRO_AIM_COMPENSATION_INPUT_THRESHOLD));
+            float curvedMagnitude = (float) Math.pow(normalizedMagnitude, GYRO_AIM_RESPONSE_EXPONENT);
+            float responseScale = curvedMagnitude / inputMagnitude;
+            x *= responseScale;
+            y *= responseScale;
+            inputMagnitude = curvedMagnitude;
+        }
+
+        long now = System.nanoTime();
+        float heldMagnitude = (float) Math.sqrt(
+                (context.gyroAimPeakX * context.gyroAimPeakX) +
+                        (context.gyroAimPeakY * context.gyroAimPeakY));
+        float directionDotProduct = (x * context.gyroAimPeakX) + (y * context.gyroAimPeakY);
+
+        if (inputMagnitude >= heldMagnitude || directionDotProduct < 0.0f) {
+            // Capture new peaks immediately. An actual direction reversal must also take effect
+            // immediately instead of being delayed by the previous direction's held peak.
+            context.gyroAimPeakX = x;
+            context.gyroAimPeakY = y;
+            context.gyroAimPeakUntilNs = now + GYRO_AIM_PEAK_HOLD_NS;
+        }
+        else if (now < context.gyroAimPeakUntilNs) {
+            // Preserve a short flick for a few input reports. Keep following the current
+            // direction when possible, so peak hold doesn't make diagonal aiming feel sticky.
+            if (inputMagnitude > 0.0f) {
+                float peakScale = heldMagnitude / inputMagnitude;
+                x *= peakScale;
+                y *= peakScale;
+            }
+            else {
+                x = context.gyroAimPeakX;
+                y = context.gyroAimPeakY;
+            }
+        }
+        else {
+            context.gyroAimPeakX = x;
+            context.gyroAimPeakY = y;
+            context.gyroAimPeakUntilNs = 0;
+        }
+
         context.gyroAimStickX += (x - context.gyroAimStickX) * GYRO_AIM_STICK_ALPHA;
         context.gyroAimStickY += (y - context.gyroAimStickY) * GYRO_AIM_STICK_ALPHA;
 
@@ -1430,6 +1543,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     private void resetGyroRightStick(GenericControllerContext context) {
         context.gyroAimStickX = 0;
         context.gyroAimStickY = 0;
+        context.gyroAimPeakX = 0;
+        context.gyroAimPeakY = 0;
+        context.gyroAimPeakUntilNs = 0;
         context.gyroRightStickX = 0;
         context.gyroRightStickY = 0;
         updateCombinedRightStick(context);
@@ -1501,10 +1617,16 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             @Override
             public void onSensorChanged(SensorEvent sensorEvent) {
                 float[] values = getCorrectedMotionValues(sensorEvent.values, needsDeviceOrientationCorrection);
-                setGyroRightStickFromMotion(context,
-                        values[0], values[1], values[2],
-                        GYRO_AIM_SENSOR_SENSITIVITY);
-                sendControllerInputPacket(context);
+                if (prefConfig.controllerKbmMode) {
+                    controllerKbmMapper.handleGyro(values[0], values[1], values[2],
+                            KBM_GYRO_SENSOR_SCALE, context);
+                }
+                else {
+                    setGyroRightStickFromMotion(context,
+                            values[0], values[1], values[2],
+                            GYRO_AIM_SENSOR_SENSITIVITY);
+                    sendControllerInputPacket(context);
+                }
             }
 
             @Override
@@ -1518,41 +1640,54 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
         if (context instanceof InputDeviceContext) {
             InputDeviceContext deviceContext = (InputDeviceContext) context;
-            if (deviceContext.gyroAimListener != null && deviceContext.sensorManager != null) {
-                deviceContext.sensorManager.unregisterListener(deviceContext.gyroAimListener);
+            if (deviceContext.gyroAimListener != null && deviceContext.gyroAimSensorManager != null) {
+                deviceContext.gyroAimSensorManager.unregisterListener(deviceContext.gyroAimListener);
                 deviceContext.gyroAimListener = null;
             }
+            deviceContext.gyroAimSensorManager = null;
         }
     }
 
     private boolean startGyroAim(GenericControllerContext context) {
         assignControllerNumberIfNeeded(context);
 
-        if (context instanceof InputDeviceContext && !(context instanceof UsbDeviceContext)) {
+        if (context instanceof InputDeviceContext) {
             InputDeviceContext deviceContext = (InputDeviceContext) context;
-            if (deviceContext.sensorManager == null &&
-                    prefConfig.gamepadMotionSensorsFallbackToDevice &&
-                    context.controllerNumber == 0) {
-                deviceContext.sensorManager = deviceSensorManager;
+
+            // USB driver controllers report gyro samples through reportControllerMotion().
+            // When the driver advertises gyro support, no Android sensor listener is needed.
+            if (context instanceof UsbDeviceContext &&
+                    ((((UsbDeviceContext) context).device.getCapabilities() & MoonBridge.LI_CCAP_GYRO) != 0)) {
+                context.gyroAimActive = true;
+                return true;
             }
 
-            if (deviceContext.sensorManager == null) {
-                return false;
+            SensorManager gyroSensorManager = deviceContext.sensorManager;
+            Sensor gyroSensor = gyroSensorManager != null ?
+                    gyroSensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE) : null;
+
+            // Gyro aim always falls back to the Android device sensor when the controller
+            // itself doesn't provide one. This is intentionally independent of the gamepad
+            // motion sensor emulation preference, because it only affects right-stick input.
+            if (gyroSensor == null) {
+                gyroSensorManager = deviceSensorManager;
+                gyroSensor = gyroSensorManager != null ?
+                        gyroSensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE) : null;
             }
 
-            Sensor gyroSensor = deviceContext.sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
             if (gyroSensor == null) {
                 return false;
             }
 
-            if (deviceContext.gyroAimListener != null) {
-                deviceContext.sensorManager.unregisterListener(deviceContext.gyroAimListener);
+            if (deviceContext.gyroAimListener != null && deviceContext.gyroAimSensorManager != null) {
+                deviceContext.gyroAimSensorManager.unregisterListener(deviceContext.gyroAimListener);
             }
 
-            boolean useDeviceSensors = deviceContext.sensorManager == deviceSensorManager;
+            deviceContext.gyroAimSensorManager = gyroSensorManager;
+            boolean useDeviceSensors = gyroSensorManager == deviceSensorManager;
             deviceContext.gyroAimListener = createGyroAimListener(deviceContext,
                     useDeviceSensors);
-            deviceContext.sensorManager.registerListener(deviceContext.gyroAimListener,
+            gyroSensorManager.registerListener(deviceContext.gyroAimListener,
                     gyroSensor, 1000000 / GYRO_AIM_REPORT_RATE_HZ);
         }
 
@@ -1563,19 +1698,50 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     private void toggleGyroAim(GenericControllerContext context) {
         if (context.gyroAimActive) {
             stopGyroAim(context);
+            if (prefConfig.controllerKbmMode) {
+                context.kbmGyroPaused = true;
+            }
             Toast.makeText(activityContext, "Gyro aim: OFF", Toast.LENGTH_SHORT).show();
         }
-        else if (startGyroAim(context)) {
-            Toast.makeText(activityContext, "Gyro aim: ON", Toast.LENGTH_SHORT).show();
-        }
         else {
-            Toast.makeText(activityContext, "Gyro aim unavailable", Toast.LENGTH_SHORT).show();
+            if (prefConfig.controllerKbmMode) {
+                context.kbmGyroPaused = false;
+            }
+            if (startGyroAim(context)) {
+                Toast.makeText(activityContext, "Gyro aim: ON", Toast.LENGTH_SHORT).show();
+            }
+            else {
+                Toast.makeText(activityContext, "Gyro aim unavailable", Toast.LENGTH_SHORT).show();
+            }
         }
     }
 
     private boolean isGyroAimShareKey(int keyCode) {
         return keyCode == KeyEvent.KEYCODE_MEDIA_RECORD ||
                 keyCode == KeyEvent.KEYCODE_BUTTON_SELECT;
+    }
+
+    private int getGyroAimShareFlag(int keyCode) {
+        return keyCode == KeyEvent.KEYCODE_MEDIA_RECORD ?
+                ControllerPacket.MISC_FLAG : ControllerPacket.BACK_FLAG;
+    }
+
+    private void sendDeferredGyroAimSharePress(GenericControllerContext context, int keyCode) {
+        if (prefConfig.controllerKbmMode) {
+            String source = controllerKbmMapper.sourceForKeyCode(keyCode);
+            controllerKbmMapper.handleButton(context, source, true);
+            controllerKbmMapper.handleButton(context, source, false);
+            return;
+        }
+
+        int shareFlag = getGyroAimShareFlag(keyCode);
+
+        // The original down event was withheld while waiting for Triangle/Y. If the combo
+        // never arrived, reproduce a complete Share button press when Share is released.
+        context.inputMap |= shareFlag;
+        sendControllerInputPacket(context);
+        context.inputMap &= ~shareFlag;
+        sendControllerInputPacket(context);
     }
 
     private void updateGyroAimComboState(GenericControllerContext context, int keyCode, boolean pressed) {
@@ -1592,12 +1758,14 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     }
 
     private boolean handleGyroAimToggleCombo(GenericControllerContext context) {
-        if (!prefConfig.gyroToRightStick) {
+        if (!prefConfig.gyroToRightStick &&
+                !(prefConfig.controllerKbmMode && controllerKbmMapper.isGyroEnabled())) {
             return false;
         }
 
         if (context.gyroAimShareDown && context.gyroAimTriangleDown && !context.gyroAimToggleComboLatched) {
             context.gyroAimToggleComboLatched = true;
+            context.gyroAimShareConsumedByCombo = true;
             context.inputMap &= ~(ControllerPacket.MISC_FLAG | ControllerPacket.Y_FLAG | ControllerPacket.X_FLAG);
             toggleGyroAim(context);
             sendControllerInputPacket(context);
@@ -1608,11 +1776,15 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     }
 
     private boolean handleGyroAimComboButtonDown(GenericControllerContext context, int keyCode) {
-        if (!prefConfig.gyroToRightStick) {
+        if (!prefConfig.gyroToRightStick &&
+                !(prefConfig.controllerKbmMode && controllerKbmMapper.isGyroEnabled())) {
             return false;
         }
 
         if (isGyroAimShareKey(keyCode)) {
+            if (!context.gyroAimShareDown) {
+                context.gyroAimShareConsumedByCombo = false;
+            }
             context.gyroAimShareDown = true;
             context.gyroAimToggleComboLatched = false;
             return true;
@@ -1622,6 +1794,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             context.gyroAimTriangleDown = true;
             context.gyroAimToggleComboLatched = true;
             context.gyroAimSuppressTriangleUp = true;
+            context.gyroAimShareConsumedByCombo = true;
             toggleGyroAim(context);
             sendControllerInputPacket(context);
             return true;
@@ -1631,13 +1804,21 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     }
 
     private boolean handleGyroAimComboButtonUp(GenericControllerContext context, int keyCode) {
-        if (!prefConfig.gyroToRightStick) {
+        if (!prefConfig.gyroToRightStick &&
+                !(prefConfig.controllerKbmMode && controllerKbmMapper.isGyroEnabled())) {
             return false;
         }
 
         if (isGyroAimShareKey(keyCode)) {
+            boolean sendSharePress = context.gyroAimShareDown &&
+                    !context.gyroAimShareConsumedByCombo;
             context.gyroAimShareDown = false;
             context.gyroAimToggleComboLatched = false;
+            context.gyroAimShareConsumedByCombo = false;
+
+            if (sendSharePress) {
+                sendDeferredGyroAimSharePress(context, keyCode);
+            }
             return true;
         }
 
@@ -1992,8 +2173,91 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         }
     }
 
+    private void ensureControllerKbmGyro(GenericControllerContext context) {
+        if (prefConfig.controllerKbmMode && controllerKbmMapper.isGyroEnabled() &&
+                !context.kbmGyroPaused && !context.gyroAimActive) {
+            startGyroAim(context);
+        }
+    }
+
+    private void updateControllerKbmDigitalAxis(GenericControllerContext context, String source,
+                                                boolean pressed, boolean previouslyPressed) {
+        if (pressed != previouslyPressed) {
+            if (ControllerKbmMapper.SOURCE_LT.equals(source) ||
+                    ControllerKbmMapper.SOURCE_RT.equals(source)) {
+                controllerKbmMapper.handleTrigger(context, source, pressed);
+            }
+            else {
+                controllerKbmMapper.handleButton(context, source, pressed);
+            }
+        }
+    }
+
+    private void ensureControllerKbmPolling(GenericControllerContext context) {
+        if (!context.kbmInputPollingActive) {
+            context.kbmInputPollingActive = true;
+            mainThreadHandler.post(context.kbmInputPollingRunnable);
+        }
+    }
+
+    private void handleControllerKbmAxes(InputDeviceContext context,
+                                         float lsX, float lsY, float rsX, float rsY,
+                                         float lt, float rt, float hatX, float hatY) {
+        ensureControllerKbmGyro(context);
+        ensureControllerKbmPolling(context);
+
+        controllerKbmMapper.handleStick(ControllerKbmMapper.SOURCE_LEFT_STICK, lsX, lsY, context);
+        controllerKbmMapper.handleStick(ControllerKbmMapper.SOURCE_RIGHT_STICK, rsX, rsY, context);
+
+        if (lt != 0.0f) {
+            context.leftTriggerAxisUsed = true;
+        }
+        if (rt != 0.0f) {
+            context.rightTriggerAxisUsed = true;
+        }
+        if (context.triggersIdleNegative) {
+            if (context.leftTriggerAxisUsed) {
+                lt = (lt + 1.0f) / 2.0f;
+            }
+            if (context.rightTriggerAxisUsed) {
+                rt = (rt + 1.0f) / 2.0f;
+            }
+        }
+
+        float threshold = controllerKbmMapper.getTriggerThreshold() / 100.0f;
+        boolean leftTriggerPressed = lt > threshold;
+        boolean rightTriggerPressed = rt > threshold;
+        updateControllerKbmDigitalAxis(context, ControllerKbmMapper.SOURCE_LT,
+                leftTriggerPressed, context.kbmLeftTriggerPressed);
+        updateControllerKbmDigitalAxis(context, ControllerKbmMapper.SOURCE_RT,
+                rightTriggerPressed, context.kbmRightTriggerPressed);
+        context.kbmLeftTriggerPressed = leftTriggerPressed;
+        context.kbmRightTriggerPressed = rightTriggerPressed;
+
+        boolean dpadLeft = hatX < -0.5f;
+        boolean dpadRight = hatX > 0.5f;
+        boolean dpadUp = hatY < -0.5f;
+        boolean dpadDown = hatY > 0.5f;
+        updateControllerKbmDigitalAxis(context, ControllerKbmMapper.SOURCE_DPAD_LEFT,
+                dpadLeft, context.kbmDpadLeft);
+        updateControllerKbmDigitalAxis(context, ControllerKbmMapper.SOURCE_DPAD_RIGHT,
+                dpadRight, context.kbmDpadRight);
+        updateControllerKbmDigitalAxis(context, ControllerKbmMapper.SOURCE_DPAD_UP,
+                dpadUp, context.kbmDpadUp);
+        updateControllerKbmDigitalAxis(context, ControllerKbmMapper.SOURCE_DPAD_DOWN,
+                dpadDown, context.kbmDpadDown);
+        context.kbmDpadLeft = dpadLeft;
+        context.kbmDpadRight = dpadRight;
+        context.kbmDpadUp = dpadUp;
+        context.kbmDpadDown = dpadDown;
+    }
+
     private void handleAxisSet(InputDeviceContext context, float lsX, float lsY, float rsX,
                                float rsY, float lt, float rt, float hatX, float hatY) {
+        if (prefConfig.controllerKbmMode) {
+            handleControllerKbmAxes(context, lsX, lsY, rsX, rsY, lt, rt, hatX, hatY);
+            return;
+        }
 
         if (context.leftStickXAxis != -1 && context.leftStickYAxis != -1) {
             Vector2d leftStickVector = populateCachedVector(lsX, lsY);
@@ -2103,6 +2367,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         InputDeviceContext context = inputDeviceContexts.get(event.getDeviceId());
         if (context == null) {
             return false;
+        }
+        if (prefConfig.controllerKbmMode) {
+            return true;
         }
 
         // When we're working with a mouse source instead of a touchpad, we're quite limited in
@@ -2769,6 +3036,25 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             return true;
         }
 
+        if (prefConfig.controllerKbmMode) {
+            ensureControllerKbmGyro(context);
+            if ((keyCode == KeyEvent.KEYCODE_BUTTON_L2 && context.leftTriggerAxis != -1) ||
+                    (keyCode == KeyEvent.KEYCODE_BUTTON_R2 && context.rightTriggerAxis != -1) ||
+                    (keyCode == KeyEvent.KEYCODE_DPAD_LEFT && context.hatXAxis != -1) ||
+                    (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT && context.hatXAxis != -1) ||
+                    (keyCode == KeyEvent.KEYCODE_DPAD_UP && context.hatYAxis != -1) ||
+                    (keyCode == KeyEvent.KEYCODE_DPAD_DOWN && context.hatYAxis != -1)) {
+                return true;
+            }
+            String source = controllerKbmMapper.sourceForKeyEvent(event);
+            if (ControllerKbmMapper.SOURCE_LT.equals(source) ||
+                    ControllerKbmMapper.SOURCE_RT.equals(source)) {
+                controllerKbmMapper.handleTrigger(context, source, false);
+                return true;
+            }
+            return controllerKbmMapper.handleButton(context, source, false);
+        }
+
         if (prefConfig.flipFaceButtons) {
             keyCode = handleFlipFaceButtons(keyCode);
         }
@@ -3018,6 +3304,29 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
         if (handleGyroAimComboButtonDown(context, keyCode)) {
             return true;
+        }
+
+        if (prefConfig.controllerKbmMode) {
+            ensureControllerKbmGyro(context);
+            if (event.getRepeatCount() != 0) {
+                return true;
+            }
+            if ((keyCode == KeyEvent.KEYCODE_BUTTON_L2 && context.leftTriggerAxis != -1) ||
+                    (keyCode == KeyEvent.KEYCODE_BUTTON_R2 && context.rightTriggerAxis != -1) ||
+                    (keyCode == KeyEvent.KEYCODE_DPAD_LEFT && context.hatXAxis != -1) ||
+                    (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT && context.hatXAxis != -1) ||
+                    (keyCode == KeyEvent.KEYCODE_DPAD_UP && context.hatYAxis != -1) ||
+                    (keyCode == KeyEvent.KEYCODE_DPAD_DOWN && context.hatYAxis != -1)) {
+                return true;
+            }
+            String source = controllerKbmMapper.sourceForKeyEvent(event);
+            if (ControllerKbmMapper.SOURCE_LT.equals(source) ||
+                    ControllerKbmMapper.SOURCE_RT.equals(source)) {
+                ensureControllerKbmPolling(context);
+                controllerKbmMapper.handleTrigger(context, source, true);
+                return true;
+            }
+            return controllerKbmMapper.handleButton(context, source, true);
         }
 
         if (prefConfig.flipFaceButtons) {
@@ -3275,6 +3584,27 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             return;
         }
 
+        if (prefConfig.controllerKbmMode) {
+            ensureControllerKbmGyro(context);
+            ensureControllerKbmPolling(context);
+            handleControllerKbmUsbButtons(context, buttonFlags);
+            controllerKbmMapper.handleStick(ControllerKbmMapper.SOURCE_LEFT_STICK,
+                    leftStickX, -leftStickY, context);
+            controllerKbmMapper.handleStick(ControllerKbmMapper.SOURCE_RIGHT_STICK,
+                    rightStickX, -rightStickY, context);
+
+            float threshold = controllerKbmMapper.getTriggerThreshold() / 100.0f;
+            boolean leftPressed = leftTrigger > threshold;
+            boolean rightPressed = rightTrigger > threshold;
+            updateControllerKbmDigitalAxis(context, ControllerKbmMapper.SOURCE_LT,
+                    leftPressed, context.kbmLeftTriggerPressed);
+            updateControllerKbmDigitalAxis(context, ControllerKbmMapper.SOURCE_RT,
+                    rightPressed, context.kbmRightTriggerPressed);
+            context.kbmLeftTriggerPressed = leftPressed;
+            context.kbmRightTriggerPressed = rightPressed;
+            return;
+        }
+
         Vector2d leftStickVector = populateCachedVector(leftStickX, leftStickY);
 
         handleDeadZone(leftStickVector, context.leftStickDeadzoneRadius);
@@ -3305,6 +3635,100 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         sendControllerInputPacket(context);
     }
 
+    private void handleControllerKbmUsbButtons(GenericControllerContext context, int buttonFlags) {
+        int changed = context.kbmLastButtonFlags ^ buttonFlags;
+        int shareMask = ControllerPacket.MISC_FLAG | ControllerPacket.BACK_FLAG;
+        int changedShare = changed & shareMask;
+
+        if (changedShare != 0) {
+            boolean shareDown = (buttonFlags & shareMask) != 0;
+            changed &= ~shareMask;
+            if (shareDown) {
+                context.gyroAimShareDown = true;
+                context.gyroAimShareConsumedByCombo = false;
+                context.kbmGyroShareKeyCode =
+                        (buttonFlags & ControllerPacket.MISC_FLAG) != 0 ?
+                                KeyEvent.KEYCODE_MEDIA_RECORD : KeyEvent.KEYCODE_BUTTON_SELECT;
+            }
+            else {
+                if (context.gyroAimShareDown && !context.gyroAimShareConsumedByCombo) {
+                    sendDeferredGyroAimSharePress(context, context.kbmGyroShareKeyCode);
+                }
+                context.gyroAimShareDown = false;
+                context.gyroAimShareConsumedByCombo = false;
+                context.gyroAimToggleComboLatched = false;
+            }
+        }
+
+        if ((changed & ControllerPacket.Y_FLAG) != 0) {
+            boolean triangleDown = (buttonFlags & ControllerPacket.Y_FLAG) != 0;
+            if (triangleDown && context.gyroAimShareDown) {
+                changed &= ~ControllerPacket.Y_FLAG;
+                context.gyroAimTriangleDown = true;
+                context.gyroAimSuppressTriangleUp = true;
+                context.gyroAimShareConsumedByCombo = true;
+                context.gyroAimToggleComboLatched = true;
+                toggleGyroAim(context);
+            }
+            else if (!triangleDown && context.gyroAimSuppressTriangleUp) {
+                changed &= ~ControllerPacket.Y_FLAG;
+                context.gyroAimTriangleDown = false;
+                context.gyroAimSuppressTriangleUp = false;
+            }
+        }
+
+        handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.A_FLAG,
+                ControllerKbmMapper.SOURCE_A);
+        handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.B_FLAG,
+                ControllerKbmMapper.SOURCE_B);
+        handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.X_FLAG,
+                ControllerKbmMapper.SOURCE_X);
+        handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.Y_FLAG,
+                ControllerKbmMapper.SOURCE_Y);
+        handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.UP_FLAG,
+                ControllerKbmMapper.SOURCE_DPAD_UP);
+        handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.DOWN_FLAG,
+                ControllerKbmMapper.SOURCE_DPAD_DOWN);
+        handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.LEFT_FLAG,
+                ControllerKbmMapper.SOURCE_DPAD_LEFT);
+        handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.RIGHT_FLAG,
+                ControllerKbmMapper.SOURCE_DPAD_RIGHT);
+        handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.LB_FLAG,
+                ControllerKbmMapper.SOURCE_LB);
+        handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.RB_FLAG,
+                ControllerKbmMapper.SOURCE_RB);
+        handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.LS_CLK_FLAG,
+                ControllerKbmMapper.SOURCE_L3);
+        handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.RS_CLK_FLAG,
+                ControllerKbmMapper.SOURCE_R3);
+        handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.PLAY_FLAG,
+                ControllerKbmMapper.SOURCE_START);
+        handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.BACK_FLAG,
+                ControllerKbmMapper.SOURCE_SELECT);
+        handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.SPECIAL_BUTTON_FLAG,
+                ControllerKbmMapper.SOURCE_GUIDE);
+        handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.MISC_FLAG,
+                ControllerKbmMapper.SOURCE_SHARE);
+        handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.TOUCHPAD_FLAG,
+                ControllerKbmMapper.SOURCE_TOUCHPAD);
+        handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.PADDLE1_FLAG,
+                ControllerKbmMapper.SOURCE_PADDLE_1);
+        handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.PADDLE2_FLAG,
+                ControllerKbmMapper.SOURCE_PADDLE_2);
+        handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.PADDLE3_FLAG,
+                ControllerKbmMapper.SOURCE_PADDLE_3);
+        handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.PADDLE4_FLAG,
+                ControllerKbmMapper.SOURCE_PADDLE_4);
+        context.kbmLastButtonFlags = buttonFlags;
+    }
+
+    private void handleControllerKbmUsbButton(GenericControllerContext context,
+                                               int changed, int current, int flag, String source) {
+        if ((changed & flag) != 0) {
+            controllerKbmMapper.handleButton(context, source, (current & flag) != 0);
+        }
+    }
+
     @Override
     public void reportControllerMotion(int controllerId, byte motionType, float motionX, float motionY, float motionZ) {
         GenericControllerContext context = usbDeviceContexts.get(controllerId);
@@ -3312,7 +3736,14 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             return;
         }
 
-        if (context.gyroAimActive) {
+        if (prefConfig.controllerKbmMode) {
+            if (context.gyroAimActive && motionType == MoonBridge.LI_MOTION_TYPE_GYRO) {
+                controllerKbmMapper.handleGyro(motionX, motionY, motionZ,
+                        KBM_GYRO_DRIVER_SCALE, context);
+            }
+            return;
+        }
+        else if (context.gyroAimActive) {
             if (motionType == MoonBridge.LI_MOTION_TYPE_GYRO) {
                 setGyroRightStickFromMotion(context,
                         motionX, motionY, motionZ,
@@ -3373,11 +3804,55 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         public short leftStickY = 0x0000;
         public float gyroAimStickX;
         public float gyroAimStickY;
+        public float gyroAimPeakX;
+        public float gyroAimPeakY;
+        public long gyroAimPeakUntilNs;
         public boolean gyroAimActive;
         public boolean gyroAimShareDown;
         public boolean gyroAimTriangleDown;
         public boolean gyroAimToggleComboLatched;
         public boolean gyroAimSuppressTriangleUp;
+        public boolean gyroAimShareConsumedByCombo;
+        public boolean kbmGyroPaused;
+        public int kbmGyroShareKeyCode = KeyEvent.KEYCODE_MEDIA_RECORD;
+        public int kbmLastButtonFlags;
+        public boolean kbmLeftTriggerPressed;
+        public boolean kbmRightTriggerPressed;
+        public boolean kbmDpadLeft;
+        public boolean kbmDpadRight;
+        public boolean kbmDpadUp;
+        public boolean kbmDpadDown;
+        public float kbmMouseRemainderX;
+        public float kbmMouseRemainderY;
+        public float kbmScrollRemainderX;
+        public float kbmScrollRemainderY;
+        public float kbmGyroRemainderX;
+        public float kbmGyroRemainderY;
+        public float kbmLeftStickX;
+        public float kbmLeftStickY;
+        public float kbmRightStickX;
+        public float kbmRightStickY;
+        public boolean kbmRepeatLeftTrigger;
+        public boolean kbmRepeatRightTrigger;
+        public long kbmLastLeftTriggerRepeatNs;
+        public long kbmLastRightTriggerRepeatNs;
+        public long kbmLastGyroSampleNs;
+        public float kbmGyroFilteredX;
+        public float kbmGyroFilteredY;
+        public boolean kbmInputPollingActive;
+        public final java.util.Set<String> kbmPressedSources = new java.util.HashSet<>();
+
+        public final Runnable kbmInputPollingRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (!kbmInputPollingActive || stopped || !prefConfig.controllerKbmMode) {
+                    kbmInputPollingActive = false;
+                    return;
+                }
+                controllerKbmMapper.pollContinuousInput(GenericControllerContext.this);
+                mainThreadHandler.postDelayed(this, 16);
+            }
+        };
 
         public boolean mouseEmulationActive;
         public boolean mouseEmulationXDown = false;
@@ -3389,7 +3864,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         public final Runnable mouseEmulationRunnable = new Runnable() {
             @Override
             public void run() {
-                if (!mouseEmulationActive) {
+                if (!mouseEmulationActive || prefConfig.controllerKbmMode) {
+                    mouseEmulationActive = false;
                     return;
                 }
 
@@ -3417,6 +3893,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         @Override
         public List<GameMenu.MenuOption> getGameMenuOptions() {
             List<GameMenu.MenuOption> options = new ArrayList<>();
+            if (prefConfig.controllerKbmMode) {
+                return options;
+            }
             options.add(new GameMenu.MenuOption(activityContext.getString(mouseEmulationActive ?
                     R.string.game_menu_toggle_mouse_off : R.string.game_menu_toggle_mouse_on),
                     true, () -> toggleMouseEmulation()));
@@ -3425,6 +3904,11 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         }
 
         public void toggleMouseEmulation() {
+            if (prefConfig.controllerKbmMode) {
+                mouseEmulationActive = false;
+                mainThreadHandler.removeCallbacks(mouseEmulationRunnable);
+                return;
+            }
             mainThreadHandler.removeCallbacks(mouseEmulationRunnable);
             mouseEmulationActive = !mouseEmulationActive;
             Toast.makeText(activityContext, "Mouse emulation is: " + (mouseEmulationActive ? "ON" : "OFF"), Toast.LENGTH_SHORT).show();
@@ -3436,6 +3920,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
         public void destroy() {
             mouseEmulationActive = false;
+            kbmInputPollingActive = false;
+            mainThreadHandler.removeCallbacks(kbmInputPollingRunnable);
+            controllerKbmMapper.releaseAll(this);
             stopGyroAim(this);
             mainThreadHandler.removeCallbacks(mouseEmulationRunnable);
         }
@@ -3455,6 +3942,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         public SensorManager sensorManager;
         public SensorEventListener gyroListener;
         public SensorEventListener gyroAimListener;
+        public SensorManager gyroAimSensorManager;
         public short gyroReportRateHz;
         public SensorEventListener accelListener;
         public short accelReportRateHz;

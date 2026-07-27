@@ -11,6 +11,7 @@ import static com.limelight.utils.ServerHelper.getSecondaryDisplay;
 import com.limelight.binding.PlatformBinding;
 import com.limelight.binding.audio.AndroidAudioRenderer;
 import com.limelight.binding.input.ControllerHandler;
+import com.limelight.binding.input.ControllerKbmMapper;
 import com.limelight.binding.input.GameInputDevice;
 import com.limelight.binding.input.KeyboardTranslator;
 import com.limelight.binding.input.capture.InputCaptureManager;
@@ -754,7 +755,10 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         }
 
         int gamepadMask = ControllerHandler.getAttachedControllerMask(this);
-        if (!prefConfig.multiController) {
+        if (prefConfig.controllerKbmMode) {
+            gamepadMask = 0;
+        }
+        else if (!prefConfig.multiController) {
             // Always set gamepad 1 present for when multi-controller is
             // disabled for games that don't properly support detection
             // of gamepads removed and replugged at runtime.
@@ -2351,6 +2355,32 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     public void reloadGyroAimSettings() {
         if (controllerHandler != null) {
             controllerHandler.reloadGyroAimSettings();
+        }
+    }
+
+    public boolean isControllerKbmModeEnabled() {
+        return prefConfig != null && prefConfig.controllerKbmMode;
+    }
+
+    public ControllerKbmMapper getControllerKbmMapper() {
+        return controllerHandler != null ? controllerHandler.getControllerKbmMapper() : null;
+    }
+
+    public void loadControllerKbmPreset(ControllerKbmMapper.Preset preset) {
+        if (controllerHandler != null) {
+            controllerHandler.loadControllerKbmPreset(preset);
+        }
+    }
+
+    public void resetControllerKbmMappings() {
+        if (controllerHandler != null) {
+            controllerHandler.resetControllerKbmMappings();
+        }
+    }
+
+    public void refreshControllerKbmGyro() {
+        if (controllerHandler != null) {
+            controllerHandler.refreshControllerKbmGyro();
         }
     }
 
