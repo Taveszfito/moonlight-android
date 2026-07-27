@@ -136,6 +136,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     private final VibratorManager deviceVibratorManager;
     private final SensorManager deviceSensorManager;
     private final ControllerKbmMapper controllerKbmMapper;
+    private final android.content.SharedPreferences gyroAimPreferences;
     private final SceManager sceManager;
     private final Handler mainThreadHandler;
     private final HandlerThread backgroundHandlerThread;
@@ -159,6 +160,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         this.deviceVibrator = (Vibrator) activityContext.getSystemService(Context.VIBRATOR_SERVICE);
         this.deviceSensorManager = (SensorManager) activityContext.getSystemService(Context.SENSOR_SERVICE);
         this.controllerKbmMapper = new ControllerKbmMapper(activityContext, conn, prefConfig);
+        this.gyroAimPreferences = PreferenceManager.getDefaultSharedPreferences(activityContext);
         this.inputManager = (InputManager) activityContext.getSystemService(Context.INPUT_SERVICE);
         this.mainThreadHandler = new Handler(Looper.getMainLooper());
 
@@ -250,16 +252,15 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     }
 
     public void reloadGyroAimSettings() {
-        android.content.SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(activityContext);
-        gyroAimPitchSensitivity = prefs.getInt(PreferenceConfiguration.GYRO_AIM_PITCH_SENSITIVITY_PREF_STRING,
+        gyroAimPitchSensitivity = gyroAimPreferences.getInt(PreferenceConfiguration.GYRO_AIM_PITCH_SENSITIVITY_PREF_STRING,
                 PreferenceConfiguration.DEFAULT_GYRO_AIM_PITCH_SENSITIVITY) / 100.0f;
-        gyroAimSideSensitivity = prefs.getInt(PreferenceConfiguration.GYRO_AIM_SIDE_SENSITIVITY_PREF_STRING,
+        gyroAimSideSensitivity = gyroAimPreferences.getInt(PreferenceConfiguration.GYRO_AIM_SIDE_SENSITIVITY_PREF_STRING,
                 PreferenceConfiguration.DEFAULT_GYRO_AIM_SIDE_SENSITIVITY) / 100.0f;
-        gyroAimVerticalSensitivity = prefs.getInt(PreferenceConfiguration.GYRO_AIM_VERTICAL_SENSITIVITY_PREF_STRING,
+        gyroAimVerticalSensitivity = gyroAimPreferences.getInt(PreferenceConfiguration.GYRO_AIM_VERTICAL_SENSITIVITY_PREF_STRING,
                 PreferenceConfiguration.DEFAULT_GYRO_AIM_VERTICAL_SENSITIVITY) / 100.0f;
-        gyroAimDeadzoneCompensation = prefs.getInt(PreferenceConfiguration.GYRO_AIM_DEADZONE_COMPENSATION_PREF_STRING,
+        gyroAimDeadzoneCompensation = gyroAimPreferences.getInt(PreferenceConfiguration.GYRO_AIM_DEADZONE_COMPENSATION_PREF_STRING,
                 PreferenceConfiguration.DEFAULT_GYRO_AIM_DEADZONE_COMPENSATION) / 100.0f;
-        gyroAimLinkSideAxes = prefs.getBoolean(PreferenceConfiguration.GYRO_AIM_LINK_SIDE_AXES_PREF_STRING,
+        gyroAimLinkSideAxes = gyroAimPreferences.getBoolean(PreferenceConfiguration.GYRO_AIM_LINK_SIDE_AXES_PREF_STRING,
                 PreferenceConfiguration.DEFAULT_GYRO_AIM_LINK_SIDE_AXES);
         if (gyroAimLinkSideAxes) {
             gyroAimVerticalSensitivity = gyroAimSideSensitivity;
@@ -1520,8 +1521,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             context.gyroAimPeakUntilNs = 0;
         }
 
-        context.gyroAimStickX += (x - context.gyroAimStickX) * GYRO_AIM_STICK_ALPHA;
-        context.gyroAimStickY += (y - context.gyroAimStickY) * GYRO_AIM_STICK_ALPHA;
+        float smoothingAlpha = gyroAimPreferences.getBoolean(
+                PreferenceConfiguration.GYRO_AIM_SMOOTHING_PREF_STRING,
+                PreferenceConfiguration.DEFAULT_GYRO_AIM_SMOOTHING) ?
+                GYRO_AIM_STICK_ALPHA : 1.0f;
+        context.gyroAimStickX += (x - context.gyroAimStickX) * smoothingAlpha;
+        context.gyroAimStickY += (y - context.gyroAimStickY) * smoothingAlpha;
 
         float outputX = context.gyroAimStickX;
         float outputY = context.gyroAimStickY;
@@ -1554,12 +1559,95 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     private void setGyroRightStickFromMotion(GenericControllerContext context,
                                              float gyroX, float gyroY, float gyroZ,
                                              float sensitivity) {
+        if (!isNormalGyroActivationSatisfied(context)) {
+            resetGyroRightStick(context);
+            return;
+        }
         float verticalSensitivity = gyroAimLinkSideAxes ? gyroAimSideSensitivity : gyroAimVerticalSensitivity;
         float yaw = (gyroY * gyroAimSideSensitivity) + (gyroZ * verticalSensitivity);
         float pitch = gyroX;
         setGyroRightStick(context,
                 yaw * sensitivity * GYRO_AIM_HORIZONTAL_GAIN,
                 pitch * sensitivity * gyroAimPitchSensitivity);
+    }
+
+    private boolean isNormalGyroActivationSatisfied(GenericControllerContext context) {
+        String mode = getNormalGyroActivationMode();
+        if (ControllerKbmMapper.GYRO_ACTIVATION_OFF.equals(mode)) {
+            return false;
+        }
+        if (!ControllerKbmMapper.GYRO_ACTIVATION_HELD.equals(mode)) {
+            return true;
+        }
+
+        for (String source : getNormalGyroActivationSources()) {
+            if (isNormalGyroSourceHeld(context, source)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String getNormalGyroActivationMode() {
+        return gyroAimPreferences.contains(
+                PreferenceConfiguration.GYRO_AIM_ACTIVATION_MODE_PREF_STRING) ?
+                gyroAimPreferences.getString(
+                        PreferenceConfiguration.GYRO_AIM_ACTIVATION_MODE_PREF_STRING,
+                        ControllerKbmMapper.GYRO_ACTIVATION_ALWAYS) :
+                gyroAimPreferences.getBoolean(
+                        PreferenceConfiguration.GYRO_AIM_HOLD_ACTIVATION_PREF_STRING, false) ?
+                        ControllerKbmMapper.GYRO_ACTIVATION_HELD :
+                        ControllerKbmMapper.GYRO_ACTIVATION_ALWAYS;
+    }
+
+    private java.util.Set<String> getNormalGyroActivationSources() {
+        java.util.Set<String> sources = new java.util.LinkedHashSet<>(
+                gyroAimPreferences.getStringSet(
+                        PreferenceConfiguration.GYRO_AIM_ACTIVATION_SOURCES_PREF_STRING,
+                        new java.util.LinkedHashSet<>()));
+        if (!gyroAimPreferences.contains(
+                PreferenceConfiguration.GYRO_AIM_ACTIVATION_SOURCES_PREF_STRING) &&
+                gyroAimPreferences.getBoolean(
+                        PreferenceConfiguration.GYRO_AIM_HOLD_ACTIVATION_PREF_STRING,
+                        false)) {
+            String legacySource = gyroAimPreferences.getString(
+                    PreferenceConfiguration.GYRO_AIM_ACTIVATION_SOURCE_PREF_STRING, "");
+            if (!legacySource.isEmpty()) {
+                sources.add(legacySource);
+            }
+        }
+        return sources;
+    }
+
+    private boolean isNormalGyroSourceHeld(GenericControllerContext context, String source) {
+        int flag;
+        switch (source) {
+            case ControllerKbmMapper.SOURCE_A: flag = ControllerPacket.A_FLAG; break;
+            case ControllerKbmMapper.SOURCE_B: flag = ControllerPacket.B_FLAG; break;
+            case ControllerKbmMapper.SOURCE_X: flag = ControllerPacket.X_FLAG; break;
+            case ControllerKbmMapper.SOURCE_Y: flag = ControllerPacket.Y_FLAG; break;
+            case ControllerKbmMapper.SOURCE_DPAD_UP: flag = ControllerPacket.UP_FLAG; break;
+            case ControllerKbmMapper.SOURCE_DPAD_DOWN: flag = ControllerPacket.DOWN_FLAG; break;
+            case ControllerKbmMapper.SOURCE_DPAD_LEFT: flag = ControllerPacket.LEFT_FLAG; break;
+            case ControllerKbmMapper.SOURCE_DPAD_RIGHT: flag = ControllerPacket.RIGHT_FLAG; break;
+            case ControllerKbmMapper.SOURCE_LB: flag = ControllerPacket.LB_FLAG; break;
+            case ControllerKbmMapper.SOURCE_RB: flag = ControllerPacket.RB_FLAG; break;
+            case ControllerKbmMapper.SOURCE_L3: flag = ControllerPacket.LS_CLK_FLAG; break;
+            case ControllerKbmMapper.SOURCE_R3: flag = ControllerPacket.RS_CLK_FLAG; break;
+            case ControllerKbmMapper.SOURCE_START: flag = ControllerPacket.PLAY_FLAG; break;
+            case ControllerKbmMapper.SOURCE_SELECT: flag = ControllerPacket.BACK_FLAG; break;
+            case ControllerKbmMapper.SOURCE_GUIDE: flag = ControllerPacket.SPECIAL_BUTTON_FLAG; break;
+            case ControllerKbmMapper.SOURCE_SHARE: flag = ControllerPacket.MISC_FLAG; break;
+            case ControllerKbmMapper.SOURCE_TOUCHPAD: flag = ControllerPacket.TOUCHPAD_FLAG; break;
+            case ControllerKbmMapper.SOURCE_PADDLE_1: flag = ControllerPacket.PADDLE1_FLAG; break;
+            case ControllerKbmMapper.SOURCE_PADDLE_2: flag = ControllerPacket.PADDLE2_FLAG; break;
+            case ControllerKbmMapper.SOURCE_PADDLE_3: flag = ControllerPacket.PADDLE3_FLAG; break;
+            case ControllerKbmMapper.SOURCE_PADDLE_4: flag = ControllerPacket.PADDLE4_FLAG; break;
+            case ControllerKbmMapper.SOURCE_LT: return context.leftTrigger != 0;
+            case ControllerKbmMapper.SOURCE_RT: return context.rightTrigger != 0;
+            default: return false;
+        }
+        return (context.inputMap & flag) != 0;
     }
 
     private float[] getCorrectedMotionValues(float[] values, boolean needsDeviceOrientationCorrection) {
@@ -1696,23 +1784,59 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     }
 
     private void toggleGyroAim(GenericControllerContext context) {
-        if (context.gyroAimActive) {
-            stopGyroAim(context);
-            if (prefConfig.controllerKbmMode) {
-                context.kbmGyroPaused = true;
-            }
-            Toast.makeText(activityContext, "Gyro aim: OFF", Toast.LENGTH_SHORT).show();
+        String currentMode = prefConfig.controllerKbmMode ?
+                controllerKbmMapper.getGyroActivationMode() :
+                getNormalGyroActivationMode();
+        boolean hasActivationButtons = prefConfig.controllerKbmMode ?
+                !controllerKbmMapper.getSelectedGyroActivationSources().isEmpty() :
+                !getNormalGyroActivationSources().isEmpty();
+        String nextMode;
+        if (ControllerKbmMapper.GYRO_ACTIVATION_OFF.equals(currentMode)) {
+            nextMode = ControllerKbmMapper.GYRO_ACTIVATION_ALWAYS;
+        }
+        else if (ControllerKbmMapper.GYRO_ACTIVATION_ALWAYS.equals(currentMode) &&
+                hasActivationButtons) {
+            nextMode = ControllerKbmMapper.GYRO_ACTIVATION_HELD;
         }
         else {
-            if (prefConfig.controllerKbmMode) {
-                context.kbmGyroPaused = false;
+            nextMode = ControllerKbmMapper.GYRO_ACTIVATION_OFF;
+        }
+
+        if (prefConfig.controllerKbmMode) {
+            gyroAimPreferences.edit()
+                    .putString(ControllerKbmMapper.PREF_GYRO_ACTIVATION_MODE, nextMode)
+                    .putBoolean(ControllerKbmMapper.PREF_GYRO_ENABLED,
+                            !ControllerKbmMapper.GYRO_ACTIVATION_OFF.equals(nextMode))
+                    .apply();
+            context.kbmGyroPaused = false;
+            refreshControllerKbmGyro();
+        }
+        else {
+            gyroAimPreferences.edit().putString(
+                    PreferenceConfiguration.GYRO_AIM_ACTIVATION_MODE_PREF_STRING,
+                    nextMode).apply();
+            if (ControllerKbmMapper.GYRO_ACTIVATION_OFF.equals(nextMode)) {
+                stopGyroAim(context);
             }
-            if (startGyroAim(context)) {
-                Toast.makeText(activityContext, "Gyro aim: ON", Toast.LENGTH_SHORT).show();
+            else if (!context.gyroAimActive) {
+                startGyroAim(context);
             }
-            else {
-                Toast.makeText(activityContext, "Gyro aim unavailable", Toast.LENGTH_SHORT).show();
-            }
+        }
+
+        boolean showStatus = gyroAimPreferences.getBoolean(
+                prefConfig.controllerKbmMode ?
+                        ControllerKbmMapper.PREF_GYRO_STATUS_OVERLAY :
+                        PreferenceConfiguration.GYRO_AIM_STATUS_OVERLAY_PREF_STRING,
+                prefConfig.controllerKbmMode ?
+                        ControllerKbmMapper.DEFAULT_GYRO_STATUS_OVERLAY :
+                        PreferenceConfiguration.DEFAULT_GYRO_AIM_STATUS_OVERLAY);
+        if (showStatus) {
+            int message = ControllerKbmMapper.GYRO_ACTIVATION_OFF.equals(nextMode) ?
+                    R.string.gyro_mode_off :
+                    ControllerKbmMapper.GYRO_ACTIVATION_HELD.equals(nextMode) ?
+                            R.string.gyro_mode_selected_buttons :
+                            R.string.gyro_mode_always_on;
+            Toast.makeText(activityContext, message, Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -1758,8 +1882,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     }
 
     private boolean handleGyroAimToggleCombo(GenericControllerContext context) {
-        if (!prefConfig.gyroToRightStick &&
-                !(prefConfig.controllerKbmMode && controllerKbmMapper.isGyroEnabled())) {
+        if (!prefConfig.gyroToRightStick && !prefConfig.controllerKbmMode) {
             return false;
         }
 
@@ -1776,8 +1899,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     }
 
     private boolean handleGyroAimComboButtonDown(GenericControllerContext context, int keyCode) {
-        if (!prefConfig.gyroToRightStick &&
-                !(prefConfig.controllerKbmMode && controllerKbmMapper.isGyroEnabled())) {
+        if (!prefConfig.gyroToRightStick && !prefConfig.controllerKbmMode) {
             return false;
         }
 
@@ -1804,8 +1926,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     }
 
     private boolean handleGyroAimComboButtonUp(GenericControllerContext context, int keyCode) {
-        if (!prefConfig.gyroToRightStick &&
-                !(prefConfig.controllerKbmMode && controllerKbmMapper.isGyroEnabled())) {
+        if (!prefConfig.gyroToRightStick && !prefConfig.controllerKbmMode) {
             return false;
         }
 
@@ -3049,6 +3170,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             String source = controllerKbmMapper.sourceForKeyEvent(event);
             if (ControllerKbmMapper.SOURCE_LT.equals(source) ||
                     ControllerKbmMapper.SOURCE_RT.equals(source)) {
+                if (ControllerKbmMapper.SOURCE_LT.equals(source)) {
+                    context.kbmLeftTriggerPressed = false;
+                }
+                else {
+                    context.kbmRightTriggerPressed = false;
+                }
                 controllerKbmMapper.handleTrigger(context, source, false);
                 return true;
             }
@@ -3323,6 +3450,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             if (ControllerKbmMapper.SOURCE_LT.equals(source) ||
                     ControllerKbmMapper.SOURCE_RT.equals(source)) {
                 ensureControllerKbmPolling(context);
+                if (ControllerKbmMapper.SOURCE_LT.equals(source)) {
+                    context.kbmLeftTriggerPressed = true;
+                }
+                else {
+                    context.kbmRightTriggerPressed = true;
+                }
                 controllerKbmMapper.handleTrigger(context, source, true);
                 return true;
             }

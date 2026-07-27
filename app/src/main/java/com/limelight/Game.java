@@ -2366,6 +2366,17 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         return controllerHandler != null ? controllerHandler.getControllerKbmMapper() : null;
     }
 
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (gameMenuCallbacks instanceof GameMenu &&
+                (requestCode == GameMenu.REQUEST_CODE_EXPORT_KBM_PRESET ||
+                        requestCode == GameMenu.REQUEST_CODE_IMPORT_KBM_PRESET)) {
+            ((GameMenu) gameMenuCallbacks).handleControllerKbmPresetActivityResult(
+                    requestCode, resultCode, data);
+        }
+    }
+
     public void loadControllerKbmPreset(ControllerKbmMapper.Preset preset) {
         if (controllerHandler != null) {
             controllerHandler.loadControllerKbmPreset(preset);

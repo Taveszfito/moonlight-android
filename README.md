@@ -12,7 +12,11 @@ This fork is based on [Artemis Android](https://github.com/ClassicOldSong/moonli
   - Adjust sensitivity and deadzone compensation.
   - Improved precision and flick handling.
   - Automatically use the Android device gyroscope when the controller has no motion sensor.
-  - Toggle gyro aim with Share + Triangle/Y while preserving standalone Share input.
+  - Enable or disable gyro smoothing.
+  - Choose between Off, Always on, or active only while selected controller buttons are held.
+  - Assign multiple gyro activation buttons.
+  - Cycle through the available gyro modes with Share + Triangle/Y while preserving standalone Share input.
+  - Show an optional toast with the current gyro mode after switching.
 - **Controller KBM Mode**
   - Hide Bluetooth and wired controllers from the host.
   - Convert controller input directly into keyboard and mouse events.
@@ -22,5 +26,11 @@ This fork is based on [Artemis Android](https://github.com/ClassicOldSong/moonli
   - Configure trigger threshold and Hold, Single press, or Repeat click behavior.
   - Use direct gyro-to-mouse aiming with adjustable sensitivity.
   - Independently invert the X, Y, and Z gyro axes.
-  - Pause or resume gyro mouse input with Share + Triangle/Y.
+  - Enable or disable gyro mouse smoothing.
+  - Choose between Off, Always on, or active only while selected mapped buttons are held.
+  - Assign multiple gyro activation buttons.
+  - Cycle through the available gyro mouse modes with Share + Triangle/Y.
+  - Show an optional toast with the current gyro mouse mode after switching.
   - Save, load, delete, and reset controller mapping presets.
+  - Export and import shareable controller mapping preset files.
+  - Manage, load, import, export, and delete presets directly from the main menu without starting a stream.

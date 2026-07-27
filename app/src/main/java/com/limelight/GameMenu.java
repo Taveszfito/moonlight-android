@@ -4,8 +4,10 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
@@ -25,6 +27,7 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
+import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
@@ -46,6 +49,10 @@ import com.limelight.utils.KeyConfigHelper;
 import com.limelight.utils.KeyMapper;
 
 import java.lang.reflect.Field;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -54,6 +61,9 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class GameMenu implements Game.GameMenuCallbacks {
+    public static final int REQUEST_CODE_EXPORT_KBM_PRESET = 779;
+    public static final int REQUEST_CODE_IMPORT_KBM_PRESET = 780;
+    private static final int MAX_PRESET_FILE_SIZE = 1024 * 1024;
 
     public static final long KEY_UP_DELAY = 25;
     private static final long TEST_GAME_FOCUS_DELAY = 10;
@@ -133,6 +143,8 @@ public class GameMenu implements Game.GameMenuCallbacks {
     private final Context dialogScreenContext;
 
     private AlertDialog currentDialog;
+    private String pendingPresetExport;
+    private GameInputDevice pendingPresetDevice;
     private boolean quickMenuEditMode;
     private int draggedQuickMenuIndex = -1;
     private String draggedQuickMenuId;
@@ -602,10 +614,12 @@ public class GameMenu implements Game.GameMenuCallbacks {
 
     private void showGyroAimSettingsMenu(GameInputDevice device) {
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(game);
+        ScrollView scrollView = new ScrollView(getThemedContext());
         LinearLayout layout = new LinearLayout(getThemedContext());
         layout.setOrientation(LinearLayout.VERTICAL);
         int padding = (int) (18 * game.getResources().getDisplayMetrics().density);
         layout.setPadding(padding, padding / 2, padding, 0);
+        scrollView.addView(layout);
 
         createGyroSensitivityRow(layout, prefs, getString(R.string.game_menu_gyro_aim_pitch),
                 PreferenceConfiguration.GYRO_AIM_PITCH_SENSITIVITY_PREF_STRING,
@@ -631,6 +645,38 @@ public class GameMenu implements Game.GameMenuCallbacks {
         SeekBar deadzoneSeekBar = (SeekBar) layout.getChildAt(layout.getChildCount() - 1);
         deadzoneSeekBar.setMax(50);
 
+        Switch smoothingSwitch = new Switch(getThemedContext());
+        smoothingSwitch.setText(R.string.game_menu_gyro_smoothing);
+        smoothingSwitch.setChecked(prefs.getBoolean(
+                PreferenceConfiguration.GYRO_AIM_SMOOTHING_PREF_STRING,
+                PreferenceConfiguration.DEFAULT_GYRO_AIM_SMOOTHING));
+        smoothingSwitch.setOnCheckedChangeListener((button, checked) ->
+                prefs.edit().putBoolean(
+                        PreferenceConfiguration.GYRO_AIM_SMOOTHING_PREF_STRING,
+                        checked).apply());
+        layout.addView(smoothingSwitch);
+
+        Switch overlaySwitch = new Switch(getThemedContext());
+        overlaySwitch.setText(R.string.game_menu_gyro_status_overlay);
+        overlaySwitch.setChecked(prefs.getBoolean(
+                PreferenceConfiguration.GYRO_AIM_STATUS_OVERLAY_PREF_STRING,
+                PreferenceConfiguration.DEFAULT_GYRO_AIM_STATUS_OVERLAY));
+        overlaySwitch.setOnCheckedChangeListener((button, checked) ->
+                prefs.edit().putBoolean(
+                        PreferenceConfiguration.GYRO_AIM_STATUS_OVERLAY_PREF_STRING,
+                        checked).apply());
+        layout.addView(overlaySwitch);
+
+        ControllerKbmMapper mapper = game.getControllerKbmMapper();
+        List<String> activationSources = mapper != null ?
+                mapper.getStandardGyroActivationSources() : new ArrayList<>();
+        addGyroActivationControls(layout, prefs, device, mapper, activationSources,
+                PreferenceConfiguration.GYRO_AIM_ACTIVATION_MODE_PREF_STRING,
+                PreferenceConfiguration.GYRO_AIM_ACTIVATION_SOURCES_PREF_STRING,
+                PreferenceConfiguration.GYRO_AIM_ACTIVATION_SOURCE_PREF_STRING,
+                PreferenceConfiguration.GYRO_AIM_HOLD_ACTIVATION_PREF_STRING,
+                false);
+
         linkSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
             prefs.edit().putBoolean(PreferenceConfiguration.GYRO_AIM_LINK_SIDE_AXES_PREF_STRING, isChecked).apply();
             verticalSeekBar.setEnabled(!isChecked);
@@ -643,7 +689,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
         }
         currentDialog = new AlertDialog.Builder(getThemedContext())
                 .setTitle(R.string.game_menu_gyro_aim_settings)
-                .setView(layout)
+                .setView(scrollView)
                 .setPositiveButton(R.string.game_menu_done, (dialog, which) -> showAdvancedMenu(device))
                 .create();
         currentDialog.show();
@@ -688,6 +734,190 @@ public class GameMenu implements Game.GameMenuCallbacks {
                     return "Controller scan code " + source.substring("scancode_".length());
                 }
                 return source;
+        }
+    }
+
+    private Set<String> getGyroActivationSelection(SharedPreferences prefs,
+                                                    String sourcesKey,
+                                                    String legacySourceKey,
+                                                    String legacyHoldKey) {
+        Set<String> selected = new java.util.LinkedHashSet<>(
+                prefs.getStringSet(sourcesKey, new java.util.LinkedHashSet<>()));
+        if (!prefs.contains(sourcesKey) && prefs.getBoolean(legacyHoldKey, false)) {
+            String legacySource = prefs.getString(legacySourceKey, "");
+            if (!legacySource.isEmpty()) {
+                selected.add(legacySource);
+            }
+        }
+        return selected;
+    }
+
+    private void addGyroActivationControls(LinearLayout layout,
+                                            SharedPreferences prefs,
+                                            GameInputDevice device,
+                                            ControllerKbmMapper mapper,
+                                            List<String> availableSources,
+                                            String modeKey,
+                                            String sourcesKey,
+                                            String legacySourceKey,
+                                            String legacyHoldKey,
+                                            boolean kbmMode) {
+        Set<String> selectedSources = getGyroActivationSelection(
+                prefs, sourcesKey, legacySourceKey, legacyHoldKey);
+        selectedSources.retainAll(availableSources);
+
+        String currentMode;
+        if (prefs.contains(modeKey)) {
+            currentMode = prefs.getString(modeKey,
+                    ControllerKbmMapper.GYRO_ACTIVATION_ALWAYS);
+        }
+        else {
+            currentMode = kbmMode &&
+                    !prefs.getBoolean(ControllerKbmMapper.PREF_GYRO_ENABLED, false) ?
+                    ControllerKbmMapper.GYRO_ACTIVATION_OFF :
+                    prefs.getBoolean(legacyHoldKey, false) ?
+                    ControllerKbmMapper.GYRO_ACTIVATION_HELD :
+                    ControllerKbmMapper.GYRO_ACTIVATION_ALWAYS;
+        }
+        if (selectedSources.isEmpty() &&
+                ControllerKbmMapper.GYRO_ACTIVATION_HELD.equals(currentMode)) {
+            currentMode = ControllerKbmMapper.GYRO_ACTIVATION_ALWAYS;
+            prefs.edit().putString(modeKey, currentMode).apply();
+        }
+
+        TextView modeLabel = new TextView(getThemedContext());
+        modeLabel.setText(R.string.game_menu_gyro_activation_mode);
+        modeLabel.setTextSize(16);
+        layout.addView(modeLabel);
+
+        List<String> modeLabels = new ArrayList<>();
+        List<String> modeValues = new ArrayList<>();
+        modeLabels.add(getString(R.string.game_menu_gyro_activation_off));
+        modeValues.add(ControllerKbmMapper.GYRO_ACTIVATION_OFF);
+        modeLabels.add(getString(R.string.game_menu_gyro_activation_always));
+        modeValues.add(ControllerKbmMapper.GYRO_ACTIVATION_ALWAYS);
+        if (!selectedSources.isEmpty()) {
+            modeLabels.add(getString(R.string.game_menu_gyro_activation_held));
+            modeValues.add(ControllerKbmMapper.GYRO_ACTIVATION_HELD);
+        }
+
+        Spinner modeSpinner = new Spinner(getThemedContext());
+        ArrayAdapter<String> modeAdapter = new ArrayAdapter<>(
+                getThemedContext(), android.R.layout.simple_spinner_item, modeLabels);
+        modeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        modeSpinner.setAdapter(modeAdapter);
+        int modeIndex = modeValues.indexOf(currentMode);
+        modeSpinner.setSelection(Math.max(0, modeIndex));
+        modeSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view,
+                                       int position, long id) {
+                String mode = modeValues.get(position);
+                SharedPreferences.Editor editor = prefs.edit().putString(modeKey, mode);
+                if (kbmMode) {
+                    editor.putBoolean(ControllerKbmMapper.PREF_GYRO_ENABLED,
+                            !ControllerKbmMapper.GYRO_ACTIVATION_OFF.equals(mode));
+                }
+                editor.apply();
+                if (kbmMode) {
+                    game.refreshControllerKbmGyro();
+                }
+            }
+
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
+        });
+        layout.addView(modeSpinner);
+
+        LinearLayout heading = new LinearLayout(getThemedContext());
+        heading.setOrientation(LinearLayout.HORIZONTAL);
+        TextView buttonsLabel = new TextView(getThemedContext());
+        buttonsLabel.setText(R.string.game_menu_gyro_activation_buttons);
+        buttonsLabel.setTextSize(16);
+        buttonsLabel.setLayoutParams(new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
+        heading.addView(buttonsLabel);
+
+        Button addButton = new Button(getThemedContext());
+        addButton.setText("+");
+        heading.addView(addButton);
+        layout.addView(heading);
+
+        List<String> candidates = new ArrayList<>(availableSources);
+        candidates.removeAll(selectedSources);
+        addButton.setEnabled(!candidates.isEmpty());
+        addButton.setOnClickListener(view -> {
+            if (currentDialog != null) {
+                currentDialog.dismiss();
+            }
+            String[] labels = new String[candidates.size()];
+            for (int i = 0; i < candidates.size(); i++) {
+                labels[i] = getControllerKbmSourceLabel(candidates.get(i));
+            }
+            currentDialog = new AlertDialog.Builder(getThemedContext())
+                    .setTitle(R.string.game_menu_gyro_add_activation_button)
+                    .setItems(labels, (dialog, which) -> {
+                        Set<String> updated = getGyroActivationSelection(
+                                prefs, sourcesKey, legacySourceKey, legacyHoldKey);
+                        updated.add(candidates.get(which));
+                        prefs.edit()
+                                .putStringSet(sourcesKey, updated)
+                                .remove(legacySourceKey)
+                                .putBoolean(legacyHoldKey, false)
+                                .apply();
+                        if (kbmMode) {
+                            showControllerKbmSettings(device, mapper);
+                        }
+                        else {
+                            showGyroAimSettingsMenu(device);
+                        }
+                    })
+                    .setNegativeButton(R.string.game_menu_cancel, (dialog, which) -> {
+                        if (kbmMode) {
+                            showControllerKbmSettings(device, mapper);
+                        }
+                        else {
+                            showGyroAimSettingsMenu(device);
+                        }
+                    })
+                    .create();
+            currentDialog.show();
+        });
+
+        for (String source : selectedSources) {
+            LinearLayout row = new LinearLayout(getThemedContext());
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            TextView sourceLabel = new TextView(getThemedContext());
+            sourceLabel.setText(getControllerKbmSourceLabel(source));
+            sourceLabel.setTextSize(16);
+            sourceLabel.setLayoutParams(new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
+            row.addView(sourceLabel);
+
+            Button removeButton = new Button(getThemedContext());
+            removeButton.setText("−");
+            removeButton.setOnClickListener(view -> {
+                Set<String> updated = getGyroActivationSelection(
+                        prefs, sourcesKey, legacySourceKey, legacyHoldKey);
+                updated.remove(source);
+                SharedPreferences.Editor editor = prefs.edit()
+                        .putStringSet(sourcesKey, updated)
+                        .remove(legacySourceKey)
+                        .putBoolean(legacyHoldKey, false);
+                if (updated.isEmpty() && ControllerKbmMapper.GYRO_ACTIVATION_HELD.equals(
+                        prefs.getString(modeKey,
+                                ControllerKbmMapper.GYRO_ACTIVATION_ALWAYS))) {
+                    editor.putString(modeKey, ControllerKbmMapper.GYRO_ACTIVATION_ALWAYS);
+                }
+                editor.apply();
+                if (kbmMode) {
+                    showControllerKbmSettings(device, mapper);
+                }
+                else {
+                    showGyroAimSettingsMenu(device);
+                }
+            });
+            row.addView(removeButton);
+            layout.addView(row);
         }
     }
 
@@ -968,6 +1198,9 @@ public class GameMenu implements Game.GameMenuCallbacks {
     }
 
     private void showControllerKbmSettings(GameInputDevice device, ControllerKbmMapper mapper) {
+        if (currentDialog != null) {
+            currentDialog.dismiss();
+        }
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(game);
         ScrollView scrollView = new ScrollView(getThemedContext());
         LinearLayout layout = new LinearLayout(getThemedContext());
@@ -1045,10 +1278,6 @@ public class GameMenu implements Game.GameMenuCallbacks {
             @Override public void onNothingSelected(AdapterView<?> parent) {}
         });
 
-        Switch gyroSwitch = new Switch(getThemedContext());
-        gyroSwitch.setText(R.string.game_menu_controller_kbm_gyro);
-        gyroSwitch.setChecked(prefs.getBoolean(ControllerKbmMapper.PREF_GYRO_ENABLED, false));
-        layout.addView(gyroSwitch);
         addControllerKbmSlider(layout, prefs, R.string.game_menu_controller_kbm_gyro_sensitivity,
                 ControllerKbmMapper.PREF_GYRO_SENSITIVITY,
                 ControllerKbmMapper.DEFAULT_GYRO_SENSITIVITY, 300);
@@ -1077,20 +1306,33 @@ public class GameMenu implements Game.GameMenuCallbacks {
                 prefs.edit().putBoolean(ControllerKbmMapper.PREF_GYRO_INVERT_Z, checked).apply());
         layout.addView(gyroInvertZ);
 
-        gyroLabel.setEnabled(gyroSwitch.isChecked());
-        gyroSensitivity.setEnabled(gyroSwitch.isChecked());
-        gyroInvertX.setEnabled(gyroSwitch.isChecked());
-        gyroInvertY.setEnabled(gyroSwitch.isChecked());
-        gyroInvertZ.setEnabled(gyroSwitch.isChecked());
-        gyroSwitch.setOnCheckedChangeListener((button, checked) -> {
-            prefs.edit().putBoolean(ControllerKbmMapper.PREF_GYRO_ENABLED, checked).apply();
-            gyroLabel.setEnabled(checked);
-            gyroSensitivity.setEnabled(checked);
-            gyroInvertX.setEnabled(checked);
-            gyroInvertY.setEnabled(checked);
-            gyroInvertZ.setEnabled(checked);
-            game.refreshControllerKbmGyro();
-        });
+        Switch gyroSmoothing = new Switch(getThemedContext());
+        gyroSmoothing.setText(R.string.game_menu_gyro_smoothing);
+        gyroSmoothing.setChecked(prefs.getBoolean(
+                ControllerKbmMapper.PREF_GYRO_SMOOTHING,
+                ControllerKbmMapper.DEFAULT_GYRO_SMOOTHING));
+        gyroSmoothing.setOnCheckedChangeListener((button, checked) ->
+                prefs.edit().putBoolean(
+                        ControllerKbmMapper.PREF_GYRO_SMOOTHING, checked).apply());
+        layout.addView(gyroSmoothing);
+
+        Switch gyroStatusOverlay = new Switch(getThemedContext());
+        gyroStatusOverlay.setText(R.string.game_menu_gyro_status_overlay);
+        gyroStatusOverlay.setChecked(prefs.getBoolean(
+                ControllerKbmMapper.PREF_GYRO_STATUS_OVERLAY,
+                ControllerKbmMapper.DEFAULT_GYRO_STATUS_OVERLAY));
+        gyroStatusOverlay.setOnCheckedChangeListener((button, checked) ->
+                prefs.edit().putBoolean(
+                        ControllerKbmMapper.PREF_GYRO_STATUS_OVERLAY, checked).apply());
+        layout.addView(gyroStatusOverlay);
+
+        List<String> activationSources = mapper.getGyroActivationSources(true);
+        addGyroActivationControls(layout, prefs, device, mapper, activationSources,
+                ControllerKbmMapper.PREF_GYRO_ACTIVATION_MODE,
+                ControllerKbmMapper.PREF_GYRO_ACTIVATION_SOURCES,
+                ControllerKbmMapper.PREF_GYRO_ACTIVATION_SOURCE,
+                ControllerKbmMapper.PREF_GYRO_HOLD_ACTIVATION,
+                true);
 
         currentDialog = new AlertDialog.Builder(getThemedContext())
                 .setTitle(R.string.game_menu_controller_kbm_settings)
@@ -1135,6 +1377,126 @@ public class GameMenu implements Game.GameMenuCallbacks {
                     Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
         return text;
+    }
+
+    private void exportControllerKbmPreset(GameInputDevice device,
+                                            ControllerKbmMapper mapper,
+                                            ControllerKbmMapper.Preset preset) {
+        try {
+            pendingPresetExport = mapper.exportPreset(preset);
+            pendingPresetDevice = device;
+            String safeName = preset.getDisplayName().replaceAll("[\\\\/:*?\"<>|]", "_");
+            Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("application/json");
+            intent.putExtra(Intent.EXTRA_TITLE, safeName + ".artemis-kbm.json");
+            game.startActivityForResult(intent, REQUEST_CODE_EXPORT_KBM_PRESET);
+        }
+        catch (Exception e) {
+            pendingPresetExport = null;
+            Toast.makeText(game, R.string.game_menu_controller_kbm_export_failed,
+                    Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void importControllerKbmPreset(GameInputDevice device) {
+        pendingPresetDevice = device;
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {
+                "application/json", "text/json", "text/plain", "application/octet-stream"
+        });
+        try {
+            game.startActivityForResult(intent, REQUEST_CODE_IMPORT_KBM_PRESET);
+        }
+        catch (Exception e) {
+            Toast.makeText(game, R.string.game_menu_controller_kbm_import_failed,
+                    Toast.LENGTH_LONG).show();
+        }
+    }
+
+    public void handleControllerKbmPresetActivityResult(int requestCode,
+                                                         int resultCode,
+                                                         Intent data) {
+        if (requestCode != REQUEST_CODE_EXPORT_KBM_PRESET &&
+                requestCode != REQUEST_CODE_IMPORT_KBM_PRESET) {
+            return;
+        }
+        if (resultCode != Activity.RESULT_OK || data == null || data.getData() == null) {
+            pendingPresetExport = null;
+            if (requestCode == REQUEST_CODE_EXPORT_KBM_PRESET) {
+                ControllerKbmMapper mapper = game.getControllerKbmMapper();
+                if (mapper != null) {
+                    showControllerKbmLoadPreset(pendingPresetDevice, mapper);
+                }
+            }
+            else {
+                showControllerKbmMenu(pendingPresetDevice);
+            }
+            return;
+        }
+
+        Uri uri = data.getData();
+        if (requestCode == REQUEST_CODE_EXPORT_KBM_PRESET) {
+            try (OutputStream output = game.getContentResolver().openOutputStream(uri, "wt")) {
+                if (output == null || pendingPresetExport == null) {
+                    throw new IllegalStateException("Unable to open preset output");
+                }
+                output.write(pendingPresetExport.getBytes(StandardCharsets.UTF_8));
+                output.flush();
+                Toast.makeText(game, R.string.game_menu_controller_kbm_export_success,
+                        Toast.LENGTH_SHORT).show();
+            }
+            catch (Exception e) {
+                Toast.makeText(game, R.string.game_menu_controller_kbm_export_failed,
+                        Toast.LENGTH_LONG).show();
+            }
+            finally {
+                pendingPresetExport = null;
+                ControllerKbmMapper mapper = game.getControllerKbmMapper();
+                if (mapper != null) {
+                    showControllerKbmLoadPreset(pendingPresetDevice, mapper);
+                }
+            }
+            return;
+        }
+
+        try (InputStream input = game.getContentResolver().openInputStream(uri);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            if (input == null) {
+                throw new IllegalStateException("Unable to open preset input");
+            }
+            byte[] buffer = new byte[8192];
+            int total = 0;
+            int count;
+            while ((count = input.read(buffer)) != -1) {
+                total += count;
+                if (total > MAX_PRESET_FILE_SIZE) {
+                    throw new IllegalArgumentException("Preset file is too large");
+                }
+                output.write(buffer, 0, count);
+            }
+            ControllerKbmMapper mapper = game.getControllerKbmMapper();
+            if (mapper == null) {
+                throw new IllegalStateException("Controller mapper unavailable");
+            }
+            String serialized = output.toString(StandardCharsets.UTF_8.name());
+            if (!serialized.isEmpty() && serialized.charAt(0) == '\uFEFF') {
+                serialized = serialized.substring(1);
+            }
+            ControllerKbmMapper.Preset imported = mapper.importPreset(serialized);
+            Toast.makeText(game, game.getString(
+                            R.string.game_menu_controller_kbm_import_success,
+                            imported.getDisplayName()),
+                    Toast.LENGTH_SHORT).show();
+            showControllerKbmLoadPreset(pendingPresetDevice, mapper);
+        }
+        catch (Exception e) {
+            Toast.makeText(game, R.string.game_menu_controller_kbm_import_failed,
+                    Toast.LENGTH_LONG).show();
+            showControllerKbmMenu(pendingPresetDevice);
+        }
     }
 
     private void showControllerKbmSavePreset(GameInputDevice device, ControllerKbmMapper mapper) {
@@ -1223,6 +1585,21 @@ public class GameMenu implements Game.GameMenuCallbacks {
                         };
                         row.setOnClickListener(loadPreset);
                         name.setOnClickListener(loadPreset);
+
+                        ImageButton export = new ImageButton(getThemedContext());
+                        export.setImageResource(android.R.drawable.ic_menu_share);
+                        export.setBackgroundColor(0x00000000);
+                        export.setFocusable(false);
+                        export.setFocusableInTouchMode(false);
+                        export.setContentDescription(
+                                getString(R.string.game_menu_controller_kbm_export_preset));
+                        export.setOnClickListener(view -> {
+                            if (currentDialog != null) {
+                                currentDialog.dismiss();
+                            }
+                            exportControllerKbmPreset(device, mapper, preset);
+                        });
+                        row.addView(export);
 
                         ImageButton delete = new ImageButton(getThemedContext());
                         delete.setImageResource(android.R.drawable.ic_menu_delete);
@@ -1339,6 +1716,17 @@ public class GameMenu implements Game.GameMenuCallbacks {
             showControllerKbmLoadPreset(device, mapper);
         });
         header.addView(loadPreset);
+
+        ImageButton importPreset = new ImageButton(getThemedContext());
+        importPreset.setImageResource(android.R.drawable.ic_menu_add);
+        importPreset.setBackgroundColor(0x00000000);
+        importPreset.setContentDescription(
+                getString(R.string.game_menu_controller_kbm_import_preset));
+        importPreset.setOnClickListener(view -> {
+            if (currentDialog != null) currentDialog.dismiss();
+            importControllerKbmPreset(device);
+        });
+        header.addView(importPreset);
 
         ImageButton reset = new ImageButton(getThemedContext());
         reset.setImageResource(android.R.drawable.ic_menu_revert);

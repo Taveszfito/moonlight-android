@@ -72,20 +72,33 @@ public final class ControllerKbmMapper {
     public static final String PREF_GYRO_INVERT_X = "controller_kbm_gyro_invert_x";
     public static final String PREF_GYRO_INVERT_Y = "controller_kbm_gyro_invert_y";
     public static final String PREF_GYRO_INVERT_Z = "controller_kbm_gyro_invert_z";
+    public static final String PREF_GYRO_SMOOTHING = "controller_kbm_gyro_smoothing";
+    public static final String PREF_GYRO_STATUS_OVERLAY = "controller_kbm_gyro_status_overlay";
+    public static final String PREF_GYRO_HOLD_ACTIVATION = "controller_kbm_gyro_hold_activation";
+    public static final String PREF_GYRO_ACTIVATION_SOURCE = "controller_kbm_gyro_activation_source";
+    public static final String PREF_GYRO_ACTIVATION_MODE = "controller_kbm_gyro_activation_mode";
+    public static final String PREF_GYRO_ACTIVATION_SOURCES = "controller_kbm_gyro_activation_sources";
     public static final String PREF_CONTINUOUS_STICK_MOUSE = "controller_kbm_continuous_stick_mouse";
     public static final String PREF_TRIGGER_BEHAVIOR = "controller_kbm_trigger_behavior";
     public static final String PREF_TRIGGER_REPEAT_RATE = "controller_kbm_trigger_repeat_rate";
     public static final String TRIGGER_BEHAVIOR_HOLD = "hold";
     public static final String TRIGGER_BEHAVIOR_SINGLE = "single";
     public static final String TRIGGER_BEHAVIOR_REPEAT = "repeat";
+    public static final String GYRO_ACTIVATION_OFF = "off";
+    public static final String GYRO_ACTIVATION_ALWAYS = "always";
+    public static final String GYRO_ACTIVATION_HELD = "held";
     private static final String PREF_MAPPING_PREFIX = "controller_kbm_mapping_";
     private static final String PREF_CUSTOM_BUTTONS = "controller_kbm_custom_buttons";
     private static final String PREF_PRESETS = "controller_kbm_presets";
+    private static final String PRESET_FILE_FORMAT = "artemis-controller-kbm-preset";
+    private static final int PRESET_FILE_VERSION = 1;
 
     public static final int DEFAULT_STICK_SPEED = 100;
     public static final int DEFAULT_TRIGGER_THRESHOLD = 15;
     public static final int DEFAULT_GYRO_SENSITIVITY = 100;
     public static final boolean DEFAULT_GYRO_INVERT_X = true;
+    public static final boolean DEFAULT_GYRO_SMOOTHING = true;
+    public static final boolean DEFAULT_GYRO_STATUS_OVERLAY = true;
     public static final int DEFAULT_TRIGGER_REPEAT_RATE = 8;
 
     private static final List<String> STANDARD_SOURCES = Arrays.asList(
@@ -135,6 +148,31 @@ public final class ControllerKbmMapper {
         return sources;
     }
 
+    public List<String> getGyroActivationSources(boolean mappedOnly) {
+        List<String> sources = new ArrayList<>();
+        for (String source : getSources()) {
+            if (!isAxisSource(source) &&
+                    !SOURCE_SHARE.equals(source) &&
+                    !SOURCE_SELECT.equals(source) &&
+                    (!mappedOnly || !getAction(source).isEmpty())) {
+                sources.add(source);
+            }
+        }
+        return sources;
+    }
+
+    public List<String> getStandardGyroActivationSources() {
+        List<String> sources = new ArrayList<>();
+        for (String source : STANDARD_SOURCES) {
+            if (!isAxisSource(source) &&
+                    !SOURCE_SHARE.equals(source) &&
+                    !SOURCE_SELECT.equals(source)) {
+                sources.add(source);
+            }
+        }
+        return sources;
+    }
+
     public boolean addCustomSource(String source) {
         Set<String> sources = new LinkedHashSet<>(
                 preferences.getStringSet(PREF_CUSTOM_BUTTONS, new LinkedHashSet<>()));
@@ -172,6 +210,58 @@ public final class ControllerKbmMapper {
         presets.add(preset);
         writePresets(presets);
         return preset;
+    }
+
+    public String exportPreset(Preset preset) throws JSONException {
+        JSONObject mappings = new JSONObject();
+        for (Map.Entry<String, String> entry : preset.mappings.entrySet()) {
+            mappings.put(entry.getKey(), entry.getValue());
+        }
+
+        JSONObject root = new JSONObject();
+        root.put("format", PRESET_FILE_FORMAT);
+        root.put("version", PRESET_FILE_VERSION);
+        root.put("name", preset.baseName);
+        root.put("mappings", mappings);
+        return root.toString(2);
+    }
+
+    public Preset importPreset(String serialized) throws JSONException {
+        JSONObject root = new JSONObject(serialized);
+        if (!PRESET_FILE_FORMAT.equals(root.optString("format")) ||
+                root.optInt("version", -1) != PRESET_FILE_VERSION) {
+            throw new JSONException("Unsupported controller preset format");
+        }
+
+        String baseName = root.getString("name").trim();
+        if (baseName.isEmpty()) {
+            throw new JSONException("Preset name is empty");
+        }
+        JSONObject mappingObject = root.getJSONObject("mappings");
+        LinkedHashMap<String, String> mappings = new LinkedHashMap<>();
+        JSONArray names = mappingObject.names();
+        if (names != null) {
+            for (int i = 0; i < names.length(); i++) {
+                String source = names.getString(i);
+                String action = mappingObject.getString(source);
+                if (!source.isEmpty()) {
+                    mappings.put(source, action);
+                }
+            }
+        }
+
+        List<Preset> presets = getPresets();
+        int duplicateIndex = 0;
+        for (Preset preset : presets) {
+            if (preset.baseName.equals(baseName)) {
+                duplicateIndex = Math.max(duplicateIndex, preset.duplicateIndex + 1);
+            }
+        }
+        Preset imported = new Preset(UUID.randomUUID().toString(), baseName,
+                duplicateIndex, mappings);
+        presets.add(imported);
+        writePresets(presets);
+        return imported;
     }
 
     public List<Preset> getPresets() {
@@ -284,7 +374,31 @@ public final class ControllerKbmMapper {
     }
 
     public boolean isGyroEnabled() {
-        return preferences.getBoolean(PREF_GYRO_ENABLED, false);
+        return preferences.getBoolean(PREF_GYRO_ENABLED, false) &&
+                !GYRO_ACTIVATION_OFF.equals(getGyroActivationMode());
+    }
+
+    public String getGyroActivationMode() {
+        if (preferences.contains(PREF_GYRO_ACTIVATION_MODE)) {
+            return preferences.getString(PREF_GYRO_ACTIVATION_MODE,
+                    GYRO_ACTIVATION_ALWAYS);
+        }
+        return preferences.getBoolean(PREF_GYRO_HOLD_ACTIVATION, false) ?
+                GYRO_ACTIVATION_HELD : GYRO_ACTIVATION_ALWAYS;
+    }
+
+    public Set<String> getSelectedGyroActivationSources() {
+        Set<String> sources = new LinkedHashSet<>(
+                preferences.getStringSet(PREF_GYRO_ACTIVATION_SOURCES,
+                        new LinkedHashSet<>()));
+        if (!preferences.contains(PREF_GYRO_ACTIVATION_SOURCES) &&
+                preferences.getBoolean(PREF_GYRO_HOLD_ACTIVATION, false)) {
+            String legacySource = preferences.getString(PREF_GYRO_ACTIVATION_SOURCE, "");
+            if (!legacySource.isEmpty()) {
+                sources.add(legacySource);
+            }
+        }
+        return sources;
     }
 
     public int getTriggerThreshold() {
@@ -641,6 +755,25 @@ public final class ControllerKbmMapper {
         if (!isGyroEnabled()) {
             return;
         }
+        if (GYRO_ACTIVATION_HELD.equals(getGyroActivationMode())) {
+            boolean anyHeld = false;
+            for (String source : getSelectedGyroActivationSources()) {
+                if (SOURCE_LT.equals(source) ? context.kbmLeftTriggerPressed :
+                        SOURCE_RT.equals(source) ? context.kbmRightTriggerPressed :
+                                context.kbmPressedSources.contains(source)) {
+                    anyHeld = true;
+                    break;
+                }
+            }
+            if (!anyHeld) {
+                context.kbmLastGyroSampleNs = 0;
+                context.kbmGyroFilteredX = 0.0f;
+                context.kbmGyroFilteredY = 0.0f;
+                context.kbmGyroRemainderX = 0.0f;
+                context.kbmGyroRemainderY = 0.0f;
+                return;
+            }
+        }
         if (preferences.getBoolean(PREF_GYRO_INVERT_X, DEFAULT_GYRO_INVERT_X)) {
             x = -x;
         }
@@ -670,8 +803,12 @@ public final class ControllerKbmMapper {
         float velocityY = x * inputScale;
         if (Math.abs(velocityX) < 0.5f) velocityX = 0.0f;
         if (Math.abs(velocityY) < 0.5f) velocityY = 0.0f;
-        context.kbmGyroFilteredX += (velocityX - context.kbmGyroFilteredX) * 0.35f;
-        context.kbmGyroFilteredY += (velocityY - context.kbmGyroFilteredY) * 0.35f;
+        float smoothingAlpha = preferences.getBoolean(PREF_GYRO_SMOOTHING,
+                DEFAULT_GYRO_SMOOTHING) ? 0.35f : 1.0f;
+        context.kbmGyroFilteredX +=
+                (velocityX - context.kbmGyroFilteredX) * smoothingAlpha;
+        context.kbmGyroFilteredY +=
+                (velocityY - context.kbmGyroFilteredY) * smoothingAlpha;
 
         context.kbmGyroRemainderX += context.kbmGyroFilteredX * deltaSeconds * sensitivity;
         context.kbmGyroRemainderY += context.kbmGyroFilteredY * deltaSeconds * sensitivity;

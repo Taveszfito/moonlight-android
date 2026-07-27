@@ -101,6 +101,12 @@ public class PreferenceConfiguration {
     public static final String GYRO_AIM_VERTICAL_SENSITIVITY_PREF_STRING = "gyro_aim_vertical_sensitivity";
     public static final String GYRO_AIM_DEADZONE_COMPENSATION_PREF_STRING = "gyro_aim_deadzone_compensation";
     public static final String GYRO_AIM_LINK_SIDE_AXES_PREF_STRING = "gyro_aim_link_side_axes";
+    public static final String GYRO_AIM_SMOOTHING_PREF_STRING = "gyro_aim_smoothing";
+    public static final String GYRO_AIM_STATUS_OVERLAY_PREF_STRING = "gyro_aim_status_overlay";
+    public static final String GYRO_AIM_HOLD_ACTIVATION_PREF_STRING = "gyro_aim_hold_activation";
+    public static final String GYRO_AIM_ACTIVATION_SOURCE_PREF_STRING = "gyro_aim_activation_source";
+    public static final String GYRO_AIM_ACTIVATION_MODE_PREF_STRING = "gyro_aim_activation_mode";
+    public static final String GYRO_AIM_ACTIVATION_SOURCES_PREF_STRING = "gyro_aim_activation_sources";
     private static final String GAMEPAD_MOTION_FALLBACK_PREF_STRING = "checkbox_gamepad_motion_fallback";
     private static final String FORCE_MOTION_SENSORS_FALLBACK_PREF_STRING = "checkbox_force_device_motion";
     private static final String FULL_SCREEN_PREF_STRING = "checkbox_full_screen";
@@ -202,6 +208,8 @@ public class PreferenceConfiguration {
     public static final int DEFAULT_GYRO_AIM_VERTICAL_SENSITIVITY = 100;
     public static final int DEFAULT_GYRO_AIM_DEADZONE_COMPENSATION = 0;
     public static final boolean DEFAULT_GYRO_AIM_LINK_SIDE_AXES = false;
+    public static final boolean DEFAULT_GYRO_AIM_SMOOTHING = true;
+    public static final boolean DEFAULT_GYRO_AIM_STATUS_OVERLAY = true;
     private static final boolean DEFAULT_GAMEPAD_MOTION_FALLBACK = false;
     private static final boolean DEFAULT_FORCE_MOTION_SENSORS_FALLBACK = false;
     private static final boolean DEFAULT_ENABLE_RUMBLE = true;
