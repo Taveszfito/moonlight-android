@@ -448,6 +448,7 @@
     <string name="game_menu_controller_kbm_key_end">End</string>
     <string name="game_menu_controller_kbm_key_page_up">Page Up</string>
     <string name="game_menu_controller_kbm_key_page_down">Page Down</string>
+    <string name="game_menu_controller_kbm_function_keys">F1–F12</string>
     <string name="game_menu_controller_kbm_mouse_left">Left mouse button</string>
     <string name="game_menu_controller_kbm_mouse_right">Right mouse button</string>
     <string name="game_menu_controller_kbm_mouse_middle">Middle mouse button</string>

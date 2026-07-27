@@ -88,6 +88,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
     private static final String ADV_CONTROLLER_KBM = "advanced_controller_kbm";
     private static final String ADV_SEND_KEYS = "advanced_send_keys";
     private static final String ADV_TOUCH_SENSITIVITY = "advanced_touch_sensitivity";
+    private static final String CONTROLLER_KBM_PICK_FUNCTION_KEY = "pick_function_key";
 
     private static final List<String> DEFAULT_QUICK_MENU_ORDER = Arrays.asList(
             MENU_DISCONNECT,
@@ -831,6 +832,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
                     getString(R.string.game_menu_controller_kbm_key_end),
                     getString(R.string.game_menu_controller_kbm_key_page_up),
                     getString(R.string.game_menu_controller_kbm_key_page_down),
+                    getString(R.string.game_menu_controller_kbm_function_keys),
                     getString(R.string.game_menu_controller_kbm_mouse_left),
                     getString(R.string.game_menu_controller_kbm_mouse_right),
                     getString(R.string.game_menu_controller_kbm_mouse_middle),
@@ -858,6 +860,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
                     ControllerKbmMapper.ACTION_KEY_PREFIX + KeyEvent.KEYCODE_MOVE_END,
                     ControllerKbmMapper.ACTION_KEY_PREFIX + KeyEvent.KEYCODE_PAGE_UP,
                     ControllerKbmMapper.ACTION_KEY_PREFIX + KeyEvent.KEYCODE_PAGE_DOWN,
+                    CONTROLLER_KBM_PICK_FUNCTION_KEY,
                     ControllerKbmMapper.ACTION_MOUSE_LEFT,
                     ControllerKbmMapper.ACTION_MOUSE_RIGHT,
                     ControllerKbmMapper.ACTION_MOUSE_MIDDLE,
@@ -874,6 +877,9 @@ public class GameMenu implements Game.GameMenuCallbacks {
                     if (ControllerKbmMapper.ACTION_KEY_PREFIX.equals(actions[which])) {
                         showControllerKbmKeyboardCapture(device, mapper, source);
                     }
+                    else if (CONTROLLER_KBM_PICK_FUNCTION_KEY.equals(actions[which])) {
+                        showControllerKbmFunctionKeyPicker(device, mapper, source);
+                    }
                     else {
                         mapper.setAction(source, actions[which]);
                         showControllerKbmMenu(device);
@@ -881,6 +887,27 @@ public class GameMenu implements Game.GameMenuCallbacks {
                 })
                 .setNegativeButton(R.string.game_menu_cancel,
                         (dialog, which) -> showControllerKbmMenu(device))
+                .create();
+        currentDialog.show();
+    }
+
+    private void showControllerKbmFunctionKeyPicker(GameInputDevice device,
+                                                     ControllerKbmMapper mapper,
+                                                     String source) {
+        String[] labels = new String[12];
+        for (int i = 0; i < labels.length; i++) {
+            labels[i] = "F" + (i + 1);
+        }
+
+        currentDialog = new AlertDialog.Builder(getThemedContext())
+                .setTitle(R.string.game_menu_controller_kbm_function_keys)
+                .setItems(labels, (dialog, which) -> {
+                    mapper.setAction(source, ControllerKbmMapper.ACTION_KEY_PREFIX +
+                            (KeyEvent.KEYCODE_F1 + which));
+                    showControllerKbmMenu(device);
+                })
+                .setNegativeButton(R.string.game_menu_cancel,
+                        (dialog, which) -> showControllerKbmActionPicker(device, mapper, source))
                 .create();
         currentDialog.show();
     }
