@@ -7,6 +7,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
@@ -22,14 +24,20 @@ import android.view.DragEvent;
 import android.view.Gravity;
 import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
+import android.view.InputDevice;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
+import android.view.Window.Callback;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
+import android.widget.GridLayout;
 import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.SeekBar;
@@ -38,15 +46,19 @@ import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.util.TypedValue;
 
 import androidx.preference.PreferenceManager;
+import androidx.appcompat.view.WindowCallbackWrapper;
 
 import com.limelight.binding.input.GameInputDevice;
 import com.limelight.binding.input.KeyboardTranslator;
 import com.limelight.binding.input.ControllerKbmMapper;
+import com.limelight.binding.input.ControllerHandler;
 import com.limelight.preferences.PreferenceConfiguration;
 import com.limelight.utils.KeyConfigHelper;
 import com.limelight.utils.KeyMapper;
+import com.limelight.utils.MouseModeOption;
 
 import java.lang.reflect.Field;
 import java.io.ByteArrayOutputStream;
@@ -143,6 +155,10 @@ public class GameMenu implements Game.GameMenuCallbacks {
     private final Context dialogScreenContext;
 
     private AlertDialog currentDialog;
+    private Runnable controllerBackAction;
+    private long lastControllerNavigationTime;
+    private TextView controllerNavigationHint;
+    private SeekBar controllerCapturedSeekBar;
     private String pendingPresetExport;
     private GameInputDevice pendingPresetDevice;
     private boolean quickMenuEditMode;
@@ -325,6 +341,1010 @@ public class GameMenu implements Game.GameMenuCallbacks {
         adapter.notifyDataSetChanged();
     }
 
+    private int dp(int value) {
+        return Math.round(value * game.getResources().getDisplayMetrics().density);
+    }
+
+    private GradientDrawable roundedBackground(int color, float radiusDp) {
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(color);
+        background.setCornerRadius(dp((int) radiusDp));
+        background.setStroke(dp(1), 0x24FFFFFF);
+        return background;
+    }
+
+    private int getQuickMenuIcon(String id) {
+        if (MENU_DISCONNECT.equals(id)) {
+            return R.drawable.ic_qm_input;
+        }
+        if (MENU_QUIT_SESSION.equals(id)) {
+            return R.drawable.ic_qm_power;
+        }
+        if (MENU_UPLOAD_CLIPBOARD.equals(id)) {
+            return R.drawable.ic_qm_upload;
+        }
+        if (MENU_FETCH_CLIPBOARD.equals(id)) {
+            return R.drawable.ic_qm_download;
+        }
+        if (MENU_SERVER_CMD.equals(id)) {
+            return R.drawable.ic_qm_terminal;
+        }
+        if (MENU_TOGGLE_KEYBOARD.equals(id)) {
+            return R.drawable.ic_qm_keyboard;
+        }
+        if (MENU_ZOOM_MODE.equals(id)) {
+            return R.drawable.ic_qm_zoom;
+        }
+        if (MENU_ROTATE_SCREEN.equals(id)) {
+            return R.drawable.ic_qm_rotate;
+        }
+        if (MENU_ADVANCED.equals(id)) {
+            return R.drawable.ic_qm_tune;
+        }
+        if (ADV_MOUSE_MODE.equals(id)) {
+            return R.drawable.ic_qm_mouse;
+        }
+        if (ADV_HUD.equals(id)) {
+            return R.drawable.ic_qm_hud;
+        }
+        if (ADV_FLOATING_BUTTON.equals(id)) {
+            return R.drawable.ic_qm_floating;
+        }
+        if (ADV_SPECIAL_KEYS_TOGGLE.equals(id)) {
+            return R.drawable.ic_qm_keyboard;
+        }
+        if (ADV_OSC_TOGGLE.equals(id)) {
+            return R.drawable.ic_qm_controller;
+        }
+        if (ADV_FULL_KEYBOARD_TOGGLE.equals(id)) {
+            return R.drawable.ic_qm_fullscreen;
+        }
+        if (ADV_TASK_MANAGER.equals(id)) {
+            return R.drawable.ic_qm_task_manager;
+        }
+        if (ADV_VOLUME_BUTTONS.equals(id)) {
+            return R.drawable.ic_qm_volume;
+        }
+        if (ADV_GYRO_AIM_SETTINGS.equals(id)) {
+            return R.drawable.ic_qm_gyro;
+        }
+        if (ADV_CONTROLLER_KBM.equals(id)) {
+            return R.drawable.ic_qm_controller;
+        }
+        if (ADV_SEND_KEYS.equals(id)) {
+            return R.drawable.ic_qm_input;
+        }
+        if (ADV_TOUCH_SENSITIVITY.equals(id)) {
+            return R.drawable.ic_qm_touch;
+        }
+        if ("keys_esc".equals(id)) {
+            return R.drawable.ic_qm_input;
+        }
+        if ("keys_f11".equals(id) || "keys_alt_enter".equals(id)) {
+            return R.drawable.ic_qm_fullscreen;
+        }
+        if ("keys_alt_f4".equals(id)) {
+            return R.drawable.ic_qm_close;
+        }
+        if ("keys_ctrl_v".equals(id)) {
+            return R.drawable.ic_qm_paste;
+        }
+        if ("keys_win".equals(id)) {
+            return R.drawable.ic_qm_window;
+        }
+        if ("keys_win_d".equals(id)) {
+            return R.drawable.ic_qm_desktop;
+        }
+        if ("keys_win_g".equals(id)) {
+            return R.drawable.ic_qm_sports;
+        }
+        if ("keys_ctrl_alt_tab".equals(id)) {
+            return R.drawable.ic_qm_tab;
+        }
+        if ("keys_shift_tab".equals(id) || "keys_win_shift_left".equals(id)) {
+            return R.drawable.ic_qm_swap;
+        }
+        if ("keys_ctrl_alt_shift_f1".equals(id) ||
+                "keys_ctrl_alt_shift_f12".equals(id)) {
+            return R.drawable.ic_qm_monitor;
+        }
+        if (id != null && id.startsWith("keys_")) {
+            return R.drawable.ic_qm_keyboard;
+        }
+        if (id != null && id.startsWith("custom_")) {
+            return R.drawable.ic_qm_keyboard;
+        }
+        if (id != null && id.startsWith("server_")) {
+            return R.drawable.ic_qm_terminal;
+        }
+        if ("mouse_mode_0".equals(id)) {
+            return R.drawable.ic_qm_touch;
+        }
+        if ("mouse_mode_1".equals(id) || "mouse_mode_2".equals(id)) {
+            return R.drawable.ic_qm_mouse;
+        }
+        if ("mouse_mode_3".equals(id)) {
+            return R.drawable.ic_qm_sports;
+        }
+        if ("mouse_mode_4".equals(id)) {
+            return R.drawable.ic_qm_disabled;
+        }
+        if ("mouse_mode_5".equals(id)) {
+            return R.drawable.ic_qm_swap;
+        }
+        if ("volume_mode_android".equals(id)) {
+            return R.drawable.ic_qm_phone;
+        }
+        if ("volume_mode_windows".equals(id)) {
+            return R.drawable.ic_qm_desktop;
+        }
+        if ("kbm_settings".equals(id)) {
+            return R.drawable.ic_qm_settings;
+        }
+        if ("kbm_add".equals(id)) {
+            return R.drawable.ic_qm_add;
+        }
+        if (id != null && id.startsWith("kbm_source_")) {
+            return R.drawable.ic_qm_controller;
+        }
+        if ("kbm_action_unassigned".equals(id)) {
+            return R.drawable.ic_qm_disabled;
+        }
+        if (id != null && id.startsWith("kbm_action_")) {
+            if (id.contains("mouse") || id.contains("wheel") ||
+                    id.contains("scroll")) {
+                return R.drawable.ic_qm_mouse;
+            }
+            return R.drawable.ic_qm_keyboard;
+        }
+        if (id != null && id.startsWith("kbm_function_")) {
+            return R.drawable.ic_qm_keyboard;
+        }
+        if (MENU_CANCEL.equals(id)) {
+            return R.drawable.ic_qm_close;
+        }
+        return R.drawable.ic_qm_settings;
+    }
+
+    private View createQuickMenuCard(MenuOption option, Runnable onClick) {
+        LinearLayout card = new LinearLayout(getThemedContext());
+        boolean destructive = MENU_DISCONNECT.equals(option.id) ||
+                MENU_QUIT_SESSION.equals(option.id);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER);
+        card.setPadding(dp(14), dp(18), dp(14), dp(14));
+        card.setBackground(roundedBackground(destructive ? 0xCC3A2026 : 0xCC202630, 18));
+        card.setClickable(true);
+        card.setFocusable(true);
+        card.setOnClickListener(view -> onClick.run());
+        card.setOnFocusChangeListener((view, hasFocus) -> {
+            if (hasFocus) {
+                hideControllerNavigationHint();
+            }
+            view.setBackground(roundedBackground(
+                    hasFocus ? (destructive ? 0xFF6A3038 : 0xFF354352)
+                            : (destructive ? 0xCC3A2026 : 0xCC202630),
+                    18));
+            view.setScaleX(hasFocus ? 1.03f : 1f);
+            view.setScaleY(hasFocus ? 1.03f : 1f);
+        });
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            TypedValue ripple = new TypedValue();
+            getThemedContext().getTheme().resolveAttribute(
+                    android.R.attr.selectableItemBackground, ripple, true);
+            card.setForeground(getThemedContext().getDrawable(ripple.resourceId));
+        }
+
+        ImageView icon = new ImageView(getThemedContext());
+        icon.setImageResource(getQuickMenuIcon(option.id));
+        icon.setColorFilter(destructive ? 0xFFFF8A80 : 0xFFF7B52C);
+        card.addView(icon, new LinearLayout.LayoutParams(dp(34), dp(34)));
+
+        TextView label = new TextView(getThemedContext());
+        SpannableStringBuilder cardLabel = new SpannableStringBuilder(option.label);
+        if (isEditableNavigationOption(option)) {
+            int arrowStart = cardLabel.length();
+            cardLabel.append("  ›");
+            cardLabel.setSpan(new ForegroundColorSpan(0xFFF7B52C),
+                    arrowStart, cardLabel.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        label.setText(cardLabel);
+        label.setTextColor(Color.WHITE);
+        label.setTextSize(14);
+        label.setGravity(Gravity.CENTER);
+        label.setMaxLines(2);
+        label.setEllipsize(TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams labelParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        labelParams.topMargin = dp(12);
+        card.addView(label, labelParams);
+        return card;
+    }
+
+    private boolean isEditableNavigationOption(MenuOption option) {
+        if (option == null || option.id == null) {
+            return false;
+        }
+        return MENU_ADVANCED.equals(option.id) ||
+                MENU_SERVER_CMD.equals(option.id) ||
+                ADV_MOUSE_MODE.equals(option.id) ||
+                ADV_GYRO_AIM_SETTINGS.equals(option.id) ||
+                ADV_CONTROLLER_KBM.equals(option.id) ||
+                ADV_SEND_KEYS.equals(option.id) ||
+                ADV_VOLUME_BUTTONS.equals(option.id);
+    }
+
+    private View createEditableMenuCard(MenuOption option, Runnable deleteAction,
+                                        Runnable openAction,
+                                        View.OnLongClickListener dragAction) {
+        FrameLayout wrapper = new FrameLayout(getThemedContext());
+        View card = createQuickMenuCard(option, () -> {});
+        card.setOnClickListener(openAction == null ? null : view -> openAction.run());
+        if (dragAction != null) {
+            card.setOnLongClickListener(dragAction);
+        }
+        wrapper.addView(card, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        ImageButton delete = new ImageButton(getThemedContext());
+        delete.setImageResource(R.drawable.ic_qm_delete);
+        delete.setColorFilter(Color.WHITE);
+        delete.setBackground(roundedBackground(0xE6B32635, 18));
+        delete.setPadding(dp(9), dp(9), dp(9), dp(9));
+        delete.setContentDescription(getString(R.string.game_menu_edit_delete_item));
+        delete.setOnClickListener(view -> deleteAction.run());
+        FrameLayout.LayoutParams deleteParams = new FrameLayout.LayoutParams(
+                dp(38), dp(38), Gravity.TOP | Gravity.END);
+        deleteParams.setMargins(0, dp(5), dp(5), 0);
+        wrapper.addView(delete, deleteParams);
+
+        return wrapper;
+    }
+
+    private GridLayout createMenuGrid() {
+        GridLayout grid = new GridLayout(getThemedContext());
+        int widthDp = game.getResources().getConfiguration().screenWidthDp;
+        grid.setColumnCount(widthDp >= 840 ? 4 : widthDp >= 560 ? 3 : 2);
+        grid.setAlignmentMode(GridLayout.ALIGN_BOUNDS);
+        grid.setUseDefaultMargins(false);
+        grid.setPadding(0, dp(4), 0, dp(20));
+        return grid;
+    }
+
+    private GridLayout.LayoutParams createMenuCardLayoutParams() {
+        GridLayout.LayoutParams params = new GridLayout.LayoutParams();
+        params.width = 0;
+        params.height = dp(128);
+        params.columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1, 1f);
+        params.setMargins(dp(6), dp(6), dp(6), dp(6));
+        return params;
+    }
+
+    private LinearLayout createFullscreenMenuShell(String title, View content,
+                                                   View.OnClickListener editAction) {
+        return createFullscreenMenuShell(title, content, editAction, null, null);
+    }
+
+    private LinearLayout createFullscreenMenuShell(String title, View content,
+                                                   View.OnClickListener editAction,
+                                                   Runnable backAction) {
+        return createFullscreenMenuShell(title, content, editAction, backAction, null);
+    }
+
+    private LinearLayout createFullscreenMenuShell(String title, View content,
+                                                   View.OnClickListener editAction,
+                                                   Runnable backAction,
+                                                   View headerActions) {
+        controllerBackAction = backAction;
+        LinearLayout shell = new LinearLayout(getThemedContext());
+        shell.setOrientation(LinearLayout.VERTICAL);
+        shell.setPadding(dp(14), dp(8), dp(14), dp(12));
+        shell.setBackgroundColor(0xF2131720);
+
+        LinearLayout header = new LinearLayout(getThemedContext());
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(dp(2), 0, dp(2), dp(6));
+
+        if (backAction != null) {
+            ImageButton back = new ImageButton(getThemedContext());
+            back.setImageResource(R.drawable.ic_qm_back);
+            back.setColorFilter(Color.WHITE);
+            back.setBackgroundColor(Color.TRANSPARENT);
+            back.setContentDescription("Back");
+            back.setOnClickListener(view -> {
+                hideMenu();
+                backAction.run();
+            });
+            applyControllerFocusStyle(back);
+            header.addView(back, new LinearLayout.LayoutParams(dp(44), dp(44)));
+        }
+
+        TextView titleView = new TextView(getThemedContext());
+        titleView.setText(title);
+        titleView.setTextColor(Color.WHITE);
+        titleView.setTextSize(22);
+        titleView.setTypeface(titleView.getTypeface(), android.graphics.Typeface.BOLD);
+        header.addView(titleView, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        if (getString(R.string.quick_menu_title).equals(title)) {
+            controllerNavigationHint = new TextView(getThemedContext());
+            controllerNavigationHint.setText(R.string.game_menu_controller_navigation_hint);
+            controllerNavigationHint.setTextColor(0x99FFFFFF);
+            controllerNavigationHint.setTextSize(13);
+            controllerNavigationHint.setMaxLines(1);
+            controllerNavigationHint.setEllipsize(TextUtils.TruncateAt.END);
+            LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            hintParams.setMargins(dp(8), 0, dp(8), 0);
+            header.addView(controllerNavigationHint, hintParams);
+        }
+        else {
+            controllerNavigationHint = null;
+        }
+
+        if (headerActions != null) {
+            header.addView(headerActions);
+        }
+
+        if (editAction != null) {
+            ImageButton edit = new ImageButton(getThemedContext());
+            edit.setImageResource(quickMenuEditMode ?
+                    R.drawable.ic_qm_check : R.drawable.ic_qm_edit);
+            edit.setColorFilter(Color.WHITE);
+            edit.setBackgroundColor(Color.TRANSPARENT);
+            edit.setContentDescription(getString(R.string.game_menu_edit_quick_menu));
+            edit.setOnClickListener(editAction);
+            applyControllerFocusStyle(edit);
+            header.addView(edit, new LinearLayout.LayoutParams(dp(44), dp(44)));
+        }
+
+        ImageButton close = new ImageButton(getThemedContext());
+        close.setImageResource(R.drawable.ic_qm_close);
+        close.setColorFilter(Color.WHITE);
+        close.setBackgroundColor(Color.TRANSPARENT);
+        close.setContentDescription(getString(R.string.game_menu_cancel));
+        close.setOnClickListener(view -> hideMenu());
+        applyControllerFocusStyle(close);
+        header.addView(close, new LinearLayout.LayoutParams(dp(44), dp(44)));
+
+        shell.addView(header);
+        shell.addView(content, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        return shell;
+    }
+
+    private void applyControllerFocusStyle(View view) {
+        view.setFocusable(true);
+        view.setOnFocusChangeListener((focusedView, hasFocus) -> {
+            if (hasFocus) {
+                hideControllerNavigationHint();
+            }
+            focusedView.setBackground(hasFocus ?
+                    roundedBackground(0xFF354352, 12) :
+                    new ColorDrawable(Color.TRANSPARENT));
+            focusedView.setScaleX(hasFocus ? 1.08f : 1f);
+            focusedView.setScaleY(hasFocus ? 1.08f : 1f);
+        });
+    }
+
+    private void hideControllerNavigationHint() {
+        if (controllerNavigationHint != null) {
+            controllerNavigationHint.setVisibility(View.GONE);
+        }
+    }
+
+    private static final class VirtualKeyboardKey {
+        final String label;
+        final int keyCode;
+        final float width;
+
+        VirtualKeyboardKey(String label, int keyCode) {
+            this(label, keyCode, 1.0f);
+        }
+
+        VirtualKeyboardKey(String label, int keyCode, float width) {
+            this.label = label;
+            this.keyCode = keyCode;
+            this.width = width;
+        }
+    }
+
+    private void setControllerSliderCaptured(SeekBar seekBar, boolean captured) {
+        if (controllerCapturedSeekBar != null) {
+            controllerCapturedSeekBar.setBackground(
+                    new ColorDrawable(Color.TRANSPARENT));
+        }
+        controllerCapturedSeekBar = captured ? seekBar : null;
+        if (controllerCapturedSeekBar != null) {
+            hideControllerNavigationHint();
+            controllerCapturedSeekBar.setBackground(
+                    roundedBackground(0xAA3B536C, 12));
+        }
+    }
+
+    private void adjustCapturedSlider(boolean increase) {
+        if (controllerCapturedSeekBar == null) {
+            return;
+        }
+        int keyCode = increase ?
+                KeyEvent.KEYCODE_DPAD_RIGHT : KeyEvent.KEYCODE_DPAD_LEFT;
+        long now = android.os.SystemClock.uptimeMillis();
+        controllerCapturedSeekBar.onKeyDown(keyCode,
+                new KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0));
+        controllerCapturedSeekBar.onKeyUp(keyCode,
+                new KeyEvent(now, now, KeyEvent.ACTION_UP, keyCode, 0));
+    }
+
+    private boolean isControllerEvent(KeyEvent event) {
+        if (event == null) {
+            return false;
+        }
+        int source = event.getSource();
+        return (source & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD ||
+                (source & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK ||
+                ControllerHandler.isGameControllerDevice(event.getDevice());
+    }
+
+    private boolean moveControllerFocus(View root, int direction) {
+        View focused = root.findFocus();
+        if (focused == null) {
+            return root.requestFocus();
+        }
+        View next = focused.focusSearch(direction);
+        return next != null && next.requestFocus();
+    }
+
+    private boolean handleControllerDialogKey(AlertDialog dialog, View root,
+                                              int keyCode, KeyEvent event) {
+        if (!isControllerEvent(event)) {
+            return false;
+        }
+
+        if (controllerCapturedSeekBar != null &&
+                (keyCode == KeyEvent.KEYCODE_DPAD_LEFT ||
+                        keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                adjustCapturedSlider(keyCode == KeyEvent.KEYCODE_DPAD_RIGHT);
+            }
+            return true;
+        }
+
+        boolean menuButton = keyCode == KeyEvent.KEYCODE_BUTTON_A ||
+                keyCode == KeyEvent.KEYCODE_BUTTON_B ||
+                keyCode == KeyEvent.KEYCODE_BUTTON_START ||
+                keyCode == KeyEvent.KEYCODE_BUTTON_MODE;
+        if (event.getAction() == KeyEvent.ACTION_DOWN) {
+            // Activate on release so the corresponding key-up cannot leak to the host
+            // after an action changes or closes the dialog.
+            return menuButton;
+        }
+        if (event.getAction() != KeyEvent.ACTION_UP || !menuButton) {
+            // D-pad events are intentionally left to Android's native focus handling.
+            return false;
+        }
+        if (event.getRepeatCount() > 0) {
+            return true;
+        }
+
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_BUTTON_A:
+                View focused = root.findFocus();
+                if (focused instanceof SeekBar) {
+                    setControllerSliderCaptured((SeekBar) focused,
+                            controllerCapturedSeekBar != focused);
+                }
+                else if (focused != null) {
+                    focused.performClick();
+                }
+                return true;
+
+            case KeyEvent.KEYCODE_BUTTON_B:
+                Button negative = dialog.getButton(AlertDialog.BUTTON_NEGATIVE);
+                if (negative != null && negative.getVisibility() == View.VISIBLE) {
+                    negative.performClick();
+                }
+                else if (controllerBackAction != null) {
+                    Runnable backAction = controllerBackAction;
+                    dialog.dismiss();
+                    backAction.run();
+                }
+                else {
+                    dialog.dismiss();
+                }
+                return true;
+
+            case KeyEvent.KEYCODE_BUTTON_START:
+            case KeyEvent.KEYCODE_BUTTON_MODE:
+                hideMenu();
+                return true;
+
+            default:
+                return true;
+        }
+    }
+
+    private boolean handleControllerDialogMotion(View root, MotionEvent event) {
+        if (event == null ||
+                (event.getSource() & InputDevice.SOURCE_JOYSTICK) !=
+                        InputDevice.SOURCE_JOYSTICK ||
+                event.getAction() != MotionEvent.ACTION_MOVE) {
+            return false;
+        }
+
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - lastControllerNavigationTime < 170) {
+            return true;
+        }
+
+        float horizontal = Math.abs(event.getAxisValue(MotionEvent.AXIS_HAT_X)) > 0.5f ?
+                event.getAxisValue(MotionEvent.AXIS_HAT_X) :
+                event.getAxisValue(MotionEvent.AXIS_X);
+        float vertical = Math.abs(event.getAxisValue(MotionEvent.AXIS_HAT_Y)) > 0.5f ?
+                event.getAxisValue(MotionEvent.AXIS_HAT_Y) :
+                event.getAxisValue(MotionEvent.AXIS_Y);
+        int direction = 0;
+        if (Math.abs(horizontal) > Math.abs(vertical) && Math.abs(horizontal) > 0.65f) {
+            direction = horizontal > 0 ? View.FOCUS_RIGHT : View.FOCUS_LEFT;
+        }
+        else if (Math.abs(vertical) > 0.65f) {
+            direction = vertical > 0 ? View.FOCUS_DOWN : View.FOCUS_UP;
+        }
+
+        if (direction != 0) {
+            lastControllerNavigationTime = now;
+            if (controllerCapturedSeekBar != null) {
+                if (direction == View.FOCUS_LEFT || direction == View.FOCUS_RIGHT) {
+                    adjustCapturedSlider(direction == View.FOCUS_RIGHT);
+                }
+            }
+            else {
+                moveControllerFocus(root, direction);
+            }
+        }
+        return true;
+    }
+
+    private void configureControllerNavigation(AlertDialog dialog) {
+        if (dialog == null || dialog.getWindow() == null) {
+            return;
+        }
+        Window window = dialog.getWindow();
+        View root = window.getDecorView();
+        setControllerSliderCaptured(null, false);
+        dialog.setOnKeyListener((ignored, keyCode, event) ->
+                handleControllerDialogKey(dialog, root, keyCode, event));
+        root.setOnGenericMotionListener(this::handleControllerDialogMotion);
+
+        Callback originalCallback = window.getCallback();
+        if (!(originalCallback instanceof ControllerMenuWindowCallback)) {
+            window.setCallback(new ControllerMenuWindowCallback(
+                    originalCallback, dialog, root));
+        }
+
+        root.post(() -> {
+            if (root.findFocus() == null) {
+                ArrayList<View> focusables = new ArrayList<>();
+                root.addFocusables(focusables, View.FOCUS_FORWARD,
+                        View.FOCUSABLES_ALL);
+                for (View focusable : focusables) {
+                    if (focusable.isShown() && focusable.isEnabled() &&
+                            focusable.requestFocus()) {
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    private final class ControllerMenuWindowCallback extends WindowCallbackWrapper {
+        private final AlertDialog dialog;
+        private final View root;
+
+        ControllerMenuWindowCallback(Callback wrapped, AlertDialog dialog, View root) {
+            super(wrapped);
+            this.dialog = dialog;
+            this.root = root;
+        }
+
+        @Override
+        public boolean dispatchKeyEvent(KeyEvent event) {
+            if (isControllerEvent(event) &&
+                    handleControllerDialogKey(dialog, root,
+                            event.getKeyCode(), event)) {
+                return true;
+            }
+            return super.dispatchKeyEvent(event);
+        }
+
+        @Override
+        public boolean dispatchGenericMotionEvent(MotionEvent event) {
+            if (handleControllerDialogMotion(root, event)) {
+                return true;
+            }
+            return super.dispatchGenericMotionEvent(event);
+        }
+    }
+
+    private void showControllerReadyDialog(AlertDialog dialog) {
+        currentDialog = dialog;
+        dialog.show();
+        configureControllerNavigation(dialog);
+    }
+
+    private void cardifySettingsLayout(LinearLayout layout) {
+        List<View> children = new ArrayList<>();
+        for (int i = 0; i < layout.getChildCount(); i++) {
+            children.add(layout.getChildAt(i));
+        }
+        layout.removeAllViews();
+        layout.setPadding(dp(6), dp(4), dp(6), dp(12));
+
+        for (int i = 0; i < children.size(); i++) {
+            View child = children.get(i);
+            LinearLayout card = new LinearLayout(getThemedContext());
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setGravity(Gravity.CENTER_VERTICAL);
+            card.setPadding(dp(16), dp(10), dp(16), dp(10));
+            card.setBackground(roundedBackground(0xCC202630, 16));
+
+            if (child instanceof Switch) {
+                Switch toggle = (Switch) child;
+                toggle.setTextColor(Color.WHITE);
+                toggle.setTextSize(15);
+                card.addView(toggle, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
+            else if (child instanceof TextView && i + 1 < children.size() &&
+                    (children.get(i + 1) instanceof SeekBar ||
+                            children.get(i + 1) instanceof Spinner)) {
+                TextView label = (TextView) child;
+                View control = children.get(++i);
+                label.setTextColor(Color.WHITE);
+                label.setTextSize(15);
+                card.addView(label, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                LinearLayout.LayoutParams controlParams = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                controlParams.topMargin = dp(4);
+                card.addView(control, controlParams);
+            }
+            else {
+                if (child instanceof TextView) {
+                    ((TextView) child).setTextColor(Color.WHITE);
+                }
+                card.addView(child, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
+
+            LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            cardParams.setMargins(dp(4), dp(5), dp(4), dp(5));
+            layout.addView(card, cardParams);
+        }
+    }
+
+    private void showFullscreenDialog(View content, Runnable onDismiss) {
+        if (currentDialog != null) {
+            currentDialog.dismiss();
+        }
+        currentDialog = new AlertDialog.Builder(getThemedContext())
+                .setView(content)
+                .create();
+        if (onDismiss != null) {
+            currentDialog.setOnDismissListener(dialog -> onDismiss.run());
+        }
+        currentDialog.show();
+        configureControllerNavigation(currentDialog);
+
+        Window window = currentDialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT);
+            window.getDecorView().setPadding(0, 0, 0, 0);
+        }
+    }
+
+    private void showFullscreenSettings(int titleRes, View settingsContent,
+                                        Runnable doneAction, Runnable backAction) {
+        LinearLayout content = new LinearLayout(getThemedContext());
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.addView(settingsContent, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+
+        Button done = new Button(getThemedContext());
+        done.setText(R.string.game_menu_done);
+        done.setTextColor(Color.WHITE);
+        done.setTextSize(15);
+        done.setAllCaps(false);
+        done.setBackground(roundedBackground(0xFFF7A900, 14));
+        done.setOnClickListener(view -> {
+            hideMenu();
+            doneAction.run();
+        });
+        LinearLayout.LayoutParams doneParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
+        doneParams.setMargins(dp(6), dp(12), dp(6), dp(4));
+        content.addView(done, doneParams);
+
+        LinearLayout shell = createFullscreenMenuShell(
+                getString(titleRes), content, null, backAction);
+        showFullscreenDialog(shell, null);
+    }
+
+    private void showQuickMenuCards(GameInputDevice device, List<MenuOption> visibleOptions,
+                                    Set<String> hiddenIds) {
+        showMenuCards(getString(R.string.quick_menu_title), visibleOptions, () -> {
+            quickMenuEditMode = true;
+            showMenu(device);
+        });
+    }
+
+    private void showMenuCards(String title, List<MenuOption> visibleOptions,
+                               Runnable editAction) {
+        showMenuCards(title, visibleOptions, editAction, null);
+    }
+
+    private void showMenuCards(String title, List<MenuOption> visibleOptions,
+                               Runnable editAction, Runnable backAction) {
+        ScrollView scrollView = new ScrollView(getThemedContext());
+        scrollView.setFillViewport(true);
+
+        GridLayout grid = createMenuGrid();
+
+        for (MenuOption option : visibleOptions) {
+            if (MENU_CANCEL.equals(option.id)) {
+                continue;
+            }
+            View card = createQuickMenuCard(option, () -> {
+                hideMenu();
+                run(option);
+            });
+            grid.addView(card, createMenuCardLayoutParams());
+        }
+        scrollView.addView(grid);
+
+        LinearLayout shell = createFullscreenMenuShell(
+                title, scrollView, editAction == null ? null : view -> editAction.run(),
+                backAction);
+        showFullscreenDialog(shell, null);
+    }
+
+    private LinearLayout createEditToolbar(Runnable restoreAction, Runnable resetAction) {
+        LinearLayout toolbar = new LinearLayout(getThemedContext());
+        toolbar.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        toolbar.setPadding(dp(6), 0, dp(6), dp(8));
+
+        Button restore = new Button(getThemedContext());
+        restore.setText(R.string.game_menu_edit_add_hidden);
+        restore.setCompoundDrawablesWithIntrinsicBounds(
+                R.drawable.ic_qm_add, 0, 0, 0);
+        restore.setCompoundDrawablePadding(dp(8));
+        restore.setTextColor(Color.WHITE);
+        restore.setAllCaps(false);
+        restore.setBackground(roundedBackground(0xCC2A3440, 12));
+        restore.setOnClickListener(view -> restoreAction.run());
+        toolbar.addView(restore);
+
+        Button reset = new Button(getThemedContext());
+        reset.setText(R.string.game_menu_edit_reset);
+        reset.setCompoundDrawablesWithIntrinsicBounds(
+                R.drawable.ic_qm_restore, 0, 0, 0);
+        reset.setCompoundDrawablePadding(dp(8));
+        reset.setTextColor(Color.WHITE);
+        reset.setAllCaps(false);
+        reset.setBackground(roundedBackground(0xCC2A3440, 12));
+        reset.setOnClickListener(view -> resetAction.run());
+        LinearLayout.LayoutParams resetParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        resetParams.leftMargin = dp(10);
+        toolbar.addView(reset, resetParams);
+        return toolbar;
+    }
+
+    private int findGridDropIndex(GridLayout grid, DragEvent event) {
+        for (int i = 0; i < grid.getChildCount(); i++) {
+            View child = grid.getChildAt(i);
+            if (event.getX() >= child.getLeft() && event.getX() <= child.getRight() &&
+                    event.getY() >= child.getTop() && event.getY() <= child.getBottom()) {
+                return i;
+            }
+        }
+        return Math.max(0, grid.getChildCount() - 1);
+    }
+
+    private void showEditableQuickMenuCards(GameInputDevice device,
+                                            List<MenuOption> allOptions,
+                                            List<MenuOption> visibleOptions,
+                                            Set<String> hiddenIds) {
+        LinearLayout content = new LinearLayout(getThemedContext());
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.addView(createEditToolbar(
+                () -> showRestoreQuickMenuCards(device, allOptions, visibleOptions, hiddenIds),
+                () -> confirmResetQuickMenu(device)));
+
+        ScrollView scroll = new ScrollView(getThemedContext());
+        GridLayout grid = createMenuGrid();
+        for (MenuOption option : visibleOptions) {
+            if (MENU_CANCEL.equals(option.id)) {
+                continue;
+            }
+            View wrapper = createEditableMenuCard(option, () -> {
+                hiddenIds.add(option.id);
+                visibleOptions.remove(option);
+                saveQuickMenuState(visibleOptions, hiddenIds);
+                showMenu(device);
+            }, isEditableNavigationOption(option) ? () -> {
+                saveQuickMenuState(visibleOptions, hiddenIds);
+                hideMenu();
+                run(option);
+            } : null, view -> {
+                draggedQuickMenuId = option.id;
+                ClipData data = ClipData.newPlainText("quick_menu_item", option.id);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    view.startDragAndDrop(data, new View.DragShadowBuilder(view), null, 0);
+                }
+                else {
+                    view.startDrag(data, new View.DragShadowBuilder(view), null, 0);
+                }
+                return true;
+            });
+            grid.addView(wrapper, createMenuCardLayoutParams());
+        }
+        grid.setOnDragListener((view, event) -> {
+            if (event.getAction() == DragEvent.ACTION_DROP && draggedQuickMenuId != null) {
+                int from = findOptionIndex(visibleOptions, draggedQuickMenuId);
+                int to = findGridDropIndex(grid, event);
+                int cancel = findOptionIndex(visibleOptions, MENU_CANCEL);
+                if (cancel >= 0) {
+                    to = Math.min(to, cancel - 1);
+                }
+                if (from >= 0 && to >= 0 && from != to) {
+                    MenuOption moved = visibleOptions.remove(from);
+                    visibleOptions.add(Math.min(to, visibleOptions.size()), moved);
+                    saveQuickMenuState(visibleOptions, hiddenIds);
+                }
+                draggedQuickMenuId = null;
+                showMenu(device);
+                return true;
+            }
+            if (event.getAction() == DragEvent.ACTION_DRAG_ENDED) {
+                draggedQuickMenuId = null;
+            }
+            return event.getAction() == DragEvent.ACTION_DRAG_STARTED ||
+                    event.getAction() == DragEvent.ACTION_DRAG_LOCATION ||
+                    event.getAction() == DragEvent.ACTION_DRAG_ENDED;
+        });
+        scroll.addView(grid);
+        content.addView(scroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+
+        LinearLayout shell = createFullscreenMenuShell(
+                getString(R.string.game_menu_edit_quick_menu), content, view -> {
+                    quickMenuEditMode = false;
+                    showMenu(device);
+                });
+        showFullscreenDialog(shell, () -> saveQuickMenuState(visibleOptions, hiddenIds));
+    }
+
+    private void showRestoreQuickMenuCards(GameInputDevice device,
+                                           List<MenuOption> allOptions,
+                                           List<MenuOption> visibleOptions,
+                                           Set<String> hiddenIds) {
+        List<MenuOption> hiddenOptions = new ArrayList<>();
+        for (String id : DEFAULT_QUICK_MENU_ORDER) {
+            if (hiddenIds.contains(id)) {
+                MenuOption option = findOptionById(allOptions, id);
+                if (option != null) {
+                    hiddenOptions.add(option);
+                }
+            }
+        }
+        if (hiddenOptions.isEmpty()) {
+            showMenu(device);
+            return;
+        }
+
+        GridLayout grid = createMenuGrid();
+        for (MenuOption option : hiddenOptions) {
+            View card = createQuickMenuCard(option, () -> {
+                hiddenIds.remove(option.id);
+                if (findOptionById(visibleOptions, option.id) == null) {
+                    addOptionInDefaultPlace(visibleOptions, option);
+                }
+                saveQuickMenuState(visibleOptions, hiddenIds);
+                showRestoreQuickMenuCards(device, allOptions, visibleOptions, hiddenIds);
+            });
+            grid.addView(card, createMenuCardLayoutParams());
+        }
+        ScrollView scroll = new ScrollView(getThemedContext());
+        scroll.addView(grid);
+        LinearLayout shell = createFullscreenMenuShell(
+                getString(R.string.game_menu_edit_add_hidden), scroll, null,
+                () -> showMenu(device));
+        showFullscreenDialog(shell, null);
+    }
+
+    private void showEditableSubmenuCards(String title, MenuOption[] allOptions,
+                                          List<MenuOption> visibleOptions,
+                                          Set<String> hiddenIds, Runnable backAction) {
+        LinearLayout content = new LinearLayout(getThemedContext());
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.addView(createEditToolbar(
+                () -> showRestoreSubmenuCards(
+                        title, allOptions, visibleOptions, hiddenIds, backAction),
+                () -> {
+                    getMenuPrefs().edit().remove(submenuHiddenKey(title)).apply();
+                    showMenuDialog(title, allOptions, backAction);
+                }));
+
+        GridLayout grid = createMenuGrid();
+        for (MenuOption option : visibleOptions) {
+            if (MENU_CANCEL.equals(option.id)) {
+                continue;
+            }
+            View card = createEditableMenuCard(option, () -> {
+                hiddenIds.add(option.id);
+                visibleOptions.remove(option);
+                saveHiddenSubmenuIds(title, hiddenIds);
+                showMenuDialog(title, allOptions, backAction);
+            }, isEditableNavigationOption(option) ? () -> {
+                saveHiddenSubmenuIds(title, hiddenIds);
+                hideMenu();
+                run(option);
+            } : null, null);
+            grid.addView(card, createMenuCardLayoutParams());
+        }
+        ScrollView scroll = new ScrollView(getThemedContext());
+        scroll.addView(grid);
+        content.addView(scroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+
+        LinearLayout shell = createFullscreenMenuShell(
+                getString(R.string.game_menu_edit_quick_menu), content, view -> {
+                    quickMenuEditMode = false;
+                    showMenuDialog(title, allOptions, backAction);
+                }, backAction);
+        showFullscreenDialog(shell, () -> saveHiddenSubmenuIds(title, hiddenIds));
+    }
+
+    private void showRestoreSubmenuCards(String title, MenuOption[] allOptions,
+                                         List<MenuOption> visibleOptions,
+                                         Set<String> hiddenIds, Runnable backAction) {
+        List<MenuOption> hiddenOptions = new ArrayList<>();
+        for (MenuOption option : allOptions) {
+            if (option.id != null && hiddenIds.contains(option.id)) {
+                hiddenOptions.add(option);
+            }
+        }
+        if (hiddenOptions.isEmpty()) {
+            showMenuDialog(title, allOptions, backAction);
+            return;
+        }
+
+        GridLayout grid = createMenuGrid();
+        for (MenuOption option : hiddenOptions) {
+            View card = createQuickMenuCard(option, () -> {
+                hiddenIds.remove(option.id);
+                if (findOptionById(visibleOptions, option.id) == null) {
+                    addSubmenuOptionInDefaultPlace(allOptions, visibleOptions, option);
+                }
+                saveHiddenSubmenuIds(title, hiddenIds);
+                showRestoreSubmenuCards(
+                        title, allOptions, visibleOptions, hiddenIds, backAction);
+            });
+            grid.addView(card, createMenuCardLayoutParams());
+        }
+        ScrollView scroll = new ScrollView(getThemedContext());
+        scroll.addView(grid);
+        LinearLayout shell = createFullscreenMenuShell(
+                getString(R.string.game_menu_edit_add_hidden), scroll, null,
+                () -> showMenuDialog(title, allOptions, backAction));
+        showFullscreenDialog(shell, null);
+    }
+
     private LinearLayout createHeader(String title, boolean showEditControls, Runnable addAction, Runnable resetAction) {
         LinearLayout header = new LinearLayout(getThemedContext());
         header.setOrientation(LinearLayout.HORIZONTAL);
@@ -415,7 +1435,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
     }
 
     private void showRestoreSubmenuDialog(String title, MenuOption[] allOptions, List<MenuOption> visibleOptions,
-                                          Set<String> hiddenIds) {
+                                          Set<String> hiddenIds, Runnable backAction) {
         List<MenuOption> hiddenOptions = new ArrayList<>();
         for (MenuOption option : allOptions) {
             if (option.id != null && hiddenIds.contains(option.id)) {
@@ -434,7 +1454,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
             labels[i] = hiddenOptions.get(i).label;
         }
 
-        new AlertDialog.Builder(getThemedContext())
+        AlertDialog controllerDialog = new AlertDialog.Builder(getThemedContext())
                 .setTitle(R.string.game_menu_edit_add_hidden)
                 .setMultiChoiceItems(labels, checked, (dialog, which, isChecked) -> checked[which] = isChecked)
                 .setPositiveButton(android.R.string.ok, (dialog, which) -> {
@@ -451,10 +1471,15 @@ public class GameMenu implements Game.GameMenuCallbacks {
                     showMenuDialog(title, allOptions);
                 })
                 .setNegativeButton(R.string.game_menu_cancel, null)
-                .show();
+                .create();
+        showControllerReadyDialog(controllerDialog);
     }
 
     private void showMenuDialog(String title, MenuOption[] allOptions) {
+        showMenuDialog(title, allOptions, null);
+    }
+
+    private void showMenuDialog(String title, MenuOption[] allOptions, Runnable backAction) {
         Set<String> hiddenIds = getHiddenSubmenuIds(title);
         List<MenuOption> visibleOptions = new ArrayList<>();
         for (MenuOption option : allOptions) {
@@ -464,15 +1489,27 @@ public class GameMenu implements Game.GameMenuCallbacks {
             visibleOptions.add(option);
         }
 
+        if (!quickMenuEditMode) {
+            showMenuCards(title, visibleOptions, () -> {
+                quickMenuEditMode = true;
+                showMenuDialog(title, allOptions, backAction);
+            }, backAction);
+            return;
+        }
+        showEditableSubmenuCards(title, allOptions, visibleOptions, hiddenIds, backAction);
+        return;
+
+        /*
         LinearLayout layout = new LinearLayout(getThemedContext());
         layout.setOrientation(LinearLayout.VERTICAL);
 
         boolean editableSubmenu = quickMenuEditMode;
         layout.addView(createHeader(title, editableSubmenu,
-                () -> showRestoreSubmenuDialog(title, allOptions, visibleOptions, hiddenIds),
+                () -> showRestoreSubmenuDialog(
+                        title, allOptions, visibleOptions, hiddenIds, backAction),
                 () -> {
                     getMenuPrefs().edit().remove(submenuHiddenKey(title)).apply();
-                    showMenuDialog(title, allOptions);
+                    showMenuDialog(title, allOptions, backAction);
                 }));
 
         ListView listView = new ListView(getThemedContext());
@@ -494,21 +1531,18 @@ public class GameMenu implements Game.GameMenuCallbacks {
             }
             run(option);
         });
-        layout.addView(listView);
-
-        if (currentDialog != null) {
-            currentDialog.dismiss();
-        }
-        currentDialog = new AlertDialog.Builder(getThemedContext()).setView(layout).create();
-        currentDialog.show();
-
-        Window window = currentDialog.getWindow();
-        if (window != null) {
-            window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        }
+        layout.addView(listView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        LinearLayout shell = createFullscreenMenuShell(
+                getString(R.string.game_menu_edit_quick_menu), layout, view -> {
+                    quickMenuEditMode = false;
+                    showMenuDialog(title, allOptions, backAction);
+                }, backAction);
+        showFullscreenDialog(shell, null);
+        */
     }
 
-    private void showSpecialKeysMenu() {
+    private void showSpecialKeysMenu(GameInputDevice device) {
         List<MenuOption> options = new ArrayList<>();
 
         if (!PreferenceConfiguration.readPreferences(game).disableDefaultExtraKeys) {
@@ -573,7 +1607,8 @@ public class GameMenu implements Game.GameMenuCallbacks {
         }
 
         options.add(new MenuOption(MENU_CANCEL, getString(R.string.game_menu_cancel), null));
-        showMenuDialog(getString(R.string.game_menu_send_keys), options.toArray(new MenuOption[0]));
+        showMenuDialog(getString(R.string.game_menu_send_keys),
+                options.toArray(new MenuOption[0]), () -> showAdvancedMenu(device));
     }
 
     private TextView createGyroSensitivityRow(LinearLayout parent, SharedPreferences prefs,
@@ -684,15 +1719,10 @@ public class GameMenu implements Game.GameMenuCallbacks {
             game.reloadGyroAimSettings();
         });
 
-        if (currentDialog != null) {
-            currentDialog.dismiss();
-        }
-        currentDialog = new AlertDialog.Builder(getThemedContext())
-                .setTitle(R.string.game_menu_gyro_aim_settings)
-                .setView(scrollView)
-                .setPositiveButton(R.string.game_menu_done, (dialog, which) -> showAdvancedMenu(device))
-                .create();
-        currentDialog.show();
+        cardifySettingsLayout(layout);
+        showFullscreenSettings(R.string.game_menu_gyro_aim_settings,
+                scrollView, () -> showAdvancedMenu(device),
+                () -> showAdvancedMenu(device));
     }
 
     private String getControllerKbmSourceLabel(String source) {
@@ -881,6 +1911,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
                     })
                     .create();
             currentDialog.show();
+            configureControllerNavigation(currentDialog);
         });
 
         for (String source : selectedSources) {
@@ -965,24 +1996,51 @@ public class GameMenu implements Game.GameMenuCallbacks {
 
     private void showControllerKbmKeyboardCapture(GameInputDevice device,
                                                    ControllerKbmMapper mapper, String source) {
+        LinearLayout page = new LinearLayout(getThemedContext());
+        boolean wideLayout =
+                game.getResources().getConfiguration().screenWidthDp >= 600;
+        page.setOrientation(wideLayout ?
+                LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
+        page.setPadding(dp(6), dp(4), dp(6), dp(8));
+
+        LinearLayout instructions = new LinearLayout(getThemedContext());
+        instructions.setOrientation(LinearLayout.VERTICAL);
+        instructions.setPadding(dp(16), dp(14), dp(16), dp(14));
+        instructions.setBackground(roundedBackground(0xCC202630, 16));
+
+        TextView instructionText = new TextView(getThemedContext());
+        instructionText.setText(R.string.game_menu_controller_kbm_keyboard_picker_instructions);
+        instructionText.setTextColor(0xFFE3E7ED);
+        instructionText.setTextSize(15);
+        instructions.addView(instructionText);
+
         EditText input = new EditText(getThemedContext());
         input.setFocusableInTouchMode(true);
         input.setHint(R.string.game_menu_controller_kbm_press_keyboard_key);
+        input.setTextColor(Color.WHITE);
+        input.setHintTextColor(0x88FFFFFF);
+        LinearLayout.LayoutParams inputParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        inputParams.topMargin = dp(12);
+        instructions.addView(input, inputParams);
+
+        LinearLayout keyboard = new LinearLayout(getThemedContext());
+        keyboard.setOrientation(LinearLayout.VERTICAL);
+        keyboard.setPadding(dp(8), dp(4), dp(8), dp(12));
+
         final boolean[] captured = { false };
 
-        AlertDialog dialog = new AlertDialog.Builder(getThemedContext())
-                .setTitle(R.string.game_menu_controller_kbm_keyboard_key)
-                .setView(input)
-                .setNegativeButton(R.string.game_menu_cancel,
-                        (ignored, which) -> showControllerKbmMenu(device))
-                .create();
-        dialog.setOnKeyListener((ignored, keyCode, event) -> {
-            if (captured[0] || event.getAction() != KeyEvent.ACTION_DOWN) {
-                return true;
+        input.setOnKeyListener((view, keyCode, event) -> {
+            if (isControllerEvent(event)) {
+                return false;
+            }
+            if (captured[0] || event.getAction() != KeyEvent.ACTION_DOWN ||
+                    keyCode == KeyEvent.KEYCODE_UNKNOWN) {
+                return false;
             }
             captured[0] = true;
             mapper.setAction(source, ControllerKbmMapper.ACTION_KEY_PREFIX + keyCode);
-            dialog.dismiss();
+            hideMenu();
             showControllerKbmMenu(device);
             return true;
         });
@@ -1010,16 +2068,184 @@ public class GameMenu implements Game.GameMenuCallbacks {
                         captured[0] = true;
                         mapper.setAction(source, ControllerKbmMapper.ACTION_KEY_PREFIX +
                                 event.getKeyCode());
-                        dialog.dismiss();
+                        hideMenu();
                         showControllerKbmMenu(device);
                         return;
                     }
                 }
             }
         });
-        dialog.setOnShowListener(ignored -> input.requestFocus());
-        currentDialog = dialog;
-        dialog.show();
+
+        addVirtualKeyboardRow(keyboard, device, mapper, source,
+                new VirtualKeyboardKey("Esc", KeyEvent.KEYCODE_ESCAPE),
+                new VirtualKeyboardKey("F1", KeyEvent.KEYCODE_F1),
+                new VirtualKeyboardKey("F2", KeyEvent.KEYCODE_F2),
+                new VirtualKeyboardKey("F3", KeyEvent.KEYCODE_F3),
+                new VirtualKeyboardKey("F4", KeyEvent.KEYCODE_F4),
+                new VirtualKeyboardKey("F5", KeyEvent.KEYCODE_F5),
+                new VirtualKeyboardKey("F6", KeyEvent.KEYCODE_F6),
+                new VirtualKeyboardKey("F7", KeyEvent.KEYCODE_F7),
+                new VirtualKeyboardKey("F8", KeyEvent.KEYCODE_F8),
+                new VirtualKeyboardKey("F9", KeyEvent.KEYCODE_F9),
+                new VirtualKeyboardKey("F10", KeyEvent.KEYCODE_F10),
+                new VirtualKeyboardKey("F11", KeyEvent.KEYCODE_F11),
+                new VirtualKeyboardKey("F12", KeyEvent.KEYCODE_F12));
+        addVirtualKeyboardRow(keyboard, device, mapper, source,
+                new VirtualKeyboardKey("Print", KeyEvent.KEYCODE_SYSRQ),
+                new VirtualKeyboardKey("Scroll", KeyEvent.KEYCODE_SCROLL_LOCK),
+                new VirtualKeyboardKey("Pause", KeyEvent.KEYCODE_BREAK),
+                new VirtualKeyboardKey("Insert", KeyEvent.KEYCODE_INSERT),
+                new VirtualKeyboardKey("Home", KeyEvent.KEYCODE_MOVE_HOME),
+                new VirtualKeyboardKey("PgUp", KeyEvent.KEYCODE_PAGE_UP),
+                new VirtualKeyboardKey("Delete", KeyEvent.KEYCODE_FORWARD_DEL),
+                new VirtualKeyboardKey("End", KeyEvent.KEYCODE_MOVE_END),
+                new VirtualKeyboardKey("PgDn", KeyEvent.KEYCODE_PAGE_DOWN));
+        addVirtualKeyboardRow(keyboard, device, mapper, source,
+                new VirtualKeyboardKey("`", KeyEvent.KEYCODE_GRAVE),
+                new VirtualKeyboardKey("1", KeyEvent.KEYCODE_1),
+                new VirtualKeyboardKey("2", KeyEvent.KEYCODE_2),
+                new VirtualKeyboardKey("3", KeyEvent.KEYCODE_3),
+                new VirtualKeyboardKey("4", KeyEvent.KEYCODE_4),
+                new VirtualKeyboardKey("5", KeyEvent.KEYCODE_5),
+                new VirtualKeyboardKey("6", KeyEvent.KEYCODE_6),
+                new VirtualKeyboardKey("7", KeyEvent.KEYCODE_7),
+                new VirtualKeyboardKey("8", KeyEvent.KEYCODE_8),
+                new VirtualKeyboardKey("9", KeyEvent.KEYCODE_9),
+                new VirtualKeyboardKey("0", KeyEvent.KEYCODE_0),
+                new VirtualKeyboardKey("-", KeyEvent.KEYCODE_MINUS),
+                new VirtualKeyboardKey("=", KeyEvent.KEYCODE_EQUALS),
+                new VirtualKeyboardKey("Backspace", KeyEvent.KEYCODE_DEL, 1.8f));
+        addVirtualKeyboardRow(keyboard, device, mapper, source,
+                new VirtualKeyboardKey("Tab", KeyEvent.KEYCODE_TAB, 1.5f),
+                key("Q"), key("W"), key("E"), key("R"), key("T"), key("Y"),
+                key("U"), key("I"), key("O"), key("P"),
+                new VirtualKeyboardKey("[", KeyEvent.KEYCODE_LEFT_BRACKET),
+                new VirtualKeyboardKey("]", KeyEvent.KEYCODE_RIGHT_BRACKET),
+                new VirtualKeyboardKey("\\", KeyEvent.KEYCODE_BACKSLASH, 1.4f));
+        addVirtualKeyboardRow(keyboard, device, mapper, source,
+                new VirtualKeyboardKey("Caps", KeyEvent.KEYCODE_CAPS_LOCK, 1.8f),
+                key("A"), key("S"), key("D"), key("F"), key("G"), key("H"),
+                key("J"), key("K"), key("L"),
+                new VirtualKeyboardKey(";", KeyEvent.KEYCODE_SEMICOLON),
+                new VirtualKeyboardKey("'", KeyEvent.KEYCODE_APOSTROPHE),
+                new VirtualKeyboardKey("Enter", KeyEvent.KEYCODE_ENTER, 2.0f));
+        addVirtualKeyboardRow(keyboard, device, mapper, source,
+                new VirtualKeyboardKey("L Shift", KeyEvent.KEYCODE_SHIFT_LEFT, 2.2f),
+                key("Z"), key("X"), key("C"), key("V"), key("B"), key("N"), key("M"),
+                new VirtualKeyboardKey(",", KeyEvent.KEYCODE_COMMA),
+                new VirtualKeyboardKey(".", KeyEvent.KEYCODE_PERIOD),
+                new VirtualKeyboardKey("/", KeyEvent.KEYCODE_SLASH),
+                new VirtualKeyboardKey("R Shift", KeyEvent.KEYCODE_SHIFT_RIGHT, 2.2f));
+        addVirtualKeyboardRow(keyboard, device, mapper, source,
+                new VirtualKeyboardKey("L Ctrl", KeyEvent.KEYCODE_CTRL_LEFT, 1.4f),
+                new VirtualKeyboardKey("L Win", KeyEvent.KEYCODE_META_LEFT, 1.4f),
+                new VirtualKeyboardKey("L Alt", KeyEvent.KEYCODE_ALT_LEFT, 1.4f),
+                new VirtualKeyboardKey("Space", KeyEvent.KEYCODE_SPACE, 5.0f),
+                new VirtualKeyboardKey("R Alt", KeyEvent.KEYCODE_ALT_RIGHT, 1.4f),
+                new VirtualKeyboardKey("R Win", KeyEvent.KEYCODE_META_RIGHT, 1.4f),
+                new VirtualKeyboardKey("Menu", KeyEvent.KEYCODE_MENU, 1.4f),
+                new VirtualKeyboardKey("R Ctrl", KeyEvent.KEYCODE_CTRL_RIGHT, 1.4f));
+        addVirtualKeyboardRow(keyboard, device, mapper, source,
+                new VirtualKeyboardKey("←", KeyEvent.KEYCODE_DPAD_LEFT),
+                new VirtualKeyboardKey("↑", KeyEvent.KEYCODE_DPAD_UP),
+                new VirtualKeyboardKey("↓", KeyEvent.KEYCODE_DPAD_DOWN),
+                new VirtualKeyboardKey("→", KeyEvent.KEYCODE_DPAD_RIGHT));
+
+        TextView numpadTitle = new TextView(getThemedContext());
+        numpadTitle.setText("Numpad");
+        numpadTitle.setTextColor(0x99FFFFFF);
+        numpadTitle.setTextSize(13);
+        numpadTitle.setPadding(dp(4), dp(8), dp(4), dp(2));
+        keyboard.addView(numpadTitle);
+        addVirtualKeyboardRow(keyboard, device, mapper, source,
+                new VirtualKeyboardKey("Num", KeyEvent.KEYCODE_NUM_LOCK),
+                new VirtualKeyboardKey("/", KeyEvent.KEYCODE_NUMPAD_DIVIDE),
+                new VirtualKeyboardKey("*", KeyEvent.KEYCODE_NUMPAD_MULTIPLY),
+                new VirtualKeyboardKey("-", KeyEvent.KEYCODE_NUMPAD_SUBTRACT),
+                new VirtualKeyboardKey("7", KeyEvent.KEYCODE_NUMPAD_7),
+                new VirtualKeyboardKey("8", KeyEvent.KEYCODE_NUMPAD_8),
+                new VirtualKeyboardKey("9", KeyEvent.KEYCODE_NUMPAD_9),
+                new VirtualKeyboardKey("+", KeyEvent.KEYCODE_NUMPAD_ADD));
+        addVirtualKeyboardRow(keyboard, device, mapper, source,
+                new VirtualKeyboardKey("4", KeyEvent.KEYCODE_NUMPAD_4),
+                new VirtualKeyboardKey("5", KeyEvent.KEYCODE_NUMPAD_5),
+                new VirtualKeyboardKey("6", KeyEvent.KEYCODE_NUMPAD_6),
+                new VirtualKeyboardKey("1", KeyEvent.KEYCODE_NUMPAD_1),
+                new VirtualKeyboardKey("2", KeyEvent.KEYCODE_NUMPAD_2),
+                new VirtualKeyboardKey("3", KeyEvent.KEYCODE_NUMPAD_3),
+                new VirtualKeyboardKey("0", KeyEvent.KEYCODE_NUMPAD_0, 2.0f),
+                new VirtualKeyboardKey(".", KeyEvent.KEYCODE_NUMPAD_DOT));
+
+        ScrollView keyboardScroll = new ScrollView(getThemedContext());
+        keyboardScroll.addView(keyboard);
+        if (wideLayout) {
+            LinearLayout.LayoutParams leftParams = new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.MATCH_PARENT, 0.34f);
+            leftParams.setMargins(dp(4), dp(4), dp(6), dp(4));
+            page.addView(instructions, leftParams);
+            LinearLayout.LayoutParams rightParams = new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.MATCH_PARENT, 0.66f);
+            rightParams.setMargins(dp(6), 0, 0, 0);
+            page.addView(keyboardScroll, rightParams);
+        }
+        else {
+            page.addView(instructions, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT));
+            page.addView(keyboardScroll, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        }
+
+        LinearLayout shell = createFullscreenMenuShell(
+                getString(R.string.game_menu_controller_kbm_keyboard_key),
+                page, null,
+                () -> showControllerKbmActionPicker(device, mapper, source));
+        showFullscreenDialog(shell, null);
+    }
+
+    private VirtualKeyboardKey key(String label) {
+        return new VirtualKeyboardKey(label,
+                KeyEvent.KEYCODE_A + (label.charAt(0) - 'A'));
+    }
+
+    private void addVirtualKeyboardRow(LinearLayout keyboard,
+                                       GameInputDevice device,
+                                       ControllerKbmMapper mapper,
+                                       String source,
+                                       VirtualKeyboardKey... keys) {
+        LinearLayout row = new LinearLayout(getThemedContext());
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        for (VirtualKeyboardKey key : keys) {
+            Button button = new Button(getThemedContext());
+            button.setText(key.label);
+            button.setTextColor(Color.WHITE);
+            button.setTextSize(11);
+            button.setAllCaps(false);
+            button.setMinWidth(0);
+            button.setMinimumWidth(0);
+            button.setPadding(dp(3), 0, dp(3), 0);
+            button.setBackground(roundedBackground(0xCC2A3440, 9));
+            button.setOnClickListener(view -> {
+                mapper.setAction(source,
+                        ControllerKbmMapper.ACTION_KEY_PREFIX + key.keyCode);
+                hideMenu();
+                showControllerKbmMenu(device);
+            });
+            button.setOnFocusChangeListener((view, hasFocus) -> {
+                view.setBackground(roundedBackground(
+                        hasFocus ? 0xFFF7A900 : 0xCC2A3440, 9));
+                view.setScaleX(hasFocus ? 1.04f : 1f);
+                view.setScaleY(hasFocus ? 1.04f : 1f);
+            });
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    0, dp(44), key.width);
+            params.setMargins(dp(2), dp(2), dp(2), dp(2));
+            row.addView(button, params);
+        }
+        keyboard.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
     private void showControllerKbmActionPicker(GameInputDevice device,
@@ -1101,24 +2327,33 @@ public class GameMenu implements Game.GameMenuCallbacks {
             };
         }
 
-        currentDialog = new AlertDialog.Builder(getThemedContext())
-                .setTitle(getControllerKbmSourceLabel(source))
-                .setItems(labels, (dialog, which) -> {
-                    if (ControllerKbmMapper.ACTION_KEY_PREFIX.equals(actions[which])) {
-                        showControllerKbmKeyboardCapture(device, mapper, source);
-                    }
-                    else if (CONTROLLER_KBM_PICK_FUNCTION_KEY.equals(actions[which])) {
-                        showControllerKbmFunctionKeyPicker(device, mapper, source);
-                    }
-                    else {
-                        mapper.setAction(source, actions[which]);
-                        showControllerKbmMenu(device);
-                    }
-                })
-                .setNegativeButton(R.string.game_menu_cancel,
-                        (dialog, which) -> showControllerKbmMenu(device))
-                .create();
-        currentDialog.show();
+        ScrollView scrollView = new ScrollView(getThemedContext());
+        GridLayout grid = createMenuGrid();
+        for (int i = 0; i < labels.length; i++) {
+            final int choice = i;
+            String id = actions[i].isEmpty() ? "kbm_action_unassigned" :
+                    "kbm_action_" + actions[i].replace(':', '_');
+            MenuOption option = new MenuOption(id, labels[i], () -> {});
+            View card = createQuickMenuCard(option, () -> {
+                hideMenu();
+                if (ControllerKbmMapper.ACTION_KEY_PREFIX.equals(actions[choice])) {
+                    showControllerKbmKeyboardCapture(device, mapper, source);
+                }
+                else if (CONTROLLER_KBM_PICK_FUNCTION_KEY.equals(actions[choice])) {
+                    showControllerKbmFunctionKeyPicker(device, mapper, source);
+                }
+                else {
+                    mapper.setAction(source, actions[choice]);
+                    showControllerKbmMenu(device);
+                }
+            });
+            grid.addView(card, createMenuCardLayoutParams());
+        }
+        scrollView.addView(grid);
+        LinearLayout shell = createFullscreenMenuShell(
+                getControllerKbmSourceLabel(source), scrollView, null,
+                () -> showControllerKbmMenu(device));
+        showFullscreenDialog(shell, null);
     }
 
     private void showControllerKbmFunctionKeyPicker(GameInputDevice device,
@@ -1129,17 +2364,26 @@ public class GameMenu implements Game.GameMenuCallbacks {
             labels[i] = "F" + (i + 1);
         }
 
-        currentDialog = new AlertDialog.Builder(getThemedContext())
-                .setTitle(R.string.game_menu_controller_kbm_function_keys)
-                .setItems(labels, (dialog, which) -> {
-                    mapper.setAction(source, ControllerKbmMapper.ACTION_KEY_PREFIX +
-                            (KeyEvent.KEYCODE_F1 + which));
-                    showControllerKbmMenu(device);
-                })
-                .setNegativeButton(R.string.game_menu_cancel,
-                        (dialog, which) -> showControllerKbmActionPicker(device, mapper, source))
-                .create();
-        currentDialog.show();
+        ScrollView scrollView = new ScrollView(getThemedContext());
+        GridLayout grid = createMenuGrid();
+        for (int i = 0; i < labels.length; i++) {
+            final int functionIndex = i;
+            MenuOption option = new MenuOption(
+                    "kbm_function_" + (i + 1), labels[i], () -> {});
+            View card = createQuickMenuCard(option, () -> {
+                mapper.setAction(source, ControllerKbmMapper.ACTION_KEY_PREFIX +
+                        (KeyEvent.KEYCODE_F1 + functionIndex));
+                hideMenu();
+                showControllerKbmMenu(device);
+            });
+            grid.addView(card, createMenuCardLayoutParams());
+        }
+        scrollView.addView(grid);
+        LinearLayout shell = createFullscreenMenuShell(
+                getString(R.string.game_menu_controller_kbm_function_keys),
+                scrollView, null,
+                () -> showControllerKbmActionPicker(device, mapper, source));
+        showFullscreenDialog(shell, null);
     }
 
     private void addControllerKbmSlider(LinearLayout layout, SharedPreferences prefs,
@@ -1334,13 +2578,10 @@ public class GameMenu implements Game.GameMenuCallbacks {
                 ControllerKbmMapper.PREF_GYRO_HOLD_ACTIVATION,
                 true);
 
-        currentDialog = new AlertDialog.Builder(getThemedContext())
-                .setTitle(R.string.game_menu_controller_kbm_settings)
-                .setView(scrollView)
-                .setPositiveButton(R.string.game_menu_done,
-                        (dialog, which) -> showControllerKbmMenu(device))
-                .create();
-        currentDialog.show();
+        cardifySettingsLayout(layout);
+        showFullscreenSettings(R.string.game_menu_controller_kbm_settings,
+                scrollView, () -> showControllerKbmMenu(device),
+                () -> showControllerKbmMenu(device));
     }
 
     private void showControllerKbmAddButton(GameInputDevice device, ControllerKbmMapper mapper) {
@@ -1500,156 +2741,247 @@ public class GameMenu implements Game.GameMenuCallbacks {
     }
 
     private void showControllerKbmSavePreset(GameInputDevice device, ControllerKbmMapper mapper) {
+        LinearLayout content = new LinearLayout(getThemedContext());
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(10), dp(8), dp(10), dp(10));
+
+        LinearLayout inputCard = new LinearLayout(getThemedContext());
+        inputCard.setOrientation(LinearLayout.VERTICAL);
+        inputCard.setPadding(dp(18), dp(14), dp(18), dp(14));
+        inputCard.setBackground(roundedBackground(0xCC202630, 16));
+
+        TextView label = new TextView(getThemedContext());
+        label.setText(R.string.game_menu_controller_kbm_preset_name);
+        label.setTextColor(Color.WHITE);
+        label.setTextSize(15);
+        inputCard.addView(label);
+
         EditText nameInput = new EditText(getThemedContext());
         nameInput.setSingleLine(true);
         nameInput.setHint(R.string.game_menu_controller_kbm_preset_name);
+        nameInput.setTextColor(Color.WHITE);
+        nameInput.setHintTextColor(0x88FFFFFF);
+        inputCard.addView(nameInput, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        content.addView(inputCard, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        AlertDialog dialog = new AlertDialog.Builder(getThemedContext())
-                .setTitle(R.string.game_menu_controller_kbm_save_preset)
-                .setView(nameInput)
-                .setPositiveButton(android.R.string.ok, null)
-                .setNegativeButton(R.string.game_menu_cancel,
-                        (ignored, which) -> showControllerKbmMenu(device))
-                .create();
-        dialog.setOnShowListener(ignored -> {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
-                ControllerKbmMapper.Preset preset =
-                        mapper.savePreset(nameInput.getText().toString());
-                if (preset != null) {
-                    dialog.dismiss();
-                    showControllerKbmMenu(device);
-                }
-                else {
-                    nameInput.setError(getString(R.string.game_menu_controller_kbm_preset_name));
-                }
-            });
-            nameInput.requestFocus();
+        LinearLayout actions = new LinearLayout(getThemedContext());
+        actions.setGravity(Gravity.END);
+        actions.setPadding(0, dp(12), 0, 0);
+        Button cancel = createModernDialogButton(
+                getString(R.string.game_menu_cancel), false,
+                () -> showControllerKbmMenu(device));
+        Button save = createModernDialogButton(
+                getString(R.string.game_menu_controller_kbm_save_preset), true, () -> {
+                    ControllerKbmMapper.Preset preset =
+                            mapper.savePreset(nameInput.getText().toString());
+                    if (preset != null) {
+                        hideMenu();
+                        showControllerKbmMenu(device);
+                    }
+                    else {
+                        nameInput.setError(
+                                getString(R.string.game_menu_controller_kbm_preset_name));
+                    }
         });
-        currentDialog = dialog;
-        dialog.show();
+        actions.addView(cancel, modernDialogButtonParams());
+        actions.addView(save, modernDialogButtonParams());
+        content.addView(actions);
+
+        LinearLayout shell = createFullscreenMenuShell(
+                getString(R.string.game_menu_controller_kbm_save_preset),
+                content, null, () -> showControllerKbmMenu(device));
+        showFullscreenDialog(shell, null);
+        nameInput.post(nameInput::requestFocus);
+    }
+
+    private LinearLayout.LayoutParams modernDialogButtonParams() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(48));
+        params.setMargins(dp(6), 0, 0, 0);
+        return params;
+    }
+
+    private Button createModernDialogButton(String text, boolean accent, Runnable action) {
+        Button button = new Button(getThemedContext());
+        int normalColor = accent ? 0xFFF7A900 : 0xCC2A3440;
+        int focusColor = accent ? 0xFFFFC04A : 0xFF435264;
+        button.setText(text);
+        button.setTextColor(Color.WHITE);
+        button.setTextSize(14);
+        button.setAllCaps(false);
+        button.setPadding(dp(18), 0, dp(18), 0);
+        button.setBackground(roundedBackground(normalColor, 13));
+        button.setOnClickListener(view -> action.run());
+        button.setFocusable(true);
+        button.setOnFocusChangeListener((view, hasFocus) -> {
+            view.setBackground(roundedBackground(
+                    hasFocus ? focusColor : normalColor, 13));
+            view.setScaleX(hasFocus ? 1.04f : 1f);
+            view.setScaleY(hasFocus ? 1.04f : 1f);
+        });
+        return button;
+    }
+
+    private void showModernKbmConfirmation(String title, String message,
+                                            String confirmText, Runnable confirmAction,
+                                            Runnable backAction) {
+        LinearLayout content = new LinearLayout(getThemedContext());
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setGravity(Gravity.CENTER);
+        content.setPadding(dp(12), dp(12), dp(12), dp(12));
+
+        TextView messageView = new TextView(getThemedContext());
+        messageView.setText(message);
+        messageView.setTextColor(0xFFE3E7ED);
+        messageView.setTextSize(17);
+        messageView.setGravity(Gravity.CENTER);
+        messageView.setPadding(dp(22), dp(22), dp(22), dp(22));
+        messageView.setBackground(roundedBackground(0xCC202630, 18));
+        content.addView(messageView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout actions = new LinearLayout(getThemedContext());
+        actions.setGravity(Gravity.CENTER);
+        actions.setPadding(0, dp(16), 0, 0);
+        actions.addView(createModernDialogButton(
+                getString(R.string.game_menu_cancel), false, backAction),
+                modernDialogButtonParams());
+        actions.addView(createModernDialogButton(confirmText, true, () -> {
+            hideMenu();
+            confirmAction.run();
+        }), modernDialogButtonParams());
+        content.addView(actions);
+
+        LinearLayout shell = createFullscreenMenuShell(
+                title, content, null, backAction);
+        showFullscreenDialog(shell, null);
     }
 
     private void confirmControllerKbmPresetDelete(GameInputDevice device,
                                                    ControllerKbmMapper mapper,
                                                    ControllerKbmMapper.Preset preset) {
-        new AlertDialog.Builder(getThemedContext())
-                .setTitle(R.string.game_menu_controller_kbm_delete_preset)
-                .setMessage(game.getString(R.string.game_menu_controller_kbm_delete_preset_confirm,
-                        preset.getDisplayName()))
-                .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+        showModernKbmConfirmation(
+                getString(R.string.game_menu_controller_kbm_delete_preset),
+                game.getString(R.string.game_menu_controller_kbm_delete_preset_confirm,
+                        preset.getDisplayName()),
+                getString(R.string.game_menu_controller_kbm_delete_preset), () -> {
                     mapper.deletePreset(preset.id);
                     showControllerKbmLoadPreset(device, mapper);
-                })
-                .setNegativeButton(R.string.game_menu_cancel,
-                        (dialog, which) -> showControllerKbmLoadPreset(device, mapper))
-                .show();
+                }, () -> showControllerKbmLoadPreset(device, mapper));
     }
 
     private void showControllerKbmLoadPreset(GameInputDevice device, ControllerKbmMapper mapper) {
         List<ControllerKbmMapper.Preset> presets = mapper.getPresets();
         if (presets.isEmpty()) {
-            new AlertDialog.Builder(getThemedContext())
-                    .setTitle(R.string.game_menu_controller_kbm_load_preset)
-                    .setMessage(R.string.game_menu_controller_kbm_no_presets)
-                    .setPositiveButton(android.R.string.ok,
-                            (dialog, which) -> showControllerKbmMenu(device))
-                    .show();
+            LinearLayout empty = new LinearLayout(getThemedContext());
+            empty.setGravity(Gravity.CENTER);
+            TextView message = new TextView(getThemedContext());
+            message.setText(R.string.game_menu_controller_kbm_no_presets);
+            message.setTextColor(0xFFE3E7ED);
+            message.setTextSize(18);
+            message.setGravity(Gravity.CENTER);
+            message.setPadding(dp(24), dp(24), dp(24), dp(24));
+            message.setBackground(roundedBackground(0xCC202630, 18));
+            empty.addView(message, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT));
+            LinearLayout shell = createFullscreenMenuShell(
+                    getString(R.string.game_menu_controller_kbm_load_preset),
+                    empty, null, () -> showControllerKbmMenu(device));
+            showFullscreenDialog(shell, null);
             return;
         }
 
-        ListView list = new ListView(getThemedContext());
-        ArrayAdapter<ControllerKbmMapper.Preset> adapter =
-                new ArrayAdapter<ControllerKbmMapper.Preset>(
-                        getThemedContext(), android.R.layout.simple_list_item_1, presets) {
-                    @Override
-                    public View getView(int position, View convertView, ViewGroup parent) {
-                        ControllerKbmMapper.Preset preset = getItem(position);
-                        LinearLayout row = new LinearLayout(getThemedContext());
-                        row.setGravity(Gravity.CENTER_VERTICAL);
-                        int padding = (int) (12 *
-                                game.getResources().getDisplayMetrics().density);
-
-                        TextView name = new TextView(getThemedContext());
-                        name.setText(getControllerKbmPresetDisplayName(preset));
-                        name.setTextSize(18);
-                        name.setPadding(padding, padding, padding, padding);
-                        row.addView(name, new LinearLayout.LayoutParams(
-                                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-
-                        View.OnClickListener loadPreset = view -> {
-                            game.loadControllerKbmPreset(preset);
-                            if (currentDialog != null) {
-                                currentDialog.dismiss();
-                            }
-                            showControllerKbmMenu(device);
-                        };
-                        row.setOnClickListener(loadPreset);
-                        name.setOnClickListener(loadPreset);
-
-                        ImageButton export = new ImageButton(getThemedContext());
-                        export.setImageResource(android.R.drawable.ic_menu_share);
-                        export.setBackgroundColor(0x00000000);
-                        export.setFocusable(false);
-                        export.setFocusableInTouchMode(false);
-                        export.setContentDescription(
-                                getString(R.string.game_menu_controller_kbm_export_preset));
-                        export.setOnClickListener(view -> {
-                            if (currentDialog != null) {
-                                currentDialog.dismiss();
-                            }
-                            exportControllerKbmPreset(device, mapper, preset);
-                        });
-                        row.addView(export);
-
-                        ImageButton delete = new ImageButton(getThemedContext());
-                        delete.setImageResource(android.R.drawable.ic_menu_delete);
-                        delete.setBackgroundColor(0x00000000);
-                        delete.setFocusable(false);
-                        delete.setFocusableInTouchMode(false);
-                        delete.setContentDescription(
-                                getString(R.string.game_menu_controller_kbm_delete_preset));
-                        delete.setOnClickListener(view -> {
-                            if (currentDialog != null) {
-                                currentDialog.dismiss();
-                            }
-                            confirmControllerKbmPresetDelete(device, mapper, preset);
-                        });
-                        row.addView(delete);
-                        return row;
-                    }
-                };
-        list.setAdapter(adapter);
-        list.setOnItemClickListener((parent, view, position, id) -> {
-            ControllerKbmMapper.Preset preset = adapter.getItem(position);
-            if (preset != null) {
+        ScrollView scrollView = new ScrollView(getThemedContext());
+        GridLayout grid = createMenuGrid();
+        for (ControllerKbmMapper.Preset preset : presets) {
+            LinearLayout card = new LinearLayout(getThemedContext());
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setGravity(Gravity.CENTER);
+            card.setPadding(dp(12), dp(12), dp(12), dp(8));
+            card.setBackground(roundedBackground(0xCC202630, 18));
+            card.setFocusable(true);
+            card.setClickable(true);
+            card.setOnClickListener(view -> {
                 game.loadControllerKbmPreset(preset);
-            }
-            if (currentDialog != null) {
-                currentDialog.dismiss();
-            }
-            showControllerKbmMenu(device);
-        });
+                hideMenu();
+                showControllerKbmMenu(device);
+            });
+            card.setOnFocusChangeListener((view, hasFocus) -> {
+                view.setBackground(roundedBackground(
+                        hasFocus ? 0xFF354352 : 0xCC202630, 18));
+                view.setScaleX(hasFocus ? 1.03f : 1f);
+                view.setScaleY(hasFocus ? 1.03f : 1f);
+            });
 
-        currentDialog = new AlertDialog.Builder(getThemedContext())
-                .setTitle(R.string.game_menu_controller_kbm_load_preset)
-                .setView(list)
-                .setNegativeButton(R.string.game_menu_cancel,
-                        (dialog, which) -> showControllerKbmMenu(device))
-                .create();
-        currentDialog.show();
+            ImageView loadIcon = new ImageView(getThemedContext());
+            loadIcon.setImageResource(R.drawable.ic_qm_download);
+            loadIcon.setColorFilter(0xFFF7B52C);
+            card.addView(loadIcon, new LinearLayout.LayoutParams(dp(30), dp(30)));
+
+            TextView name = new TextView(getThemedContext());
+            name.setText(getControllerKbmPresetDisplayName(preset));
+            name.setTextColor(Color.WHITE);
+            name.setTextSize(16);
+            name.setGravity(Gravity.CENTER);
+            name.setMaxLines(2);
+            name.setEllipsize(TextUtils.TruncateAt.END);
+            LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1);
+            nameParams.topMargin = dp(5);
+            card.addView(name, nameParams);
+
+            LinearLayout actions = new LinearLayout(getThemedContext());
+            actions.setGravity(Gravity.CENTER);
+            ImageButton export = createPresetIconButton(
+                    R.drawable.ic_qm_share,
+                    getString(R.string.game_menu_controller_kbm_export_preset), () -> {
+                        hideMenu();
+                        exportControllerKbmPreset(device, mapper, preset);
+                    });
+            ImageButton delete = createPresetIconButton(
+                    R.drawable.ic_qm_delete,
+                    getString(R.string.game_menu_controller_kbm_delete_preset), () -> {
+                        hideMenu();
+                        confirmControllerKbmPresetDelete(device, mapper, preset);
+                    });
+            actions.addView(export, new LinearLayout.LayoutParams(dp(38), dp(38)));
+            actions.addView(delete, new LinearLayout.LayoutParams(dp(38), dp(38)));
+            card.addView(actions);
+
+            GridLayout.LayoutParams params = createMenuCardLayoutParams();
+            params.height = dp(142);
+            grid.addView(card, params);
+        }
+        scrollView.addView(grid);
+        LinearLayout shell = createFullscreenMenuShell(
+                getString(R.string.game_menu_controller_kbm_load_preset),
+                scrollView, null, () -> showControllerKbmMenu(device));
+        showFullscreenDialog(shell, null);
+    }
+
+    private ImageButton createPresetIconButton(int iconRes, String description,
+                                                Runnable action) {
+        ImageButton button = new ImageButton(getThemedContext());
+        button.setImageResource(iconRes);
+        button.setColorFilter(Color.WHITE);
+        button.setBackgroundColor(Color.TRANSPARENT);
+        button.setContentDescription(description);
+        button.setOnClickListener(view -> action.run());
+        applyControllerFocusStyle(button);
+        return button;
     }
 
     private void confirmControllerKbmReset(GameInputDevice device, ControllerKbmMapper mapper) {
-        new AlertDialog.Builder(getThemedContext())
-                .setTitle(R.string.game_menu_controller_kbm_reset)
-                .setMessage(R.string.game_menu_controller_kbm_reset_confirm)
-                .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+        showModernKbmConfirmation(
+                getString(R.string.game_menu_controller_kbm_reset),
+                getString(R.string.game_menu_controller_kbm_reset_confirm),
+                getString(R.string.game_menu_controller_kbm_reset), () -> {
                     game.resetControllerKbmMappings();
                     showControllerKbmMenu(device);
-                })
-                .setNegativeButton(R.string.game_menu_cancel,
-                        (dialog, which) -> showControllerKbmMenu(device))
-                .show();
+                }, () -> showControllerKbmMenu(device));
     }
 
     private void showControllerKbmMenu(GameInputDevice device) {
@@ -1658,45 +2990,42 @@ public class GameMenu implements Game.GameMenuCallbacks {
             return;
         }
         List<MenuOption> options = new ArrayList<>();
-        options.add(new MenuOption(getString(R.string.game_menu_controller_kbm_settings),
+        options.add(new MenuOption("kbm_settings",
+                getString(R.string.game_menu_controller_kbm_settings),
                 () -> showControllerKbmSettings(device, mapper)));
         for (String source : mapper.getSources()) {
-            options.add(new MenuOption(getControllerKbmSourceLabel(source) + "  →  " +
+            options.add(new MenuOption("kbm_source_" + source,
+                    getControllerKbmSourceLabel(source) + "  →  " +
                     getControllerKbmActionLabel(mapper.getAction(source)),
                     () -> showControllerKbmActionPicker(device, mapper, source)));
         }
-        options.add(new MenuOption(getString(R.string.game_menu_controller_kbm_add_button),
+        options.add(new MenuOption("kbm_add",
+                getString(R.string.game_menu_controller_kbm_add_button),
                 () -> showControllerKbmAddButton(device, mapper)));
-        options.add(new MenuOption(MENU_CANCEL, getString(R.string.game_menu_cancel),
-                () -> showAdvancedMenu(device)));
-
-        LinearLayout layout = new LinearLayout(getThemedContext());
-        layout.setOrientation(LinearLayout.VERTICAL);
-
-        LinearLayout header = new LinearLayout(getThemedContext());
-        header.setGravity(Gravity.CENTER_VERTICAL);
-        int padding = (int) (12 * game.getResources().getDisplayMetrics().density);
-        header.setPadding(padding, padding / 2, padding, padding / 2);
-
         ControllerKbmMapper.Preset matchingPreset = mapper.getMatchingPreset();
-        TextView title = new TextView(getThemedContext());
-        SpannableStringBuilder titleText = new SpannableStringBuilder(
-                getString(R.string.game_menu_controller_kbm));
-        titleText.append("\n").append(getString(R.string.game_menu_controller_kbm_current_preset)
-                .replace("%1$s", ""));
+        TextView presetLabel = new TextView(getThemedContext());
+        SpannableStringBuilder presetText = new SpannableStringBuilder(
+                getString(R.string.game_menu_controller_kbm_current_preset)
+                        .replace("%1$s", ""));
         if (matchingPreset != null) {
-            titleText.append(getControllerKbmPresetDisplayName(matchingPreset));
+            presetText.append(getControllerKbmPresetDisplayName(matchingPreset));
         }
         else {
-            titleText.append(getString(R.string.game_menu_controller_kbm_temporary));
+            presetText.append(getString(R.string.game_menu_controller_kbm_temporary));
         }
-        title.setText(titleText);
-        title.setTextSize(18);
-        header.addView(title, new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        presetLabel.setText(presetText);
+        presetLabel.setTextColor(0xFFE3E7ED);
+        presetLabel.setTextSize(14);
+        presetLabel.setGravity(Gravity.CENTER_VERTICAL);
+        presetLabel.setPadding(dp(14), dp(8), dp(14), dp(8));
+        presetLabel.setBackground(roundedBackground(0xCC202630, 14));
+
+        LinearLayout headerActions = new LinearLayout(getThemedContext());
+        headerActions.setGravity(Gravity.CENTER_VERTICAL);
 
         ImageButton savePreset = new ImageButton(getThemedContext());
-        savePreset.setImageResource(android.R.drawable.ic_menu_save);
+        savePreset.setImageResource(R.drawable.ic_qm_save);
+        savePreset.setColorFilter(Color.WHITE);
         savePreset.setBackgroundColor(0x00000000);
         savePreset.setContentDescription(
                 getString(R.string.game_menu_controller_kbm_save_preset));
@@ -1704,10 +3033,12 @@ public class GameMenu implements Game.GameMenuCallbacks {
             if (currentDialog != null) currentDialog.dismiss();
             showControllerKbmSavePreset(device, mapper);
         });
-        header.addView(savePreset);
+        applyControllerFocusStyle(savePreset);
+        headerActions.addView(savePreset, new LinearLayout.LayoutParams(dp(42), dp(42)));
 
         ImageButton loadPreset = new ImageButton(getThemedContext());
-        loadPreset.setImageResource(android.R.drawable.ic_menu_upload);
+        loadPreset.setImageResource(R.drawable.ic_qm_download);
+        loadPreset.setColorFilter(Color.WHITE);
         loadPreset.setBackgroundColor(0x00000000);
         loadPreset.setContentDescription(
                 getString(R.string.game_menu_controller_kbm_load_preset));
@@ -1715,10 +3046,12 @@ public class GameMenu implements Game.GameMenuCallbacks {
             if (currentDialog != null) currentDialog.dismiss();
             showControllerKbmLoadPreset(device, mapper);
         });
-        header.addView(loadPreset);
+        applyControllerFocusStyle(loadPreset);
+        headerActions.addView(loadPreset, new LinearLayout.LayoutParams(dp(42), dp(42)));
 
         ImageButton importPreset = new ImageButton(getThemedContext());
-        importPreset.setImageResource(android.R.drawable.ic_menu_add);
+        importPreset.setImageResource(R.drawable.ic_qm_add);
+        importPreset.setColorFilter(Color.WHITE);
         importPreset.setBackgroundColor(0x00000000);
         importPreset.setContentDescription(
                 getString(R.string.game_menu_controller_kbm_import_preset));
@@ -1726,49 +3059,55 @@ public class GameMenu implements Game.GameMenuCallbacks {
             if (currentDialog != null) currentDialog.dismiss();
             importControllerKbmPreset(device);
         });
-        header.addView(importPreset);
+        applyControllerFocusStyle(importPreset);
+        headerActions.addView(importPreset, new LinearLayout.LayoutParams(dp(42), dp(42)));
 
         ImageButton reset = new ImageButton(getThemedContext());
-        reset.setImageResource(android.R.drawable.ic_menu_revert);
+        reset.setImageResource(R.drawable.ic_qm_restore);
+        reset.setColorFilter(Color.WHITE);
         reset.setBackgroundColor(0x00000000);
         reset.setContentDescription(getString(R.string.game_menu_controller_kbm_reset));
         reset.setOnClickListener(view -> {
             if (currentDialog != null) currentDialog.dismiss();
             confirmControllerKbmReset(device, mapper);
         });
-        header.addView(reset);
-        layout.addView(header);
+        applyControllerFocusStyle(reset);
+        headerActions.addView(reset, new LinearLayout.LayoutParams(dp(42), dp(42)));
 
-        ListView list = new ListView(getThemedContext());
-        ArrayAdapter<MenuOption> adapter = createMenuAdapter(
-                options, false, new HashSet<>(), () -> {});
-        list.setAdapter(adapter);
-        list.setOnItemClickListener((parent, view, position, id) -> {
-            MenuOption option = adapter.getItem(position);
-            if (option == null) return;
-            if (currentDialog != null) {
-                currentDialog.dismiss();
-                currentDialog = null;
-            }
-            run(option);
-        });
-        layout.addView(list);
+        LinearLayout layout = new LinearLayout(getThemedContext());
+        layout.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams presetParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        presetParams.setMargins(dp(6), dp(2), dp(6), dp(6));
+        layout.addView(presetLabel, presetParams);
 
-        if (currentDialog != null) currentDialog.dismiss();
-        currentDialog = new AlertDialog.Builder(getThemedContext()).setView(layout).create();
-        currentDialog.show();
-        Window window = currentDialog.getWindow();
-        if (window != null) {
-            window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT);
+        ScrollView scrollView = new ScrollView(getThemedContext());
+        GridLayout grid = createMenuGrid();
+        for (MenuOption option : options) {
+            View card = createQuickMenuCard(option, () -> {
+                if (currentDialog != null) {
+                    currentDialog.dismiss();
+                    currentDialog = null;
+                }
+                run(option);
+            });
+            grid.addView(card, createMenuCardLayoutParams());
         }
+        scrollView.addView(grid);
+        layout.addView(scrollView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+
+        LinearLayout shell = createFullscreenMenuShell(
+                getString(R.string.game_menu_controller_kbm), layout, null,
+                () -> showAdvancedMenu(device), headerActions);
+        showFullscreenDialog(shell, null);
     }
 
     private void showAdvancedMenu(GameInputDevice device) {
         List<MenuOption> options = new ArrayList<>();
         if (game.allowChangeMouseMode) {
             options.add(new MenuOption(ADV_MOUSE_MODE, getString(R.string.game_menu_select_mouse_mode), true,
-                    () -> game.selectMouseMode(dialogScreenContext)));
+                    () -> showMouseModeMenu(device)));
         }
 
         options.add(new MenuOption(ADV_HUD, getString(R.string.game_menu_toggle_hud), true, game::toggleHUD));
@@ -1785,7 +3124,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
         options.add(new MenuOption(ADV_TASK_MANAGER, getString(R.string.game_menu_task_manager), true,
                 () -> sendKeys(new short[]{KeyboardTranslator.VK_LCONTROL, KeyboardTranslator.VK_LSHIFT, KeyboardTranslator.VK_ESCAPE})));
         options.add(new MenuOption(ADV_VOLUME_BUTTONS, getString(R.string.game_menu_volume_button_mode) + ": " +
-                game.getVolumeButtonModeLabel(), game::selectVolumeButtonMode));
+                game.getVolumeButtonModeLabel(), () -> showVolumeButtonModeMenu(device)));
         if (game.isGyroAimQuickSettingsEnabled()) {
             options.add(new MenuOption(ADV_GYRO_AIM_SETTINGS, getString(R.string.game_menu_gyro_aim_settings),
                     () -> showGyroAimSettingsMenu(device)));
@@ -1797,7 +3136,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
         }
         options.add(new MenuOption(ADV_SEND_KEYS, getString(R.string.game_menu_send_keys), () -> {
             hideMenu();
-            showSpecialKeysMenu();
+            showSpecialKeysMenu(device);
         }));
         options.add(new MenuOption(ADV_TOUCH_SENSITIVITY, getString(R.string.game_menu_switch_touch_sensitivity_model), true,
                 game::switchTouchSensitivity));
@@ -1805,10 +3144,48 @@ public class GameMenu implements Game.GameMenuCallbacks {
             options.addAll(device.getGameMenuOptions());
         }
         options.add(new MenuOption(MENU_CANCEL, getString(R.string.game_menu_cancel), null));
-        showMenuDialog(getString(R.string.game_menu_advanced), options.toArray(new MenuOption[0]));
+        showMenuDialog(getString(R.string.game_menu_advanced),
+                options.toArray(new MenuOption[0]), () -> showMenu(device));
     }
 
-    private void showServerCmd(ArrayList<String> serverCmds) {
+    private void showVolumeButtonModeMenu(GameInputDevice device) {
+        String currentMode = game.getVolumeButtonMode();
+        List<MenuOption> options = new ArrayList<>();
+        String androidMode = PreferenceConfiguration.VOLUME_BUTTON_MODE_ANDROID;
+        String windowsMode = PreferenceConfiguration.VOLUME_BUTTON_MODE_WINDOWS;
+
+        options.add(new MenuOption("volume_mode_android",
+                getString(R.string.game_menu_volume_button_mode_android) +
+                        (androidMode.equals(currentMode) ? "  ✓" : ""),
+                () -> {
+                    game.setVolumeButtonMode(androidMode);
+                    showAdvancedMenu(device);
+                }));
+        options.add(new MenuOption("volume_mode_windows",
+                getString(R.string.game_menu_volume_button_mode_windows) +
+                        (windowsMode.equals(currentMode) ? "  ✓" : ""),
+                () -> {
+                    game.setVolumeButtonMode(windowsMode);
+                    showAdvancedMenu(device);
+                }));
+        options.add(new MenuOption(MENU_CANCEL, getString(R.string.game_menu_cancel), null));
+        showMenuDialog(getString(R.string.game_menu_volume_button_mode_title),
+                options.toArray(new MenuOption[0]), () -> showAdvancedMenu(device));
+    }
+
+    private void showMouseModeMenu(GameInputDevice device) {
+        List<MenuOption> options = new ArrayList<>();
+        for (MouseModeOption mouseMode : game.getAvailableMouseModeOptions()) {
+            options.add(new MenuOption("mouse_mode_" + mouseMode.index,
+                    mouseMode.label, true,
+                    () -> game.selectMouseModeOption(mouseMode.index)));
+        }
+        options.add(new MenuOption(MENU_CANCEL, getString(R.string.game_menu_cancel), null));
+        showMenuDialog(getString(R.string.game_menu_select_mouse_mode),
+                options.toArray(new MenuOption[0]), () -> showAdvancedMenu(device));
+    }
+
+    private void showServerCmd(GameInputDevice device, ArrayList<String> serverCmds) {
         List<MenuOption> options = new ArrayList<>();
 
         AtomicInteger index = new AtomicInteger(0);
@@ -1818,7 +3195,8 @@ public class GameMenu implements Game.GameMenuCallbacks {
         }
 
         options.add(new MenuOption(MENU_CANCEL, getString(R.string.game_menu_cancel), null));
-        showMenuDialog(getString(R.string.game_menu_server_cmd), options.toArray(new MenuOption[0]));
+        showMenuDialog(getString(R.string.game_menu_server_cmd),
+                options.toArray(new MenuOption[0]), () -> showMenu(device));
     }
 
     private List<MenuOption> createDefaultQuickMenuOptions(GameInputDevice device) {
@@ -1839,7 +3217,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
                         .show();
             } else {
                 hideMenu();
-                showServerCmd(serverCmds);
+                showServerCmd(device, serverCmds);
             }
         }));
         options.add(new MenuOption(MENU_TOGGLE_KEYBOARD, getString(R.string.game_menu_toggle_keyboard), true,
@@ -1994,6 +3372,14 @@ public class GameMenu implements Game.GameMenuCallbacks {
             }
         }
 
+        if (!quickMenuEditMode) {
+            showQuickMenuCards(device, visibleOptions, hiddenIds);
+            return;
+        }
+        showEditableQuickMenuCards(device, allOptions, visibleOptions, hiddenIds);
+        return;
+
+        /*
         LinearLayout layout = new LinearLayout(getThemedContext());
         layout.setOrientation(LinearLayout.VERTICAL);
         layout.addView(createHeader(getString(R.string.quick_menu_title), quickMenuEditMode,
@@ -2076,27 +3462,26 @@ public class GameMenu implements Game.GameMenuCallbacks {
             return true;
         });
 
-        layout.addView(listView);
+        layout.addView(listView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
-        if (currentDialog != null) {
-            currentDialog.dismiss();
-        }
-        currentDialog = new AlertDialog.Builder(getThemedContext()).setView(layout).create();
-        currentDialog.setOnDismissListener(dialog -> {
+        LinearLayout editShell = createFullscreenMenuShell(
+                getString(R.string.game_menu_edit_quick_menu), layout, view -> {
+                    saveQuickMenuState(visibleOptions, hiddenIds);
+                    quickMenuEditMode = false;
+                    showMenu(device);
+                });
+        showFullscreenDialog(editShell, () -> {
             if (quickMenuEditMode) {
                 saveQuickMenuState(visibleOptions, hiddenIds);
             }
         });
-        currentDialog.show();
-
-        Window window = currentDialog.getWindow();
-        if (window != null) {
-            window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        }
+        */
     }
 
     @Override
     public void hideMenu() {
+        setControllerSliderCaptured(null, false);
         if (currentDialog != null && currentDialog.isShowing()) {
             currentDialog.dismiss();
         }

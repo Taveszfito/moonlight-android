@@ -3983,7 +3983,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                     return;
                 }
                 controllerKbmMapper.pollContinuousInput(GenericControllerContext.this);
-                mainThreadHandler.postDelayed(this, 16);
+                mainThreadHandler.postDelayed(this,
+                        ControllerKbmMapper.CONTINUOUS_INPUT_POLL_INTERVAL_MS);
             }
         };
 

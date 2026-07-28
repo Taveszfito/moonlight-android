@@ -100,6 +100,8 @@ public final class ControllerKbmMapper {
     public static final boolean DEFAULT_GYRO_SMOOTHING = true;
     public static final boolean DEFAULT_GYRO_STATUS_OVERLAY = true;
     public static final int DEFAULT_TRIGGER_REPEAT_RATE = 8;
+    public static final int CONTINUOUS_INPUT_POLL_INTERVAL_MS = 8;
+    private static final float LEGACY_CONTINUOUS_INPUT_POLL_INTERVAL_MS = 16.0f;
 
     private static final List<String> STANDARD_SOURCES = Arrays.asList(
             SOURCE_A, SOURCE_B, SOURCE_X, SOURCE_Y,
@@ -574,10 +576,12 @@ public final class ControllerKbmMapper {
 
     public void pollContinuousInput(ControllerHandler.GenericControllerContext context) {
         if (isContinuousStickMouseEnabled()) {
+            float intervalScale = CONTINUOUS_INPUT_POLL_INTERVAL_MS /
+                    LEGACY_CONTINUOUS_INPUT_POLL_INTERVAL_MS;
             sendStickOutput(SOURCE_LEFT_STICK,
-                    context.kbmLeftStickX, context.kbmLeftStickY, context);
+                    context.kbmLeftStickX, context.kbmLeftStickY, context, intervalScale);
             sendStickOutput(SOURCE_RIGHT_STICK,
-                    context.kbmRightStickX, context.kbmRightStickY, context);
+                    context.kbmRightStickX, context.kbmRightStickY, context, intervalScale);
         }
         pollTriggerRepeat(context, SOURCE_LT, context.kbmRepeatLeftTrigger);
         pollTriggerRepeat(context, SOURCE_RT, context.kbmRepeatRightTrigger);
@@ -585,12 +589,19 @@ public final class ControllerKbmMapper {
 
     private void sendStickOutput(String source, float x, float y,
                                  ControllerHandler.GenericControllerContext context) {
+        sendStickOutput(source, x, y, context, 1.0f);
+    }
+
+    private void sendStickOutput(String source, float x, float y,
+                                 ControllerHandler.GenericControllerContext context,
+                                 float intervalScale) {
         String action = getAction(source);
         float speed = preferences.getInt(PREF_STICK_SPEED, DEFAULT_STICK_SPEED) / 100.0f;
         // Quadratic response gives small deflections fine control while preserving fast
-        // movement near the edge. Values are pixels per 60 Hz poll, not per Android event.
-        float curvedX = Math.copySign(x * x, x) * speed * 18.0f;
-        float curvedY = Math.copySign(y * y, y) * speed * 18.0f;
+        // movement near the edge. Scale by the polling interval so increasing the report
+        // rate improves smoothness without changing cursor speed.
+        float curvedX = Math.copySign(x * x, x) * speed * 18.0f * intervalScale;
+        float curvedY = Math.copySign(y * y, y) * speed * 18.0f * intervalScale;
 
         if (ACTION_MOUSE_MOVE.equals(action)) {
             context.kbmMouseRemainderX += curvedX;

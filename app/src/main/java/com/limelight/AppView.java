@@ -546,11 +546,11 @@ public class AppView extends AppCompatActivity implements AdapterFragmentCallbac
                     UiHelper.displayVdisplayConfirmationDialog(
                             AppView.this,
                             computer,
-                            () -> ServerHelper.doStart(AppView.this, app.app, computer, managerBinder, true, isResume),
+                            () -> ServerHelper.doStart(AppView.this, app.app, computer, managerBinder, true, false),
                             null
                     );
                 } else {
-                    ServerHelper.doStart(AppView.this, app.app, computer, managerBinder, withVDiaplay, isResume);
+                    ServerHelper.doStart(AppView.this, app.app, computer, managerBinder, withVDiaplay, false);
                 }
                 return true;
             }
@@ -756,7 +756,7 @@ public class AppView extends AppCompatActivity implements AdapterFragmentCallbac
                 // Only open the context menu if something is running, otherwise start it
                 if (lastRunningAppId != 0) {
                     if (prefConfig.resumeWithoutConfirm && lastRunningAppId == app.app.getAppId()) {
-                        ServerHelper.doStart(AppView.this, app.app, computer, managerBinder, prefConfig.useVirtualDisplay, true);
+                        ServerHelper.doStart(AppView.this, app.app, computer, managerBinder, prefConfig.useVirtualDisplay, false);
                     } else {
                         openContextMenu(arg1);
                     }

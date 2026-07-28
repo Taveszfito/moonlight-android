@@ -9,6 +9,7 @@
 
     <string name="menu_button">Menu</string>
     <string name="quick_menu_title">Quick Menu</string>
+    <string name="game_menu_controller_navigation_hint">Press L3 for controller navigation</string>
     <string name="configuration_mode_move_buttons">Move buttons mode</string>
     <string name="configuration_mode_resize_buttons">Resize buttons mode</string>
     <string name="configuration_mode_disable_enable_buttons">Enable/Disable buttons mode</string>
@@ -447,6 +448,7 @@
     <string name="game_menu_controller_kbm_unassigned">Unassigned</string>
     <string name="game_menu_controller_kbm_keyboard_key">Keyboard key…</string>
     <string name="game_menu_controller_kbm_press_keyboard_key">Press the keyboard key to send to the host.</string>
+    <string name="game_menu_controller_kbm_keyboard_picker_instructions">Type a character with the Android or physical keyboard, or select any supported PC key from the virtual keyboard. Controller buttons only navigate this screen.</string>
     <string name="game_menu_controller_kbm_key_shift">Shift</string>
     <string name="game_menu_controller_kbm_key_ctrl">Ctrl</string>
     <string name="game_menu_controller_kbm_key_alt">Alt</string>
@@ -829,6 +831,18 @@
     <string name="title_low_latency_frame_balance">LFR (Experimental)</string>
     <string name="summary_low_latency_frame_balance">Minimizes delay by dropping queued frames.</string>
     <string name="category_perf_monitor_settings">Performance Monitor</string>
+    <string name="category_perf_charts">Performance charts</string>
+    <string name="desc_chart_latency">Network latency chart</string>
+    <string name="desc_chart_decode">Frame decoding time chart</string>
+    <string name="desc_chart_fps">FPS chart</string>
+    <string name="title_enable_perf_charts">Enable performance charts</string>
+    <string name="summary_enable_perf_charts">Show performance charts in the game dashboard</string>
+    <string name="title_perf_chart_latency">Chart: Network latency</string>
+    <string name="summary_perf_chart_latency">Chart the average network latency (ms)</string>
+    <string name="title_perf_chart_decode">Chart: Decoding time</string>
+    <string name="summary_perf_chart_decode">Chart the frame decoding time (ms)</string>
+    <string name="title_perf_chart_fps">Chart: FPS</string>
+    <string name="summary_perf_chart_fps">Chart incoming and rendered frames per second</string>
 
     <string name="controller_kbm_presets_title">Controller KBM Presets</string>
     <string name="controller_kbm_presets_button">KBM presets</string>

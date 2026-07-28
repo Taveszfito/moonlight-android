@@ -2337,15 +2337,27 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         new AlertDialog.Builder(this)
                 .setTitle(R.string.game_menu_volume_button_mode_title)
                 .setSingleChoiceItems(labels, checkedItem, (dialog, which) -> {
-                    PreferenceManager.getDefaultSharedPreferences(this).edit()
-                            .putString(PreferenceConfiguration.VOLUME_BUTTON_MODE_PREF_STRING, values[which])
-                            .apply();
-                    prefConfig.volumeButtonMode = values[which];
-                    stopVolumeButtonRepeat();
+                    setVolumeButtonMode(values[which]);
                     dialog.dismiss();
                     showGameMenu(null);
                 })
                 .show();
+    }
+
+    public String getVolumeButtonMode() {
+        return prefConfig.volumeButtonMode;
+    }
+
+    public void setVolumeButtonMode(String mode) {
+        if (!PreferenceConfiguration.VOLUME_BUTTON_MODE_ANDROID.equals(mode) &&
+                !PreferenceConfiguration.VOLUME_BUTTON_MODE_WINDOWS.equals(mode)) {
+            return;
+        }
+        PreferenceManager.getDefaultSharedPreferences(this).edit()
+                .putString(PreferenceConfiguration.VOLUME_BUTTON_MODE_PREF_STRING, mode)
+                .apply();
+        prefConfig.volumeButtonMode = mode;
+        stopVolumeButtonRepeat();
     }
 
     public boolean isGyroAimQuickSettingsEnabled() {
@@ -4254,6 +4266,24 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
      * @param context The context to use to decide where to show the dialog.
      */
     public void selectMouseMode(Context context){
+        List<MouseModeOption> options = getAvailableMouseModeOptions();
+        String[] labels = new String[options.size()];
+        for (int i = 0; i < options.size(); i++) {
+            labels[i] = options.get(i).label;
+        }
+        final MouseModeOption[] optionArray = options.toArray(new MouseModeOption[0]);
+
+        new AlertDialog.Builder(context)
+                .setTitle(getString(R.string.game_menu_select_mouse_mode))
+                .setItems(labels, (dialog, which) -> {
+                    dialog.dismiss();
+                    selectMouseModeOption(optionArray[which].index);
+                })
+                .create()
+                .show();
+    }
+
+    public List<MouseModeOption> getAvailableMouseModeOptions() {
         String[] allModes = getResources().getStringArray(R.array.mouse_mode_names);
 
         Set<String> allowedLabels = new HashSet<>(Arrays.asList(
@@ -4273,32 +4303,22 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         }
 
         options.add(new MouseModeOption(-1, getString(R.string.toggle_local_mouse_cursor)));
+        return options;
+    }
 
-        String[] labels = new String[options.size()];
-        for (int i = 0; i < options.size(); i++) {
-            labels[i] = options.get(i).label;
+    public void selectMouseModeOption(int index) {
+        if (index == -1) {
+            toggleMouseLocalCursor();
+            return;
         }
-        final MouseModeOption[] optionArray = options.toArray(new MouseModeOption[0]);
 
-        new AlertDialog.Builder(context)
-                .setTitle(getString(R.string.game_menu_select_mouse_mode))
-                .setItems(labels, (dialog, which) -> {
-                    dialog.dismiss();
-                    MouseModeOption selected = optionArray[which];
-                    if (selected.index == -1) {
-                        toggleMouseLocalCursor();
-                    } else {
-                        applyMouseMode(selected.index);
-                        if (prefConfig.rememberMouseMode) {
-                            ProfilesManager.getInstance().getOverlayingSharedPreferences(this)
-                                    .edit()
-                                    .putString("mouse_mode_list", String.valueOf(selected.index))
-                                    .apply();
-                        }
-                    }
-                })
-                .create()
-                .show();
+        applyMouseMode(index);
+        if (prefConfig.rememberMouseMode) {
+            ProfilesManager.getInstance().getOverlayingSharedPreferences(this)
+                    .edit()
+                    .putString("mouse_mode_list", String.valueOf(index))
+                    .apply();
+        }
     }
 
     //本地鼠标光标切换
