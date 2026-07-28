@@ -4,7 +4,11 @@ This fork is based on [Artemis Android](https://github.com/ClassicOldSong/moonli
 
 ## Extra features
 
-- **Editable quick menu** - reorder entries, hide unused options, and restore them later.
+- **Modern, fully controller-supported quick menu**
+  - Use a fullscreen, card-based interface across the quick menu and its submenus.
+  - Navigate menu cards, dialogs, presets, switches, and settings with a controller.
+  - Grab and adjust sliders using controller buttons, the D-pad, or an analog stick.
+  - Reorder entries, hide unused options, browse editable submenus, and restore removed entries later.
 - **Settings search** - quickly find settings without browsing every category.
 - **Android or Windows volume controls** - choose whether the device volume buttons control Android volume or send Windows volume keys. Windows volume control requires a matching [PowerToys Keyboard Manager](https://learn.microsoft.com/windows/powertoys/keyboard-manager) key remap on the host.
 - **Controller gyro aim for every game**
@@ -22,7 +26,9 @@ This fork is based on [Artemis Android](https://github.com/ClassicOldSong/moonli
   - Convert controller input directly into keyboard and mouse events.
   - Map buttons, sticks, triggers, paddles, touchpad clicks, and custom controller buttons.
   - Assign keyboard keys, mouse buttons, wheel actions, mouse movement, WASD, or arrow-key movement.
-  - Use continuous proportional stick-to-mouse movement with adjustable speed.
+  - Use a modern card-based mapping editor and action picker.
+  - Select custom mappings from a controller-navigable virtual PC keyboard containing letters, modifiers, function keys, navigation keys, arrows, and numpad keys.
+  - Use continuous proportional stick-to-mouse movement with adjustable speed and high-frequency input updates.
   - Configure trigger threshold and Hold, Single press, or Repeat click behavior.
   - Use direct gyro-to-mouse aiming with adjustable sensitivity.
   - Independently invert the X, Y, and Z gyro axes.
