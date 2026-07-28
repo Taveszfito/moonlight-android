@@ -449,6 +449,15 @@
     <string name="game_menu_controller_kbm_keyboard_key">Keyboard key…</string>
     <string name="game_menu_controller_kbm_press_keyboard_key">Press the keyboard key to send to the host.</string>
     <string name="game_menu_controller_kbm_keyboard_picker_instructions">Type a character with the Android or physical keyboard, or select any supported PC key from the virtual keyboard. Controller buttons only navigate this screen.</string>
+    <string name="game_menu_controller_kbm_directed_flick">Directed flick</string>
+    <string name="game_menu_controller_kbm_flick_direction">Flick direction</string>
+    <string name="game_menu_controller_kbm_flick_distance">Flick distance</string>
+    <string name="game_menu_controller_kbm_flick_left">Left</string>
+    <string name="game_menu_controller_kbm_flick_right">Right</string>
+    <string name="game_menu_controller_kbm_flick_up">Up</string>
+    <string name="game_menu_controller_kbm_flick_down">Down</string>
+    <string name="game_menu_controller_kbm_save_flick">Save flick</string>
+    <string name="game_menu_controller_kbm_switch_icon_layout">Switch between Xbox and PlayStation button icons</string>
     <string name="game_menu_controller_kbm_key_shift">Shift</string>
     <string name="game_menu_controller_kbm_key_ctrl">Ctrl</string>
     <string name="game_menu_controller_kbm_key_alt">Alt</string>

@@ -2,6 +2,8 @@ package com.limelight.binding.input;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.KeyEvent;
 
 import androidx.preference.PreferenceManager;
@@ -64,6 +66,14 @@ public final class ControllerKbmMapper {
     public static final String ACTION_SCROLL = "scroll";
     public static final String ACTION_BASIC_WASD = "basic_wasd";
     public static final String ACTION_BASIC_ARROWS = "basic_arrows";
+    public static final String ACTION_DIRECTED_FLICK_PREFIX = "directed_flick:";
+    public static final String FLICK_LEFT = "left";
+    public static final String FLICK_RIGHT = "right";
+    public static final String FLICK_UP = "up";
+    public static final String FLICK_DOWN = "down";
+    public static final int DEFAULT_FLICK_DISTANCE = 900;
+    public static final int MIN_FLICK_DISTANCE = 50;
+    public static final int MAX_FLICK_DISTANCE = 4000;
 
     public static final String PREF_STICK_SPEED = "controller_kbm_stick_speed";
     public static final String PREF_TRIGGER_THRESHOLD = "controller_kbm_trigger_threshold";
@@ -115,6 +125,7 @@ public final class ControllerKbmMapper {
     private final NvConnection connection;
     private final SharedPreferences preferences;
     private final KeyboardTranslator keyboardTranslator;
+    private final Handler flickHandler = new Handler(Looper.getMainLooper());
     private byte modifierMask;
 
     public static final class Preset {
@@ -462,6 +473,13 @@ public final class ControllerKbmMapper {
             return true;
         }
 
+        if (action.startsWith(ACTION_DIRECTED_FLICK_PREFIX)) {
+            if (pressed) {
+                sendDirectedFlick(action);
+            }
+            return true;
+        }
+
         if (action.startsWith(ACTION_KEY_PREFIX)) {
             int androidKeyCode;
             try {
@@ -506,6 +524,74 @@ public final class ControllerKbmMapper {
             connection.sendMouseScroll((byte) -1);
         }
         return true;
+    }
+
+    public static String createDirectedFlickAction(String direction, int distance) {
+        return ACTION_DIRECTED_FLICK_PREFIX + normalizeFlickDirection(direction) + ":" +
+                Math.max(MIN_FLICK_DISTANCE, Math.min(MAX_FLICK_DISTANCE, distance));
+    }
+
+    public static String getDirectedFlickDirection(String action) {
+        if (action != null && action.startsWith(ACTION_DIRECTED_FLICK_PREFIX)) {
+            String[] parts = action.substring(ACTION_DIRECTED_FLICK_PREFIX.length())
+                    .split(":", 2);
+            if (parts.length > 0) {
+                return normalizeFlickDirection(parts[0]);
+            }
+        }
+        return FLICK_RIGHT;
+    }
+
+    public static int getDirectedFlickDistance(String action) {
+        if (action != null && action.startsWith(ACTION_DIRECTED_FLICK_PREFIX)) {
+            String[] parts = action.substring(ACTION_DIRECTED_FLICK_PREFIX.length())
+                    .split(":", 2);
+            if (parts.length == 2) {
+                try {
+                    return Math.max(MIN_FLICK_DISTANCE, Math.min(
+                            MAX_FLICK_DISTANCE, Integer.parseInt(parts[1])));
+                }
+                catch (NumberFormatException ignored) {}
+            }
+        }
+        return DEFAULT_FLICK_DISTANCE;
+    }
+
+    private static String normalizeFlickDirection(String direction) {
+        if (FLICK_LEFT.equals(direction) || FLICK_UP.equals(direction) ||
+                FLICK_DOWN.equals(direction)) {
+            return direction;
+        }
+        return FLICK_RIGHT;
+    }
+
+    private void sendDirectedFlick(String action) {
+        String direction = getDirectedFlickDirection(action);
+        int distance = getDirectedFlickDistance(action);
+        final int packetCount = 4;
+        for (int i = 0; i < packetCount; i++) {
+            final int packetIndex = i;
+            flickHandler.postDelayed(() -> {
+                int start = (distance * packetIndex) / packetCount;
+                int end = (distance * (packetIndex + 1)) / packetCount;
+                short delta = (short) (end - start);
+                short x = 0;
+                short y = 0;
+                if (FLICK_LEFT.equals(direction)) {
+                    x = (short) -delta;
+                }
+                else if (FLICK_RIGHT.equals(direction)) {
+                    x = delta;
+                }
+                else if (FLICK_UP.equals(direction)) {
+                    y = (short) -delta;
+                }
+                else {
+                    y = delta;
+                }
+                connection.sendMouseMove(x, y);
+            }, i * 6L);
+        }
     }
 
     public void releaseAll(ControllerHandler.GenericControllerContext context) {

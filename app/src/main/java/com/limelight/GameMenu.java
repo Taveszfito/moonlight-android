@@ -7,6 +7,10 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.RectF;
+import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
@@ -111,6 +115,11 @@ public class GameMenu implements Game.GameMenuCallbacks {
     private static final String ADV_SEND_KEYS = "advanced_send_keys";
     private static final String ADV_TOUCH_SENSITIVITY = "advanced_touch_sensitivity";
     private static final String CONTROLLER_KBM_PICK_FUNCTION_KEY = "pick_function_key";
+    private static final String CONTROLLER_KBM_CONFIGURE_FLICK = "configure_directed_flick";
+    private static final String CONTROLLER_KBM_ICON_LAYOUT_PREF =
+            "controller_kbm_icon_layout";
+    private static final String CONTROLLER_KBM_ICON_LAYOUT_XBOX = "xbox";
+    private static final String CONTROLLER_KBM_ICON_LAYOUT_PLAYSTATION = "playstation";
 
     private static final List<String> DEFAULT_QUICK_MENU_ORDER = Arrays.asList(
             MENU_DISCONNECT,
@@ -492,7 +501,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
         }
         if (id != null && id.startsWith("kbm_action_")) {
             if (id.contains("mouse") || id.contains("wheel") ||
-                    id.contains("scroll")) {
+                    id.contains("scroll") || id.contains("flick")) {
                 return R.drawable.ic_qm_mouse;
             }
             return R.drawable.ic_qm_keyboard;
@@ -535,10 +544,18 @@ public class GameMenu implements Game.GameMenuCallbacks {
             card.setForeground(getThemedContext().getDrawable(ripple.resourceId));
         }
 
-        ImageView icon = new ImageView(getThemedContext());
-        icon.setImageResource(getQuickMenuIcon(option.id));
-        icon.setColorFilter(destructive ? 0xFFFF8A80 : 0xFFF7B52C);
-        card.addView(icon, new LinearLayout.LayoutParams(dp(34), dp(34)));
+        View icon;
+        if (option.id != null && option.id.startsWith("kbm_source_")) {
+            icon = new ControllerButtonIconView(
+                    option.id.substring("kbm_source_".length()));
+        }
+        else {
+            ImageView image = new ImageView(getThemedContext());
+            image.setImageResource(getQuickMenuIcon(option.id));
+            image.setColorFilter(destructive ? 0xFFFF8A80 : 0xFFF7B52C);
+            icon = image;
+        }
+        card.addView(icon, new LinearLayout.LayoutParams(dp(38), dp(38)));
 
         TextView label = new TextView(getThemedContext());
         SpannableStringBuilder cardLabel = new SpannableStringBuilder(option.label);
@@ -748,6 +765,51 @@ public class GameMenu implements Game.GameMenuCallbacks {
             this.label = label;
             this.keyCode = keyCode;
             this.width = width;
+        }
+    }
+
+    private final class ControllerButtonIconView extends View {
+        private final String source;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        ControllerButtonIconView(String source) {
+            super(getThemedContext());
+            this.source = source;
+            setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float width = getWidth();
+            float height = getHeight();
+            float centerX = width / 2f;
+            float centerY = height / 2f;
+            boolean playStation = isPlayStationKbmIconLayout();
+            String label = getControllerButtonIconLabel(source, playStation);
+            int color = getControllerButtonIconColor(source, playStation);
+
+            paint.setColor(color);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(2));
+            if (isFaceButtonSource(source)) {
+                canvas.drawCircle(centerX, centerY,
+                        Math.min(width, height) * 0.42f, paint);
+            }
+            else {
+                RectF bounds = new RectF(dp(2), dp(7),
+                        width - dp(2), height - dp(7));
+                canvas.drawRoundRect(bounds, dp(7), dp(7), paint);
+            }
+
+            paint.setStyle(Paint.Style.FILL);
+            paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+            paint.setTextAlign(Paint.Align.CENTER);
+            paint.setTextSize(label.length() > 4 ? dp(9) :
+                    label.length() > 2 ? dp(11) : dp(15));
+            Paint.FontMetrics metrics = paint.getFontMetrics();
+            float baseline = centerY - (metrics.ascent + metrics.descent) / 2f;
+            canvas.drawText(label, centerX, baseline, paint);
         }
     }
 
@@ -1725,31 +1787,93 @@ public class GameMenu implements Game.GameMenuCallbacks {
                 () -> showAdvancedMenu(device));
     }
 
+    private boolean isPlayStationKbmIconLayout() {
+        return CONTROLLER_KBM_ICON_LAYOUT_PLAYSTATION.equals(
+                PreferenceManager.getDefaultSharedPreferences(game).getString(
+                        CONTROLLER_KBM_ICON_LAYOUT_PREF,
+                        CONTROLLER_KBM_ICON_LAYOUT_XBOX));
+    }
+
+    private boolean isFaceButtonSource(String source) {
+        return ControllerKbmMapper.SOURCE_A.equals(source) ||
+                ControllerKbmMapper.SOURCE_B.equals(source) ||
+                ControllerKbmMapper.SOURCE_X.equals(source) ||
+                ControllerKbmMapper.SOURCE_Y.equals(source);
+    }
+
+    private int getControllerButtonIconColor(String source, boolean playStation) {
+        if (ControllerKbmMapper.SOURCE_A.equals(source)) {
+            return playStation ? 0xFF5CA8E6 : 0xFF6CC24A;
+        }
+        if (ControllerKbmMapper.SOURCE_B.equals(source)) {
+            return 0xFFE35D6A;
+        }
+        if (ControllerKbmMapper.SOURCE_X.equals(source)) {
+            return playStation ? 0xFFE985C5 : 0xFF4EA5D9;
+        }
+        if (ControllerKbmMapper.SOURCE_Y.equals(source)) {
+            return playStation ? 0xFF65C18C : 0xFFF2C94C;
+        }
+        return 0xFFF7B52C;
+    }
+
+    private String getControllerButtonIconLabel(String source, boolean playStation) {
+        if (ControllerKbmMapper.SOURCE_A.equals(source)) return playStation ? "×" : "A";
+        if (ControllerKbmMapper.SOURCE_B.equals(source)) return playStation ? "○" : "B";
+        if (ControllerKbmMapper.SOURCE_X.equals(source)) return playStation ? "□" : "X";
+        if (ControllerKbmMapper.SOURCE_Y.equals(source)) return playStation ? "△" : "Y";
+        if (ControllerKbmMapper.SOURCE_DPAD_UP.equals(source)) return "↑";
+        if (ControllerKbmMapper.SOURCE_DPAD_DOWN.equals(source)) return "↓";
+        if (ControllerKbmMapper.SOURCE_DPAD_LEFT.equals(source)) return "←";
+        if (ControllerKbmMapper.SOURCE_DPAD_RIGHT.equals(source)) return "→";
+        if (ControllerKbmMapper.SOURCE_LB.equals(source)) return playStation ? "L1" : "LB";
+        if (ControllerKbmMapper.SOURCE_RB.equals(source)) return playStation ? "R1" : "RB";
+        if (ControllerKbmMapper.SOURCE_LT.equals(source)) return playStation ? "L2" : "LT";
+        if (ControllerKbmMapper.SOURCE_RT.equals(source)) return playStation ? "R2" : "RT";
+        if (ControllerKbmMapper.SOURCE_L3.equals(source)) return "L3";
+        if (ControllerKbmMapper.SOURCE_R3.equals(source)) return "R3";
+        if (ControllerKbmMapper.SOURCE_LEFT_STICK.equals(source)) return "LS";
+        if (ControllerKbmMapper.SOURCE_RIGHT_STICK.equals(source)) return "RS";
+        if (ControllerKbmMapper.SOURCE_START.equals(source)) return playStation ? "OPT" : "MENU";
+        if (ControllerKbmMapper.SOURCE_SELECT.equals(source)) return playStation ? "CREATE" : "VIEW";
+        if (ControllerKbmMapper.SOURCE_GUIDE.equals(source)) return playStation ? "PS" : "XBOX";
+        if (ControllerKbmMapper.SOURCE_SHARE.equals(source)) return playStation ? "SHARE" : "CAP";
+        if (ControllerKbmMapper.SOURCE_TOUCHPAD.equals(source)) return "PAD";
+        if (ControllerKbmMapper.SOURCE_PADDLE_1.equals(source)) return "P1";
+        if (ControllerKbmMapper.SOURCE_PADDLE_2.equals(source)) return "P2";
+        if (ControllerKbmMapper.SOURCE_PADDLE_3.equals(source)) return "P3";
+        if (ControllerKbmMapper.SOURCE_PADDLE_4.equals(source)) return "P4";
+        if (source.startsWith("keycode_")) return "K" + source.substring("keycode_".length());
+        if (source.startsWith("scancode_")) return "S" + source.substring("scancode_".length());
+        return "?";
+    }
+
     private String getControllerKbmSourceLabel(String source) {
+        boolean playStation = isPlayStationKbmIconLayout();
         switch (source) {
-            case ControllerKbmMapper.SOURCE_A: return "A / Cross";
-            case ControllerKbmMapper.SOURCE_B: return "B / Circle";
-            case ControllerKbmMapper.SOURCE_X: return "X / Square";
-            case ControllerKbmMapper.SOURCE_Y: return "Y / Triangle";
+            case ControllerKbmMapper.SOURCE_A: return playStation ? "Cross" : "A";
+            case ControllerKbmMapper.SOURCE_B: return playStation ? "Circle" : "B";
+            case ControllerKbmMapper.SOURCE_X: return playStation ? "Square" : "X";
+            case ControllerKbmMapper.SOURCE_Y: return playStation ? "Triangle" : "Y";
             case ControllerKbmMapper.SOURCE_DPAD_UP: return "D-pad Up";
             case ControllerKbmMapper.SOURCE_DPAD_DOWN: return "D-pad Down";
             case ControllerKbmMapper.SOURCE_DPAD_LEFT: return "D-pad Left";
             case ControllerKbmMapper.SOURCE_DPAD_RIGHT: return "D-pad Right";
-            case ControllerKbmMapper.SOURCE_LB: return "LB / L1";
-            case ControllerKbmMapper.SOURCE_RB: return "RB / R1";
+            case ControllerKbmMapper.SOURCE_LB: return playStation ? "L1" : "LB";
+            case ControllerKbmMapper.SOURCE_RB: return playStation ? "R1" : "RB";
             case ControllerKbmMapper.SOURCE_L3: return "Left Stick Click";
             case ControllerKbmMapper.SOURCE_R3: return "Right Stick Click";
-            case ControllerKbmMapper.SOURCE_START: return "Start / Options";
-            case ControllerKbmMapper.SOURCE_SELECT: return "Select / Create";
-            case ControllerKbmMapper.SOURCE_GUIDE: return "Guide / PS";
-            case ControllerKbmMapper.SOURCE_SHARE: return "Share / Capture";
+            case ControllerKbmMapper.SOURCE_START: return playStation ? "Options" : "Menu";
+            case ControllerKbmMapper.SOURCE_SELECT: return playStation ? "Create" : "View";
+            case ControllerKbmMapper.SOURCE_GUIDE: return playStation ? "PS" : "Xbox";
+            case ControllerKbmMapper.SOURCE_SHARE: return playStation ? "Share" : "Capture";
             case ControllerKbmMapper.SOURCE_TOUCHPAD: return "Touchpad Click";
             case ControllerKbmMapper.SOURCE_PADDLE_1: return "Rear Paddle 1";
             case ControllerKbmMapper.SOURCE_PADDLE_2: return "Rear Paddle 2";
             case ControllerKbmMapper.SOURCE_PADDLE_3: return "Rear Paddle 3";
             case ControllerKbmMapper.SOURCE_PADDLE_4: return "Rear Paddle 4";
-            case ControllerKbmMapper.SOURCE_LT: return "LT / L2";
-            case ControllerKbmMapper.SOURCE_RT: return "RT / R2";
+            case ControllerKbmMapper.SOURCE_LT: return playStation ? "L2" : "LT";
+            case ControllerKbmMapper.SOURCE_RT: return playStation ? "R2" : "RT";
             case ControllerKbmMapper.SOURCE_LEFT_STICK: return "Left Stick";
             case ControllerKbmMapper.SOURCE_RIGHT_STICK: return "Right Stick";
             default:
@@ -1955,6 +2079,13 @@ public class GameMenu implements Game.GameMenuCallbacks {
     private String getControllerKbmActionLabel(String action) {
         if (action == null || action.isEmpty()) {
             return getString(R.string.game_menu_controller_kbm_unassigned);
+        }
+        if (action.startsWith(ControllerKbmMapper.ACTION_DIRECTED_FLICK_PREFIX)) {
+            String direction = ControllerKbmMapper.getDirectedFlickDirection(action);
+            int distance = ControllerKbmMapper.getDirectedFlickDistance(action);
+            return getString(R.string.game_menu_controller_kbm_directed_flick) +
+                    " · " + getDirectedFlickDirectionLabel(direction) +
+                    " · " + distance;
         }
         if (action.startsWith(ControllerKbmMapper.ACTION_KEY_PREFIX)) {
             try {
@@ -2289,6 +2420,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
                     getString(R.string.game_menu_controller_kbm_key_page_up),
                     getString(R.string.game_menu_controller_kbm_key_page_down),
                     getString(R.string.game_menu_controller_kbm_function_keys),
+                    getString(R.string.game_menu_controller_kbm_directed_flick),
                     getString(R.string.game_menu_controller_kbm_mouse_left),
                     getString(R.string.game_menu_controller_kbm_mouse_right),
                     getString(R.string.game_menu_controller_kbm_mouse_middle),
@@ -2317,6 +2449,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
                     ControllerKbmMapper.ACTION_KEY_PREFIX + KeyEvent.KEYCODE_PAGE_UP,
                     ControllerKbmMapper.ACTION_KEY_PREFIX + KeyEvent.KEYCODE_PAGE_DOWN,
                     CONTROLLER_KBM_PICK_FUNCTION_KEY,
+                    CONTROLLER_KBM_CONFIGURE_FLICK,
                     ControllerKbmMapper.ACTION_MOUSE_LEFT,
                     ControllerKbmMapper.ACTION_MOUSE_RIGHT,
                     ControllerKbmMapper.ACTION_MOUSE_MIDDLE,
@@ -2342,6 +2475,9 @@ public class GameMenu implements Game.GameMenuCallbacks {
                 else if (CONTROLLER_KBM_PICK_FUNCTION_KEY.equals(actions[choice])) {
                     showControllerKbmFunctionKeyPicker(device, mapper, source);
                 }
+                else if (CONTROLLER_KBM_CONFIGURE_FLICK.equals(actions[choice])) {
+                    showControllerKbmDirectedFlickEditor(device, mapper, source);
+                }
                 else {
                     mapper.setAction(source, actions[choice]);
                     showControllerKbmMenu(device);
@@ -2353,6 +2489,149 @@ public class GameMenu implements Game.GameMenuCallbacks {
         LinearLayout shell = createFullscreenMenuShell(
                 getControllerKbmSourceLabel(source), scrollView, null,
                 () -> showControllerKbmMenu(device));
+        showFullscreenDialog(shell, null);
+    }
+
+    private String getDirectedFlickDirectionLabel(String direction) {
+        if (ControllerKbmMapper.FLICK_LEFT.equals(direction)) {
+            return getString(R.string.game_menu_controller_kbm_flick_left);
+        }
+        if (ControllerKbmMapper.FLICK_UP.equals(direction)) {
+            return getString(R.string.game_menu_controller_kbm_flick_up);
+        }
+        if (ControllerKbmMapper.FLICK_DOWN.equals(direction)) {
+            return getString(R.string.game_menu_controller_kbm_flick_down);
+        }
+        return getString(R.string.game_menu_controller_kbm_flick_right);
+    }
+
+    private void updateDirectedFlickDirectionButtons(List<Button> buttons,
+                                                     String selectedDirection) {
+        for (Button button : buttons) {
+            boolean selected = selectedDirection.equals(button.getTag());
+            button.setBackground(roundedBackground(
+                    selected ? 0xFFF7A900 : 0xCC2A3440, 13));
+        }
+    }
+
+    private void showControllerKbmDirectedFlickEditor(GameInputDevice device,
+                                                       ControllerKbmMapper mapper,
+                                                       String source) {
+        String currentAction = mapper.getAction(source);
+        final String[] direction = {
+                ControllerKbmMapper.getDirectedFlickDirection(currentAction)
+        };
+        int currentDistance =
+                ControllerKbmMapper.getDirectedFlickDistance(currentAction);
+
+        LinearLayout content = new LinearLayout(getThemedContext());
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(10), dp(6), dp(10), dp(10));
+
+        LinearLayout directionCard = new LinearLayout(getThemedContext());
+        directionCard.setOrientation(LinearLayout.VERTICAL);
+        directionCard.setPadding(dp(16), dp(12), dp(16), dp(12));
+        directionCard.setBackground(roundedBackground(0xCC202630, 16));
+        TextView directionTitle = new TextView(getThemedContext());
+        directionTitle.setText(R.string.game_menu_controller_kbm_flick_direction);
+        directionTitle.setTextColor(Color.WHITE);
+        directionTitle.setTextSize(15);
+        directionCard.addView(directionTitle);
+
+        LinearLayout directionRow = new LinearLayout(getThemedContext());
+        directionRow.setGravity(Gravity.CENTER);
+        List<Button> directionButtons = new ArrayList<>();
+        String[] directions = {
+                ControllerKbmMapper.FLICK_LEFT,
+                ControllerKbmMapper.FLICK_RIGHT,
+                ControllerKbmMapper.FLICK_UP,
+                ControllerKbmMapper.FLICK_DOWN
+        };
+        for (String value : directions) {
+            Button button = new Button(getThemedContext());
+            button.setTag(value);
+            button.setText(getDirectedFlickDirectionLabel(value));
+            button.setTextColor(Color.WHITE);
+            button.setTextSize(14);
+            button.setAllCaps(false);
+            button.setOnClickListener(view -> {
+                direction[0] = (String) view.getTag();
+                updateDirectedFlickDirectionButtons(directionButtons, direction[0]);
+            });
+            button.setOnFocusChangeListener((view, hasFocus) -> {
+                boolean selected = direction[0].equals(view.getTag());
+                view.setBackground(roundedBackground(
+                        hasFocus ? 0xFF435264 :
+                                selected ? 0xFFF7A900 : 0xCC2A3440, 13));
+            });
+            directionButtons.add(button);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    0, dp(48), 1);
+            params.setMargins(dp(4), dp(8), dp(4), 0);
+            directionRow.addView(button, params);
+        }
+        updateDirectedFlickDirectionButtons(directionButtons, direction[0]);
+        directionCard.addView(directionRow);
+        content.addView(directionCard);
+
+        LinearLayout distanceCard = new LinearLayout(getThemedContext());
+        distanceCard.setOrientation(LinearLayout.VERTICAL);
+        distanceCard.setPadding(dp(16), dp(12), dp(16), dp(12));
+        distanceCard.setBackground(roundedBackground(0xCC202630, 16));
+        LinearLayout.LayoutParams distanceCardParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        distanceCardParams.setMargins(0, dp(10), 0, 0);
+
+        TextView distanceLabel = new TextView(getThemedContext());
+        distanceLabel.setTextColor(Color.WHITE);
+        distanceLabel.setTextSize(15);
+        distanceLabel.setText(getString(
+                R.string.game_menu_controller_kbm_flick_distance) +
+                ": " + currentDistance);
+        distanceCard.addView(distanceLabel);
+
+        SeekBar distance = new SeekBar(getThemedContext());
+        distance.setMax(ControllerKbmMapper.MAX_FLICK_DISTANCE -
+                ControllerKbmMapper.MIN_FLICK_DISTANCE);
+        distance.setProgress(currentDistance -
+                ControllerKbmMapper.MIN_FLICK_DISTANCE);
+        distance.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress,
+                                          boolean fromUser) {
+                distanceLabel.setText(getString(
+                        R.string.game_menu_controller_kbm_flick_distance) +
+                        ": " + (progress + ControllerKbmMapper.MIN_FLICK_DISTANCE));
+            }
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+        distanceCard.addView(distance);
+        content.addView(distanceCard, distanceCardParams);
+
+        LinearLayout actions = new LinearLayout(getThemedContext());
+        actions.setGravity(Gravity.END);
+        actions.setPadding(0, dp(12), 0, 0);
+        actions.addView(createModernDialogButton(
+                getString(R.string.game_menu_cancel), false,
+                () -> showControllerKbmActionPicker(device, mapper, source)),
+                modernDialogButtonParams());
+        actions.addView(createModernDialogButton(
+                getString(R.string.game_menu_controller_kbm_save_flick), true, () -> {
+                    mapper.setAction(source,
+                            ControllerKbmMapper.createDirectedFlickAction(
+                                    direction[0],
+                                    distance.getProgress() +
+                                            ControllerKbmMapper.MIN_FLICK_DISTANCE));
+                    hideMenu();
+                    showControllerKbmMenu(device);
+                }), modernDialogButtonParams());
+        content.addView(actions);
+
+        LinearLayout shell = createFullscreenMenuShell(
+                getString(R.string.game_menu_controller_kbm_directed_flick),
+                content, null,
+                () -> showControllerKbmActionPicker(device, mapper, source));
         showFullscreenDialog(shell, null);
     }
 
@@ -3022,6 +3301,24 @@ public class GameMenu implements Game.GameMenuCallbacks {
 
         LinearLayout headerActions = new LinearLayout(getThemedContext());
         headerActions.setGravity(Gravity.CENTER_VERTICAL);
+
+        boolean playStationLayout = isPlayStationKbmIconLayout();
+        Button layoutToggle = createModernDialogButton(
+                playStationLayout ? "PS" : "Xbox", false, () -> {
+                    PreferenceManager.getDefaultSharedPreferences(game).edit()
+                            .putString(CONTROLLER_KBM_ICON_LAYOUT_PREF,
+                                    playStationLayout ?
+                                            CONTROLLER_KBM_ICON_LAYOUT_XBOX :
+                                            CONTROLLER_KBM_ICON_LAYOUT_PLAYSTATION)
+                            .apply();
+                    hideMenu();
+                    showControllerKbmMenu(device);
+                });
+        layoutToggle.setContentDescription(getString(
+                R.string.game_menu_controller_kbm_switch_icon_layout));
+        layoutToggle.setPadding(dp(6), 0, dp(6), 0);
+        headerActions.addView(layoutToggle,
+                new LinearLayout.LayoutParams(dp(58), dp(40)));
 
         ImageButton savePreset = new ImageButton(getThemedContext());
         savePreset.setImageResource(R.drawable.ic_qm_save);
