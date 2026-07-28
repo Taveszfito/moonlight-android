@@ -1899,7 +1899,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     }
 
     private boolean handleGyroAimComboButtonDown(GenericControllerContext context, int keyCode) {
-        if (!prefConfig.gyroToRightStick && !prefConfig.controllerKbmMode) {
+        boolean gyroShortcutEnabled =
+                prefConfig.gyroToRightStick || prefConfig.controllerKbmMode;
+        if (!gyroShortcutEnabled && !prefConfig.shareGuideQuickMenu) {
             return false;
         }
 
@@ -1912,7 +1914,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             return true;
         }
 
-        if (keyCode == KeyEvent.KEYCODE_BUTTON_Y && context.gyroAimShareDown) {
+        if (gyroShortcutEnabled &&
+                keyCode == KeyEvent.KEYCODE_BUTTON_Y && context.gyroAimShareDown) {
             context.gyroAimTriangleDown = true;
             context.gyroAimToggleComboLatched = true;
             context.gyroAimSuppressTriangleUp = true;
@@ -1922,12 +1925,32 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             return true;
         }
 
+        if (prefConfig.shareGuideQuickMenu &&
+                keyCode == KeyEvent.KEYCODE_BUTTON_MODE &&
+                context.gyroAimShareDown) {
+            context.gyroAimShareConsumedByCombo = true;
+            context.shareGuideQuickMenuPending = true;
+            return true;
+        }
+
         return false;
     }
 
     private boolean handleGyroAimComboButtonUp(GenericControllerContext context, int keyCode) {
-        if (!prefConfig.gyroToRightStick && !prefConfig.controllerKbmMode) {
+        boolean gyroShortcutEnabled =
+                prefConfig.gyroToRightStick || prefConfig.controllerKbmMode;
+        if (!gyroShortcutEnabled && !prefConfig.shareGuideQuickMenu) {
             return false;
+        }
+
+        if (keyCode == KeyEvent.KEYCODE_BUTTON_MODE &&
+                context.shareGuideQuickMenuPending) {
+            context.shareGuideQuickMenuPending = false;
+            context.gyroAimShareDown = false;
+            context.gyroAimShareConsumedByCombo = false;
+            context.gyroAimToggleComboLatched = false;
+            gestures.showGameMenu(context);
+            return true;
         }
 
         if (isGyroAimShareKey(keyCode)) {
@@ -1943,7 +1966,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             return true;
         }
 
-        if (keyCode == KeyEvent.KEYCODE_BUTTON_Y &&
+        if (gyroShortcutEnabled && keyCode == KeyEvent.KEYCODE_BUTTON_Y &&
                 (context.gyroAimShareDown || context.gyroAimSuppressTriangleUp)) {
             context.gyroAimTriangleDown = false;
             context.gyroAimSuppressTriangleUp = false;
@@ -3738,6 +3761,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             return;
         }
 
+        buttonFlags = filterUsbShareGuideQuickMenu(context, buttonFlags);
+
         Vector2d leftStickVector = populateCachedVector(leftStickX, leftStickY);
 
         handleDeadZone(leftStickVector, context.leftStickDeadzoneRadius);
@@ -3768,6 +3793,60 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         sendControllerInputPacket(context);
     }
 
+    private int filterUsbShareGuideQuickMenu(GenericControllerContext context,
+                                              int buttonFlags) {
+        if (!prefConfig.shareGuideQuickMenu) {
+            context.usbShortcutLastButtonFlags = buttonFlags;
+            return buttonFlags;
+        }
+
+        int previous = context.usbShortcutLastButtonFlags;
+        int changed = previous ^ buttonFlags;
+        int shareMask = ControllerPacket.MISC_FLAG | ControllerPacket.BACK_FLAG;
+        if ((changed & shareMask) != 0) {
+            boolean shareDown = (buttonFlags & shareMask) != 0;
+            if (shareDown) {
+                context.gyroAimShareDown = true;
+                context.gyroAimShareConsumedByCombo = false;
+                context.kbmGyroShareKeyCode =
+                        (buttonFlags & ControllerPacket.MISC_FLAG) != 0 ?
+                                KeyEvent.KEYCODE_MEDIA_RECORD :
+                                KeyEvent.KEYCODE_BUTTON_SELECT;
+            }
+            else {
+                if (context.gyroAimShareDown &&
+                        !context.gyroAimShareConsumedByCombo) {
+                    sendDeferredGyroAimSharePress(
+                            context, context.kbmGyroShareKeyCode);
+                }
+                context.gyroAimShareDown = false;
+                context.gyroAimShareConsumedByCombo = false;
+            }
+        }
+
+        boolean guideDown =
+                (buttonFlags & ControllerPacket.SPECIAL_BUTTON_FLAG) != 0;
+        if ((changed & ControllerPacket.SPECIAL_BUTTON_FLAG) != 0) {
+            if (guideDown && context.gyroAimShareDown) {
+                context.gyroAimShareConsumedByCombo = true;
+                context.shareGuideQuickMenuPending = true;
+            }
+            else if (!guideDown && context.shareGuideQuickMenuPending) {
+                context.shareGuideQuickMenuPending = false;
+                gestures.showGameMenu(context);
+            }
+        }
+
+        context.usbShortcutLastButtonFlags = buttonFlags;
+        if (context.gyroAimShareDown || context.shareGuideQuickMenuPending) {
+            buttonFlags &= ~shareMask;
+        }
+        if (context.shareGuideQuickMenuPending) {
+            buttonFlags &= ~ControllerPacket.SPECIAL_BUTTON_FLAG;
+        }
+        return buttonFlags;
+    }
+
     private void handleControllerKbmUsbButtons(GenericControllerContext context, int buttonFlags) {
         int changed = context.kbmLastButtonFlags ^ buttonFlags;
         int shareMask = ControllerPacket.MISC_FLAG | ControllerPacket.BACK_FLAG;
@@ -3795,7 +3874,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
         if ((changed & ControllerPacket.Y_FLAG) != 0) {
             boolean triangleDown = (buttonFlags & ControllerPacket.Y_FLAG) != 0;
-            if (triangleDown && context.gyroAimShareDown) {
+            if (triangleDown && context.gyroAimShareDown &&
+                    (prefConfig.gyroToRightStick || prefConfig.controllerKbmMode)) {
                 changed &= ~ControllerPacket.Y_FLAG;
                 context.gyroAimTriangleDown = true;
                 context.gyroAimSuppressTriangleUp = true;
@@ -3807,6 +3887,24 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 changed &= ~ControllerPacket.Y_FLAG;
                 context.gyroAimTriangleDown = false;
                 context.gyroAimSuppressTriangleUp = false;
+            }
+        }
+
+        if (prefConfig.shareGuideQuickMenu &&
+                (changed & ControllerPacket.SPECIAL_BUTTON_FLAG) != 0) {
+            boolean guideDown =
+                    (buttonFlags & ControllerPacket.SPECIAL_BUTTON_FLAG) != 0;
+            if (guideDown && context.gyroAimShareDown) {
+                changed &= ~ControllerPacket.SPECIAL_BUTTON_FLAG;
+                context.gyroAimShareConsumedByCombo = true;
+                context.shareGuideQuickMenuPending = true;
+            }
+            else if (!guideDown && context.shareGuideQuickMenuPending) {
+                changed &= ~ControllerPacket.SPECIAL_BUTTON_FLAG;
+                context.shareGuideQuickMenuPending = false;
+                context.gyroAimShareDown = false;
+                context.gyroAimShareConsumedByCombo = false;
+                gestures.showGameMenu(context);
             }
         }
 
@@ -3946,9 +4044,11 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         public boolean gyroAimToggleComboLatched;
         public boolean gyroAimSuppressTriangleUp;
         public boolean gyroAimShareConsumedByCombo;
+        public boolean shareGuideQuickMenuPending;
         public boolean kbmGyroPaused;
         public int kbmGyroShareKeyCode = KeyEvent.KEYCODE_MEDIA_RECORD;
         public int kbmLastButtonFlags;
+        public int usbShortcutLastButtonFlags;
         public boolean kbmLeftTriggerPressed;
         public boolean kbmRightTriggerPressed;
         public boolean kbmDpadLeft;

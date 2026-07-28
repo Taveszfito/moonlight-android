@@ -96,6 +96,8 @@ public class PreferenceConfiguration {
     private static final String GAMEPAD_MOTION_SENSORS_PREF_STRING = "checkbox_gamepad_motion_sensors";
     private static final String GYRO_TO_RIGHT_STICK_PREF_STRING = "checkbox_gyro_to_right_stick";
     private static final String CONTROLLER_KBM_MODE_PREF_STRING = "checkbox_controller_kbm_mode";
+    private static final String SHARE_GUIDE_QUICK_MENU_PREF_STRING =
+            "checkbox_share_guide_quick_menu";
     public static final String GYRO_AIM_PITCH_SENSITIVITY_PREF_STRING = "gyro_aim_pitch_sensitivity";
     public static final String GYRO_AIM_SIDE_SENSITIVITY_PREF_STRING = "gyro_aim_side_sensitivity";
     public static final String GYRO_AIM_VERTICAL_SENSITIVITY_PREF_STRING = "gyro_aim_vertical_sensitivity";
@@ -399,6 +401,7 @@ public class PreferenceConfiguration {
     public boolean gamepadMotionSensors;
     public boolean gyroToRightStick;
     public boolean controllerKbmMode;
+    public boolean shareGuideQuickMenu;
     public boolean gamepadTouchpadAsMouse;
     public boolean gamepadMotionSensorsFallbackToDevice;
     public boolean forceMotionSensorsFallbackToDevice;
@@ -1048,6 +1051,8 @@ private static int getFramePacingValue(Context context) {
         config.gamepadMotionSensors = prefs.getBoolean(GAMEPAD_MOTION_SENSORS_PREF_STRING, DEFAULT_GAMEPAD_MOTION_SENSORS);
         config.gyroToRightStick = prefs.getBoolean(GYRO_TO_RIGHT_STICK_PREF_STRING, DEFAULT_GYRO_TO_RIGHT_STICK);
         config.controllerKbmMode = prefs.getBoolean(CONTROLLER_KBM_MODE_PREF_STRING, false);
+        config.shareGuideQuickMenu = prefs.getBoolean(
+                SHARE_GUIDE_QUICK_MENU_PREF_STRING, false);
         config.gamepadMotionSensorsFallbackToDevice = prefs.getBoolean(GAMEPAD_MOTION_FALLBACK_PREF_STRING, DEFAULT_GAMEPAD_MOTION_FALLBACK);
         config.forceMotionSensorsFallbackToDevice = prefs.getBoolean(FORCE_MOTION_SENSORS_FALLBACK_PREF_STRING, DEFAULT_FORCE_MOTION_SENSORS_FALLBACK);
         config.enableRumble = prefs.getBoolean(ENABLE_RUMBLE_PREF_STRING, DEFAULT_ENABLE_RUMBLE);
