@@ -14,6 +14,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.os.Handler;
 import android.os.Vibrator;
 
@@ -40,6 +41,7 @@ import android.util.Range;
 import android.view.Display;
 import android.view.DisplayCutout;
 import android.view.LayoutInflater;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
@@ -343,6 +345,140 @@ public class StreamSettings extends AppCompatActivity {
         @Override
         public void onCreatePreferences(Bundle bundle, String s) {
             initializePreferences();
+            configureControllerShortcutPreference(
+                    "gyro_mode_shortcut",
+                    "checkbox_gyro_to_right_stick",
+                    PreferenceConfiguration.GYRO_MODE_SHORTCUT_MODIFIER_PREF_STRING,
+                    PreferenceConfiguration.GYRO_MODE_SHORTCUT_ACTIVATOR_PREF_STRING);
+            configureControllerShortcutPreference(
+                    "quick_menu_shortcut",
+                    "checkbox_share_guide_quick_menu",
+                    PreferenceConfiguration.QUICK_MENU_SHORTCUT_MODIFIER_PREF_STRING,
+                    PreferenceConfiguration.QUICK_MENU_SHORTCUT_ACTIVATOR_PREF_STRING);
+        }
+
+        private void configureControllerShortcutPreference(String preferenceKey,
+                                                           String enabledKey,
+                                                           String modifierKey,
+                                                           String activatorKey) {
+            Preference shortcut = findPreference(preferenceKey);
+            CheckBoxPreference enabled = findPreference(enabledKey);
+            if (shortcut == null || enabled == null) {
+                return;
+            }
+
+            shortcut.setVisible(enabled.isChecked());
+            updateControllerShortcutSummary(shortcut, modifierKey, activatorKey);
+            enabled.setOnPreferenceChangeListener((preference, newValue) -> {
+                shortcut.setVisible((Boolean) newValue);
+                return true;
+            });
+            shortcut.setOnPreferenceClickListener(preference -> {
+                showControllerShortcutCapture(shortcut, modifierKey, activatorKey);
+                return true;
+            });
+        }
+
+        private void updateControllerShortcutSummary(Preference preference,
+                                                     String modifierKey,
+                                                     String activatorKey) {
+            int modifier = getPrefs().getInt(modifierKey, KeyEvent.KEYCODE_BUTTON_SELECT);
+            int activator = getPrefs().getInt(activatorKey,
+                    activatorKey.equals(PreferenceConfiguration.GYRO_MODE_SHORTCUT_ACTIVATOR_PREF_STRING) ?
+                            KeyEvent.KEYCODE_BUTTON_Y : KeyEvent.KEYCODE_BUTTON_MODE);
+            preference.setSummary(getString(R.string.summary_controller_shortcut,
+                    KeyEvent.keyCodeToString(modifier).replace("KEYCODE_", ""),
+                    KeyEvent.keyCodeToString(activator).replace("KEYCODE_", "")));
+        }
+
+        private void showControllerShortcutCapture(Preference preference,
+                                                   String modifierKey,
+                                                   String activatorKey) {
+            ControllerShortcutCaptureDialog dialog =
+                    new ControllerShortcutCaptureDialog(preference, modifierKey, activatorKey);
+            dialog.show();
+        }
+
+        private boolean isControllerShortcutKey(KeyEvent event) {
+            return (event.getSource() & android.view.InputDevice.SOURCE_GAMEPAD) != 0 ||
+                    (event.getSource() & android.view.InputDevice.SOURCE_JOYSTICK) != 0;
+        }
+
+        private final class ControllerShortcutCaptureDialog extends AlertDialog {
+            private final Preference preference;
+            private final String modifierKey;
+            private final String activatorKey;
+            private int firstKey = KeyEvent.KEYCODE_UNKNOWN;
+
+            private ControllerShortcutCaptureDialog(Preference preference,
+                                                    String modifierKey,
+                                                    String activatorKey) {
+                super(requireContext());
+                this.preference = preference;
+                this.modifierKey = modifierKey;
+                this.activatorKey = activatorKey;
+                setTitle(getString(R.string.controller_shortcut_capture_title,
+                        preference.getTitle()));
+                setMessage(getString(R.string.controller_shortcut_capture_first));
+                setButton(BUTTON_NEGATIVE, getString(android.R.string.cancel),
+                        (dialog, which) -> dismiss());
+            }
+
+            @Override
+            public boolean dispatchKeyEvent(KeyEvent event) {
+                if (!isControllerShortcutKey(event)) {
+                    return super.dispatchKeyEvent(event);
+                }
+
+                // Consume both down and up before AlertDialog can use D-pad buttons
+                // for focus navigation. Only the first non-repeated down is captured.
+                if (event.getAction() != KeyEvent.ACTION_DOWN ||
+                        event.getRepeatCount() != 0) {
+                    return true;
+                }
+
+                int keyCode = event.getKeyCode();
+                if (firstKey == KeyEvent.KEYCODE_UNKNOWN) {
+                    firstKey = keyCode;
+                    setMessage(getString(R.string.controller_shortcut_capture_second,
+                            KeyEvent.keyCodeToString(keyCode).replace("KEYCODE_", "")));
+                }
+                else if (firstKey == keyCode) {
+                    Toast.makeText(requireContext(),
+                            R.string.controller_shortcut_same_button, Toast.LENGTH_SHORT).show();
+                }
+                else if (isShortcutAssignedToOtherFunction(firstKey, keyCode)) {
+                    Toast.makeText(requireContext(),
+                            R.string.controller_shortcut_duplicate, Toast.LENGTH_SHORT).show();
+                    firstKey = KeyEvent.KEYCODE_UNKNOWN;
+                    setMessage(getString(R.string.controller_shortcut_capture_first));
+                }
+                else {
+                    getPrefs().edit()
+                            .putInt(modifierKey, firstKey)
+                            .putInt(activatorKey, keyCode)
+                            .apply();
+                    updateControllerShortcutSummary(preference, modifierKey, activatorKey);
+                    dismiss();
+                }
+                return true;
+            }
+
+            private boolean isShortcutAssignedToOtherFunction(int modifier, int activator) {
+                boolean editingGyro = modifierKey.equals(
+                        PreferenceConfiguration.GYRO_MODE_SHORTCUT_MODIFIER_PREF_STRING);
+                String otherModifierKey = editingGyro ?
+                        PreferenceConfiguration.QUICK_MENU_SHORTCUT_MODIFIER_PREF_STRING :
+                        PreferenceConfiguration.GYRO_MODE_SHORTCUT_MODIFIER_PREF_STRING;
+                String otherActivatorKey = editingGyro ?
+                        PreferenceConfiguration.QUICK_MENU_SHORTCUT_ACTIVATOR_PREF_STRING :
+                        PreferenceConfiguration.GYRO_MODE_SHORTCUT_ACTIVATOR_PREF_STRING;
+                int otherDefaultActivator = editingGyro ?
+                        KeyEvent.KEYCODE_BUTTON_MODE : KeyEvent.KEYCODE_BUTTON_Y;
+                return getPrefs().getInt(otherModifierKey, KeyEvent.KEYCODE_BUTTON_SELECT) ==
+                        modifier &&
+                        getPrefs().getInt(otherActivatorKey, otherDefaultActivator) == activator;
+            }
         }
 
         private boolean preferenceMatchesQuery(Preference preference, String query) {

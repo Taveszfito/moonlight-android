@@ -1853,12 +1853,17 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     private void sendDeferredGyroAimSharePress(GenericControllerContext context, int keyCode) {
         if (prefConfig.controllerKbmMode) {
             String source = controllerKbmMapper.sourceForKeyCode(keyCode);
-            controllerKbmMapper.handleButton(context, source, true);
-            controllerKbmMapper.handleButton(context, source, false);
+            if (source != null) {
+                controllerKbmMapper.handleButton(context, source, true);
+                controllerKbmMapper.handleButton(context, source, false);
+            }
             return;
         }
 
-        int shareFlag = getGyroAimShareFlag(keyCode);
+        Integer shareFlag = ANDROID_TO_LI_BUTTON_MAP.get(keyCode);
+        if (shareFlag == null) {
+            return;
+        }
 
         // The original down event was withheld while waiting for Triangle/Y. If the combo
         // never arrived, reproduce a complete Share button press when Share is released.
@@ -1905,31 +1910,38 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             return false;
         }
 
-        if (isGyroAimShareKey(keyCode)) {
-            if (!context.gyroAimShareDown) {
-                context.gyroAimShareConsumedByCombo = false;
-            }
-            context.gyroAimShareDown = true;
-            context.gyroAimToggleComboLatched = false;
-            return true;
-        }
-
         if (gyroShortcutEnabled &&
-                keyCode == KeyEvent.KEYCODE_BUTTON_Y && context.gyroAimShareDown) {
-            context.gyroAimTriangleDown = true;
-            context.gyroAimToggleComboLatched = true;
-            context.gyroAimSuppressTriangleUp = true;
-            context.gyroAimShareConsumedByCombo = true;
+                keyCode == prefConfig.gyroModeShortcutActivator &&
+                context.gyroShortcutModifierDown) {
+            context.gyroShortcutConsumed = true;
+            context.gyroShortcutActivatorSuppressed = true;
             toggleGyroAim(context);
             sendControllerInputPacket(context);
             return true;
         }
 
         if (prefConfig.shareGuideQuickMenu &&
-                keyCode == KeyEvent.KEYCODE_BUTTON_MODE &&
-                context.gyroAimShareDown) {
-            context.gyroAimShareConsumedByCombo = true;
+                keyCode == prefConfig.quickMenuShortcutActivator &&
+                context.quickMenuShortcutModifierDown) {
+            context.quickMenuShortcutConsumed = true;
+            context.quickMenuShortcutActivatorSuppressed = true;
             context.shareGuideQuickMenuPending = true;
+            return true;
+        }
+
+        boolean modifier = false;
+        if (gyroShortcutEnabled && keyCode == prefConfig.gyroModeShortcutModifier) {
+            context.gyroShortcutModifierDown = true;
+            context.gyroShortcutConsumed = false;
+            modifier = true;
+        }
+        if (prefConfig.shareGuideQuickMenu &&
+                keyCode == prefConfig.quickMenuShortcutModifier) {
+            context.quickMenuShortcutModifierDown = true;
+            context.quickMenuShortcutConsumed = false;
+            modifier = true;
+        }
+        if (modifier) {
             return true;
         }
 
@@ -1943,33 +1955,42 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             return false;
         }
 
-        if (keyCode == KeyEvent.KEYCODE_BUTTON_MODE &&
-                context.shareGuideQuickMenuPending) {
-            context.shareGuideQuickMenuPending = false;
-            context.gyroAimShareDown = false;
-            context.gyroAimShareConsumedByCombo = false;
-            context.gyroAimToggleComboLatched = false;
-            gestures.showGameMenu(context);
+        if (context.gyroShortcutActivatorSuppressed &&
+                keyCode == prefConfig.gyroModeShortcutActivator) {
+            context.gyroShortcutActivatorSuppressed = false;
             return true;
         }
-
-        if (isGyroAimShareKey(keyCode)) {
-            boolean sendSharePress = context.gyroAimShareDown &&
-                    !context.gyroAimShareConsumedByCombo;
-            context.gyroAimShareDown = false;
-            context.gyroAimToggleComboLatched = false;
-            context.gyroAimShareConsumedByCombo = false;
-
-            if (sendSharePress) {
-                sendDeferredGyroAimSharePress(context, keyCode);
+        if (context.quickMenuShortcutActivatorSuppressed &&
+                keyCode == prefConfig.quickMenuShortcutActivator) {
+            context.quickMenuShortcutActivatorSuppressed = false;
+            if (context.shareGuideQuickMenuPending) {
+                context.shareGuideQuickMenuPending = false;
+                gestures.showGameMenu(context);
             }
             return true;
         }
 
-        if (gyroShortcutEnabled && keyCode == KeyEvent.KEYCODE_BUTTON_Y &&
-                (context.gyroAimShareDown || context.gyroAimSuppressTriangleUp)) {
-            context.gyroAimTriangleDown = false;
-            context.gyroAimSuppressTriangleUp = false;
+        boolean modifier = false;
+        boolean consumed = false;
+        if (gyroShortcutEnabled && keyCode == prefConfig.gyroModeShortcutModifier &&
+                context.gyroShortcutModifierDown) {
+            context.gyroShortcutModifierDown = false;
+            consumed |= context.gyroShortcutConsumed;
+            context.gyroShortcutConsumed = false;
+            modifier = true;
+        }
+        if (prefConfig.shareGuideQuickMenu &&
+                keyCode == prefConfig.quickMenuShortcutModifier &&
+                context.quickMenuShortcutModifierDown) {
+            context.quickMenuShortcutModifierDown = false;
+            consumed |= context.quickMenuShortcutConsumed;
+            context.quickMenuShortcutConsumed = false;
+            modifier = true;
+        }
+        if (modifier) {
+            if (!consumed) {
+                sendDeferredGyroAimSharePress(context, keyCode);
+            }
             return true;
         }
 
@@ -2382,18 +2403,32 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         boolean dpadRight = hatX > 0.5f;
         boolean dpadUp = hatY < -0.5f;
         boolean dpadDown = hatY > 0.5f;
-        updateControllerKbmDigitalAxis(context, ControllerKbmMapper.SOURCE_DPAD_LEFT,
-                dpadLeft, context.kbmDpadLeft);
-        updateControllerKbmDigitalAxis(context, ControllerKbmMapper.SOURCE_DPAD_RIGHT,
-                dpadRight, context.kbmDpadRight);
-        updateControllerKbmDigitalAxis(context, ControllerKbmMapper.SOURCE_DPAD_UP,
-                dpadUp, context.kbmDpadUp);
-        updateControllerKbmDigitalAxis(context, ControllerKbmMapper.SOURCE_DPAD_DOWN,
-                dpadDown, context.kbmDpadDown);
+        updateControllerKbmDpadAxis(context, KeyEvent.KEYCODE_DPAD_LEFT,
+                ControllerKbmMapper.SOURCE_DPAD_LEFT, dpadLeft, context.kbmDpadLeft);
+        updateControllerKbmDpadAxis(context, KeyEvent.KEYCODE_DPAD_RIGHT,
+                ControllerKbmMapper.SOURCE_DPAD_RIGHT, dpadRight, context.kbmDpadRight);
+        updateControllerKbmDpadAxis(context, KeyEvent.KEYCODE_DPAD_UP,
+                ControllerKbmMapper.SOURCE_DPAD_UP, dpadUp, context.kbmDpadUp);
+        updateControllerKbmDpadAxis(context, KeyEvent.KEYCODE_DPAD_DOWN,
+                ControllerKbmMapper.SOURCE_DPAD_DOWN, dpadDown, context.kbmDpadDown);
         context.kbmDpadLeft = dpadLeft;
         context.kbmDpadRight = dpadRight;
         context.kbmDpadUp = dpadUp;
         context.kbmDpadDown = dpadDown;
+    }
+
+    private void updateControllerKbmDpadAxis(GenericControllerContext context, int keyCode,
+                                             String source, boolean pressed,
+                                             boolean previouslyPressed) {
+        if (pressed == previouslyPressed) {
+            return;
+        }
+        boolean shortcutConsumed = pressed ?
+                handleGyroAimComboButtonDown(context, keyCode) :
+                handleGyroAimComboButtonUp(context, keyCode);
+        if (!shortcutConsumed) {
+            updateControllerKbmDigitalAxis(context, source, pressed, previouslyPressed);
+        }
     }
 
     private void handleAxisSet(InputDeviceContext context, float lsX, float lsY, float rsX,
@@ -2475,6 +2510,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             }
         }
 
+        context.inputMap = filterUsbShareGuideQuickMenu(context, context.inputMap);
         sendControllerInputPacket(context);
     }
 
@@ -3795,118 +3831,121 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
     private int filterUsbShareGuideQuickMenu(GenericControllerContext context,
                                               int buttonFlags) {
-        if (!prefConfig.shareGuideQuickMenu) {
+        boolean gyroShortcutEnabled =
+                prefConfig.gyroToRightStick || prefConfig.controllerKbmMode;
+        if (!prefConfig.shareGuideQuickMenu && !gyroShortcutEnabled) {
             context.usbShortcutLastButtonFlags = buttonFlags;
             return buttonFlags;
         }
 
         int previous = context.usbShortcutLastButtonFlags;
         int changed = previous ^ buttonFlags;
-        int shareMask = ControllerPacket.MISC_FLAG | ControllerPacket.BACK_FLAG;
-        if ((changed & shareMask) != 0) {
-            boolean shareDown = (buttonFlags & shareMask) != 0;
-            if (shareDown) {
-                context.gyroAimShareDown = true;
-                context.gyroAimShareConsumedByCombo = false;
-                context.kbmGyroShareKeyCode =
-                        (buttonFlags & ControllerPacket.MISC_FLAG) != 0 ?
-                                KeyEvent.KEYCODE_MEDIA_RECORD :
-                                KeyEvent.KEYCODE_BUTTON_SELECT;
-            }
-            else {
-                if (context.gyroAimShareDown &&
-                        !context.gyroAimShareConsumedByCombo) {
-                    sendDeferredGyroAimSharePress(
-                            context, context.kbmGyroShareKeyCode);
-                }
-                context.gyroAimShareDown = false;
-                context.gyroAimShareConsumedByCombo = false;
-            }
-        }
+        int gyroModifierMask = controllerFlagForKeyCode(prefConfig.gyroModeShortcutModifier);
+        int gyroActivatorMask = controllerFlagForKeyCode(prefConfig.gyroModeShortcutActivator);
+        int menuModifierMask = controllerFlagForKeyCode(prefConfig.quickMenuShortcutModifier);
+        int menuActivatorMask = controllerFlagForKeyCode(prefConfig.quickMenuShortcutActivator);
 
-        boolean guideDown =
-                (buttonFlags & ControllerPacket.SPECIAL_BUTTON_FLAG) != 0;
-        if ((changed & ControllerPacket.SPECIAL_BUTTON_FLAG) != 0) {
-            if (guideDown && context.gyroAimShareDown) {
-                context.gyroAimShareConsumedByCombo = true;
-                context.shareGuideQuickMenuPending = true;
+        if (gyroShortcutEnabled) {
+            handleUsbShortcutChanges(context, changed, buttonFlags,
+                    gyroModifierMask, gyroActivatorMask, true);
+        }
+        if (prefConfig.shareGuideQuickMenu) {
+            handleUsbShortcutChanges(context, changed, buttonFlags,
+                    menuModifierMask, menuActivatorMask, false);
+        }
+        int releasedModifiers = changed & previous & (gyroModifierMask | menuModifierMask);
+        if (releasedModifiers != 0) {
+            boolean consumed = ((releasedModifiers & gyroModifierMask) != 0 &&
+                    context.gyroShortcutConsumed) ||
+                    ((releasedModifiers & menuModifierMask) != 0 &&
+                            context.quickMenuShortcutConsumed);
+            if (!consumed) {
+                int releasedKeyCode = (releasedModifiers & gyroModifierMask) != 0 ?
+                        prefConfig.gyroModeShortcutModifier :
+                        prefConfig.quickMenuShortcutModifier;
+                sendDeferredGyroAimSharePress(context, releasedKeyCode);
             }
-            else if (!guideDown && context.shareGuideQuickMenuPending) {
-                context.shareGuideQuickMenuPending = false;
-                gestures.showGameMenu(context);
+            if ((releasedModifiers & gyroModifierMask) != 0) {
+                context.gyroShortcutConsumed = false;
+            }
+            if ((releasedModifiers & menuModifierMask) != 0) {
+                context.quickMenuShortcutConsumed = false;
             }
         }
 
         context.usbShortcutLastButtonFlags = buttonFlags;
-        if (context.gyroAimShareDown || context.shareGuideQuickMenuPending) {
-            buttonFlags &= ~shareMask;
+        if (context.gyroShortcutModifierDown) {
+            buttonFlags &= ~gyroModifierMask;
         }
-        if (context.shareGuideQuickMenuPending) {
-            buttonFlags &= ~ControllerPacket.SPECIAL_BUTTON_FLAG;
+        if (context.quickMenuShortcutModifierDown) {
+            buttonFlags &= ~menuModifierMask;
+        }
+        if (context.gyroShortcutActivatorSuppressed) {
+            buttonFlags &= ~gyroActivatorMask;
+        }
+        if (context.quickMenuShortcutActivatorSuppressed) {
+            buttonFlags &= ~menuActivatorMask;
         }
         return buttonFlags;
     }
 
-    private void handleControllerKbmUsbButtons(GenericControllerContext context, int buttonFlags) {
-        int changed = context.kbmLastButtonFlags ^ buttonFlags;
-        int shareMask = ControllerPacket.MISC_FLAG | ControllerPacket.BACK_FLAG;
-        int changedShare = changed & shareMask;
-
-        if (changedShare != 0) {
-            boolean shareDown = (buttonFlags & shareMask) != 0;
-            changed &= ~shareMask;
-            if (shareDown) {
-                context.gyroAimShareDown = true;
-                context.gyroAimShareConsumedByCombo = false;
-                context.kbmGyroShareKeyCode =
-                        (buttonFlags & ControllerPacket.MISC_FLAG) != 0 ?
-                                KeyEvent.KEYCODE_MEDIA_RECORD : KeyEvent.KEYCODE_BUTTON_SELECT;
+    private void handleUsbShortcutChanges(GenericControllerContext context, int changed,
+                                          int buttonFlags, int modifierMask,
+                                          int activatorMask, boolean gyro) {
+        if (modifierMask == 0 || activatorMask == 0) {
+            return;
+        }
+        if ((changed & modifierMask) != 0) {
+            boolean down = (buttonFlags & modifierMask) != 0;
+            if (gyro) {
+                context.gyroShortcutModifierDown = down;
+                if (down) context.gyroShortcutConsumed = false;
             }
             else {
-                if (context.gyroAimShareDown && !context.gyroAimShareConsumedByCombo) {
-                    sendDeferredGyroAimSharePress(context, context.kbmGyroShareKeyCode);
+                context.quickMenuShortcutModifierDown = down;
+                if (down) context.quickMenuShortcutConsumed = false;
+            }
+        }
+        if ((changed & activatorMask) != 0) {
+            boolean down = (buttonFlags & activatorMask) != 0;
+            boolean modifierDown = gyro ?
+                    context.gyroShortcutModifierDown :
+                    context.quickMenuShortcutModifierDown;
+            if (down && modifierDown) {
+                if (gyro) {
+                    context.gyroShortcutConsumed = true;
+                    context.gyroShortcutActivatorSuppressed = true;
+                    toggleGyroAim(context);
                 }
-                context.gyroAimShareDown = false;
-                context.gyroAimShareConsumedByCombo = false;
-                context.gyroAimToggleComboLatched = false;
+                else {
+                    context.quickMenuShortcutConsumed = true;
+                    context.quickMenuShortcutActivatorSuppressed = true;
+                    context.shareGuideQuickMenuPending = true;
+                }
+            }
+            else if (!down) {
+                if (gyro) {
+                    context.gyroShortcutActivatorSuppressed = false;
+                }
+                else {
+                    context.quickMenuShortcutActivatorSuppressed = false;
+                    if (context.shareGuideQuickMenuPending) {
+                        context.shareGuideQuickMenuPending = false;
+                        gestures.showGameMenu(context);
+                    }
+                }
             }
         }
+    }
 
-        if ((changed & ControllerPacket.Y_FLAG) != 0) {
-            boolean triangleDown = (buttonFlags & ControllerPacket.Y_FLAG) != 0;
-            if (triangleDown && context.gyroAimShareDown &&
-                    (prefConfig.gyroToRightStick || prefConfig.controllerKbmMode)) {
-                changed &= ~ControllerPacket.Y_FLAG;
-                context.gyroAimTriangleDown = true;
-                context.gyroAimSuppressTriangleUp = true;
-                context.gyroAimShareConsumedByCombo = true;
-                context.gyroAimToggleComboLatched = true;
-                toggleGyroAim(context);
-            }
-            else if (!triangleDown && context.gyroAimSuppressTriangleUp) {
-                changed &= ~ControllerPacket.Y_FLAG;
-                context.gyroAimTriangleDown = false;
-                context.gyroAimSuppressTriangleUp = false;
-            }
-        }
+    private int controllerFlagForKeyCode(int keyCode) {
+        Integer flag = ANDROID_TO_LI_BUTTON_MAP.get(keyCode);
+        return flag != null ? flag : 0;
+    }
 
-        if (prefConfig.shareGuideQuickMenu &&
-                (changed & ControllerPacket.SPECIAL_BUTTON_FLAG) != 0) {
-            boolean guideDown =
-                    (buttonFlags & ControllerPacket.SPECIAL_BUTTON_FLAG) != 0;
-            if (guideDown && context.gyroAimShareDown) {
-                changed &= ~ControllerPacket.SPECIAL_BUTTON_FLAG;
-                context.gyroAimShareConsumedByCombo = true;
-                context.shareGuideQuickMenuPending = true;
-            }
-            else if (!guideDown && context.shareGuideQuickMenuPending) {
-                changed &= ~ControllerPacket.SPECIAL_BUTTON_FLAG;
-                context.shareGuideQuickMenuPending = false;
-                context.gyroAimShareDown = false;
-                context.gyroAimShareConsumedByCombo = false;
-                gestures.showGameMenu(context);
-            }
-        }
+    private void handleControllerKbmUsbButtons(GenericControllerContext context, int buttonFlags) {
+        buttonFlags = filterUsbShareGuideQuickMenu(context, buttonFlags);
+        int changed = context.kbmLastButtonFlags ^ buttonFlags;
 
         handleControllerKbmUsbButton(context, changed, buttonFlags, ControllerPacket.A_FLAG,
                 ControllerKbmMapper.SOURCE_A);
@@ -4045,6 +4084,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         public boolean gyroAimSuppressTriangleUp;
         public boolean gyroAimShareConsumedByCombo;
         public boolean shareGuideQuickMenuPending;
+        public boolean gyroShortcutModifierDown;
+        public boolean gyroShortcutConsumed;
+        public boolean gyroShortcutActivatorSuppressed;
+        public boolean quickMenuShortcutModifierDown;
+        public boolean quickMenuShortcutConsumed;
+        public boolean quickMenuShortcutActivatorSuppressed;
         public boolean kbmGyroPaused;
         public int kbmGyroShareKeyCode = KeyEvent.KEYCODE_MEDIA_RECORD;
         public int kbmLastButtonFlags;

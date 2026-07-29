@@ -16,6 +16,14 @@ android {
 
         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
         ndk.debugSymbolLevel = 'FULL'
+
+        externalNativeBuild {
+            cmake {
+                // NDK r27 requires this opt-in to link native libraries with
+                // flexible 4 KB/16 KB memory page-size support.
+                arguments "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
+            }
+        }
     }
 
     flavorDimensions.add("root")

@@ -98,6 +98,14 @@ public class PreferenceConfiguration {
     private static final String CONTROLLER_KBM_MODE_PREF_STRING = "checkbox_controller_kbm_mode";
     private static final String SHARE_GUIDE_QUICK_MENU_PREF_STRING =
             "checkbox_share_guide_quick_menu";
+    public static final String GYRO_MODE_SHORTCUT_MODIFIER_PREF_STRING =
+            "gyro_mode_shortcut_modifier";
+    public static final String GYRO_MODE_SHORTCUT_ACTIVATOR_PREF_STRING =
+            "gyro_mode_shortcut_activator";
+    public static final String QUICK_MENU_SHORTCUT_MODIFIER_PREF_STRING =
+            "quick_menu_shortcut_modifier";
+    public static final String QUICK_MENU_SHORTCUT_ACTIVATOR_PREF_STRING =
+            "quick_menu_shortcut_activator";
     public static final String GYRO_AIM_PITCH_SENSITIVITY_PREF_STRING = "gyro_aim_pitch_sensitivity";
     public static final String GYRO_AIM_SIDE_SENSITIVITY_PREF_STRING = "gyro_aim_side_sensitivity";
     public static final String GYRO_AIM_VERTICAL_SENSITIVITY_PREF_STRING = "gyro_aim_vertical_sensitivity";
@@ -402,6 +410,10 @@ public class PreferenceConfiguration {
     public boolean gyroToRightStick;
     public boolean controllerKbmMode;
     public boolean shareGuideQuickMenu;
+    public int gyroModeShortcutModifier;
+    public int gyroModeShortcutActivator;
+    public int quickMenuShortcutModifier;
+    public int quickMenuShortcutActivator;
     public boolean gamepadTouchpadAsMouse;
     public boolean gamepadMotionSensorsFallbackToDevice;
     public boolean forceMotionSensorsFallbackToDevice;
@@ -1053,6 +1065,18 @@ private static int getFramePacingValue(Context context) {
         config.controllerKbmMode = prefs.getBoolean(CONTROLLER_KBM_MODE_PREF_STRING, false);
         config.shareGuideQuickMenu = prefs.getBoolean(
                 SHARE_GUIDE_QUICK_MENU_PREF_STRING, false);
+        config.gyroModeShortcutModifier = prefs.getInt(
+                GYRO_MODE_SHORTCUT_MODIFIER_PREF_STRING,
+                android.view.KeyEvent.KEYCODE_BUTTON_SELECT);
+        config.gyroModeShortcutActivator = prefs.getInt(
+                GYRO_MODE_SHORTCUT_ACTIVATOR_PREF_STRING,
+                android.view.KeyEvent.KEYCODE_BUTTON_Y);
+        config.quickMenuShortcutModifier = prefs.getInt(
+                QUICK_MENU_SHORTCUT_MODIFIER_PREF_STRING,
+                android.view.KeyEvent.KEYCODE_BUTTON_SELECT);
+        config.quickMenuShortcutActivator = prefs.getInt(
+                QUICK_MENU_SHORTCUT_ACTIVATOR_PREF_STRING,
+                android.view.KeyEvent.KEYCODE_BUTTON_MODE);
         config.gamepadMotionSensorsFallbackToDevice = prefs.getBoolean(GAMEPAD_MOTION_FALLBACK_PREF_STRING, DEFAULT_GAMEPAD_MOTION_FALLBACK);
         config.forceMotionSensorsFallbackToDevice = prefs.getBoolean(FORCE_MOTION_SENSORS_FALLBACK_PREF_STRING, DEFAULT_FORCE_MOTION_SENSORS_FALLBACK);
         config.enableRumble = prefs.getBoolean(ENABLE_RUMBLE_PREF_STRING, DEFAULT_ENABLE_RUMBLE);

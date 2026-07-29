@@ -597,6 +597,8 @@ public class GameMenu implements Game.GameMenuCallbacks {
         FrameLayout wrapper = new FrameLayout(getThemedContext());
         View card = createQuickMenuCard(option, () -> {});
         card.setOnClickListener(openAction == null ? null : view -> openAction.run());
+        card.setFocusable(true);
+        card.setId(View.generateViewId());
         if (dragAction != null) {
             card.setOnLongClickListener(dragAction);
         }
@@ -610,12 +612,79 @@ public class GameMenu implements Game.GameMenuCallbacks {
         delete.setPadding(dp(9), dp(9), dp(9), dp(9));
         delete.setContentDescription(getString(R.string.game_menu_edit_delete_item));
         delete.setOnClickListener(view -> deleteAction.run());
+        delete.setFocusable(true);
+        delete.setFocusableInTouchMode(true);
+        delete.setId(View.generateViewId());
+        delete.setOnFocusChangeListener((view, hasFocus) -> {
+            if (hasFocus) {
+                hideControllerNavigationHint();
+            }
+            view.setBackground(roundedBackground(
+                    hasFocus ? 0xFFFF4658 : 0xE6B32635, 18));
+            view.setScaleX(hasFocus ? 1.14f : 1f);
+            view.setScaleY(hasFocus ? 1.14f : 1f);
+        });
         FrameLayout.LayoutParams deleteParams = new FrameLayout.LayoutParams(
                 dp(38), dp(38), Gravity.TOP | Gravity.END);
         deleteParams.setMargins(0, dp(5), dp(5), 0);
         wrapper.addView(delete, deleteParams);
 
         return wrapper;
+    }
+
+    private void configureEditableGridControllerFocus(GridLayout grid) {
+        int columns = grid.getColumnCount();
+        int count = grid.getChildCount();
+        for (int index = 0; index < count; index++) {
+            View child = grid.getChildAt(index);
+            if (!(child instanceof FrameLayout)) {
+                continue;
+            }
+            FrameLayout wrapper = (FrameLayout) child;
+            if (wrapper.getChildCount() < 2) {
+                continue;
+            }
+            View card = wrapper.getChildAt(0);
+            View delete = wrapper.getChildAt(1);
+
+            // The delete action is deliberately outside normal grid traversal.
+            // Up from a card always enters its own delete button.
+            card.setNextFocusUpId(delete.getId());
+            delete.setNextFocusDownId(card.getId());
+
+            int aboveIndex = index - columns;
+            if (aboveIndex >= 0) {
+                FrameLayout above = (FrameLayout) grid.getChildAt(aboveIndex);
+                delete.setNextFocusUpId(above.getChildAt(0).getId());
+            }
+            else {
+                delete.setNextFocusUpId(delete.getId());
+            }
+
+            int belowIndex = index + columns;
+            if (belowIndex < count) {
+                FrameLayout below = (FrameLayout) grid.getChildAt(belowIndex);
+                card.setNextFocusDownId(below.getChildAt(0).getId());
+            }
+            else {
+                card.setNextFocusDownId(card.getId());
+            }
+
+            int column = index % columns;
+            if (column > 0) {
+                FrameLayout left = (FrameLayout) grid.getChildAt(index - 1);
+                card.setNextFocusLeftId(left.getChildAt(0).getId());
+            }
+            if (column + 1 < columns && index + 1 < count) {
+                FrameLayout right = (FrameLayout) grid.getChildAt(index + 1);
+                card.setNextFocusRightId(right.getChildAt(0).getId());
+            }
+
+            // Left/right from a delete button returns to its owning card instead
+            // of jumping unpredictably to another card's delete action.
+            delete.setNextFocusLeftId(card.getId());
+            delete.setNextFocusRightId(card.getId());
+        }
     }
 
     private GridLayout createMenuGrid() {
@@ -1255,6 +1324,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
             });
             grid.addView(wrapper, createMenuCardLayoutParams());
         }
+        configureEditableGridControllerFocus(grid);
         grid.setOnDragListener((view, event) -> {
             if (event.getAction() == DragEvent.ACTION_DROP && draggedQuickMenuId != null) {
                 int from = findOptionIndex(visibleOptions, draggedQuickMenuId);
@@ -1321,6 +1391,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
             });
             grid.addView(card, createMenuCardLayoutParams());
         }
+        configureEditableGridControllerFocus(grid);
         ScrollView scroll = new ScrollView(getThemedContext());
         scroll.addView(grid);
         LinearLayout shell = createFullscreenMenuShell(
@@ -1481,7 +1552,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
                     ImageButton deleteButton = new ImageButton(getThemedContext());
                     deleteButton.setImageResource(android.R.drawable.ic_menu_delete);
                     deleteButton.setBackgroundColor(0x00000000);
-                    deleteButton.setFocusable(false);
+                    applyControllerFocusStyle(deleteButton);
                     deleteButton.setContentDescription(getString(R.string.game_menu_edit_delete_item));
                     deleteButton.setOnClickListener(v -> {
                         hiddenIds.add(option.id);

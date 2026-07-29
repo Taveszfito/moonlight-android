@@ -310,6 +310,11 @@
             android:summary="@string/summary_checkbox_gyro_to_right_stick"
             android:title="@string/title_checkbox_gyro_to_right_stick"
             app:iconSpaceReserved="false" />
+        <Preference
+            android:dependency="checkbox_gyro_to_right_stick"
+            android:key="gyro_mode_shortcut"
+            android:title="@string/title_gyro_mode_shortcut"
+            app:iconSpaceReserved="false" />
         <CheckBoxPreference
             android:defaultValue="false"
             android:key="checkbox_controller_kbm_mode"
@@ -321,6 +326,11 @@
             android:key="checkbox_share_guide_quick_menu"
             android:summary="@string/summary_checkbox_share_guide_quick_menu"
             android:title="@string/title_checkbox_share_guide_quick_menu"
+            app:iconSpaceReserved="false" />
+        <Preference
+            android:dependency="checkbox_share_guide_quick_menu"
+            android:key="quick_menu_shortcut"
+            android:title="@string/title_quick_menu_shortcut"
             app:iconSpaceReserved="false" />
         <CheckBoxPreference
             android:defaultValue="false"
