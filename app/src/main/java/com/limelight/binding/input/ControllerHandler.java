@@ -1850,12 +1850,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 ControllerPacket.MISC_FLAG : ControllerPacket.BACK_FLAG;
     }
 
-    private void sendDeferredGyroAimSharePress(GenericControllerContext context, int keyCode) {
+    private void sendShortcutButton(GenericControllerContext context, int keyCode,
+                                    boolean pressed) {
         if (prefConfig.controllerKbmMode) {
             String source = controllerKbmMapper.sourceForKeyCode(keyCode);
             if (source != null) {
-                controllerKbmMapper.handleButton(context, source, true);
-                controllerKbmMapper.handleButton(context, source, false);
+                controllerKbmMapper.handleButton(context, source, pressed);
             }
             return;
         }
@@ -1865,12 +1865,31 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             return;
         }
 
-        // The original down event was withheld while waiting for Triangle/Y. If the combo
-        // never arrived, reproduce a complete Share button press when Share is released.
-        context.inputMap |= shareFlag;
+        if (pressed) {
+            context.inputMap |= shareFlag;
+        }
+        else {
+            context.inputMap &= ~shareFlag;
+        }
         sendControllerInputPacket(context);
-        context.inputMap &= ~shareFlag;
-        sendControllerInputPacket(context);
+    }
+
+    private void releaseForwardedShortcutModifier(GenericControllerContext context,
+                                                  int keyCode) {
+        boolean forwarded = false;
+        if (keyCode == prefConfig.gyroModeShortcutModifier &&
+                context.gyroShortcutModifierForwarded) {
+            context.gyroShortcutModifierForwarded = false;
+            forwarded = true;
+        }
+        if (keyCode == prefConfig.quickMenuShortcutModifier &&
+                context.quickMenuShortcutModifierForwarded) {
+            context.quickMenuShortcutModifierForwarded = false;
+            forwarded = true;
+        }
+        if (forwarded) {
+            sendShortcutButton(context, keyCode, false);
+        }
     }
 
     private void updateGyroAimComboState(GenericControllerContext context, int keyCode, boolean pressed) {
@@ -1915,6 +1934,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 context.gyroShortcutModifierDown) {
             context.gyroShortcutConsumed = true;
             context.gyroShortcutActivatorSuppressed = true;
+            releaseForwardedShortcutModifier(context,
+                    prefConfig.gyroModeShortcutModifier);
             toggleGyroAim(context);
             sendControllerInputPacket(context);
             return true;
@@ -1926,6 +1947,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             context.quickMenuShortcutConsumed = true;
             context.quickMenuShortcutActivatorSuppressed = true;
             context.shareGuideQuickMenuPending = true;
+            releaseForwardedShortcutModifier(context,
+                    prefConfig.quickMenuShortcutModifier);
             return true;
         }
 
@@ -1933,12 +1956,24 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         if (gyroShortcutEnabled && keyCode == prefConfig.gyroModeShortcutModifier) {
             context.gyroShortcutModifierDown = true;
             context.gyroShortcutConsumed = false;
+            if (!context.gyroShortcutModifierForwarded &&
+                    !(keyCode == prefConfig.quickMenuShortcutModifier &&
+                            context.quickMenuShortcutModifierForwarded)) {
+                sendShortcutButton(context, keyCode, true);
+            }
+            context.gyroShortcutModifierForwarded = true;
             modifier = true;
         }
         if (prefConfig.shareGuideQuickMenu &&
                 keyCode == prefConfig.quickMenuShortcutModifier) {
             context.quickMenuShortcutModifierDown = true;
             context.quickMenuShortcutConsumed = false;
+            if (!context.quickMenuShortcutModifierForwarded &&
+                    !(keyCode == prefConfig.gyroModeShortcutModifier &&
+                            context.gyroShortcutModifierForwarded)) {
+                sendShortcutButton(context, keyCode, true);
+            }
+            context.quickMenuShortcutModifierForwarded = true;
             modifier = true;
         }
         if (modifier) {
@@ -1971,11 +2006,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         }
 
         boolean modifier = false;
-        boolean consumed = false;
         if (gyroShortcutEnabled && keyCode == prefConfig.gyroModeShortcutModifier &&
                 context.gyroShortcutModifierDown) {
             context.gyroShortcutModifierDown = false;
-            consumed |= context.gyroShortcutConsumed;
             context.gyroShortcutConsumed = false;
             modifier = true;
         }
@@ -1983,14 +2016,11 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 keyCode == prefConfig.quickMenuShortcutModifier &&
                 context.quickMenuShortcutModifierDown) {
             context.quickMenuShortcutModifierDown = false;
-            consumed |= context.quickMenuShortcutConsumed;
             context.quickMenuShortcutConsumed = false;
             modifier = true;
         }
         if (modifier) {
-            if (!consumed) {
-                sendDeferredGyroAimSharePress(context, keyCode);
-            }
+            releaseForwardedShortcutModifier(context, keyCode);
             return true;
         }
 
@@ -3853,31 +3883,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             handleUsbShortcutChanges(context, changed, buttonFlags,
                     menuModifierMask, menuActivatorMask, false);
         }
-        int releasedModifiers = changed & previous & (gyroModifierMask | menuModifierMask);
-        if (releasedModifiers != 0) {
-            boolean consumed = ((releasedModifiers & gyroModifierMask) != 0 &&
-                    context.gyroShortcutConsumed) ||
-                    ((releasedModifiers & menuModifierMask) != 0 &&
-                            context.quickMenuShortcutConsumed);
-            if (!consumed) {
-                int releasedKeyCode = (releasedModifiers & gyroModifierMask) != 0 ?
-                        prefConfig.gyroModeShortcutModifier :
-                        prefConfig.quickMenuShortcutModifier;
-                sendDeferredGyroAimSharePress(context, releasedKeyCode);
-            }
-            if ((releasedModifiers & gyroModifierMask) != 0) {
-                context.gyroShortcutConsumed = false;
-            }
-            if ((releasedModifiers & menuModifierMask) != 0) {
-                context.quickMenuShortcutConsumed = false;
-            }
-        }
-
         context.usbShortcutLastButtonFlags = buttonFlags;
-        if (context.gyroShortcutModifierDown) {
+        if (context.gyroShortcutModifierDown && context.gyroShortcutConsumed) {
             buttonFlags &= ~gyroModifierMask;
         }
-        if (context.quickMenuShortcutModifierDown) {
+        if (context.quickMenuShortcutModifierDown &&
+                context.quickMenuShortcutConsumed) {
             buttonFlags &= ~menuModifierMask;
         }
         if (context.gyroShortcutActivatorSuppressed) {
@@ -3899,10 +3910,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             boolean down = (buttonFlags & modifierMask) != 0;
             if (gyro) {
                 context.gyroShortcutModifierDown = down;
+                context.gyroShortcutModifierForwarded = down;
                 if (down) context.gyroShortcutConsumed = false;
             }
             else {
                 context.quickMenuShortcutModifierDown = down;
+                context.quickMenuShortcutModifierForwarded = down;
                 if (down) context.quickMenuShortcutConsumed = false;
             }
         }
@@ -3915,12 +3928,16 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 if (gyro) {
                     context.gyroShortcutConsumed = true;
                     context.gyroShortcutActivatorSuppressed = true;
+                    releaseForwardedShortcutModifier(context,
+                            prefConfig.gyroModeShortcutModifier);
                     toggleGyroAim(context);
                 }
                 else {
                     context.quickMenuShortcutConsumed = true;
                     context.quickMenuShortcutActivatorSuppressed = true;
                     context.shareGuideQuickMenuPending = true;
+                    releaseForwardedShortcutModifier(context,
+                            prefConfig.quickMenuShortcutModifier);
                 }
             }
             else if (!down) {
@@ -4087,9 +4104,11 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         public boolean gyroShortcutModifierDown;
         public boolean gyroShortcutConsumed;
         public boolean gyroShortcutActivatorSuppressed;
+        public boolean gyroShortcutModifierForwarded;
         public boolean quickMenuShortcutModifierDown;
         public boolean quickMenuShortcutConsumed;
         public boolean quickMenuShortcutActivatorSuppressed;
+        public boolean quickMenuShortcutModifierForwarded;
         public boolean kbmGyroPaused;
         public int kbmGyroShareKeyCode = KeyEvent.KEYCODE_MEDIA_RECORD;
         public int kbmLastButtonFlags;
