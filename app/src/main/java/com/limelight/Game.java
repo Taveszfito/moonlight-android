@@ -309,6 +309,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         void showMenu(GameInputDevice devic);
         void hideMenu();
         boolean isMenuOpen();
+        void handleControllerState(int buttonFlags, float leftStickX, float leftStickY);
     }
 
     public GameMenuCallbacks gameMenuCallbacks;
@@ -4429,12 +4430,28 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     @Override
     public void showGameMenu(GameInputDevice device) {
         if(isOnExternalDisplay()) {
-            ExternalDisplayControlActivity.toggleGameMenu();
+            runOnUiThread(ExternalDisplayControlActivity::toggleGameMenu);
         } else {
             if (gameMenuCallbacks != null) {
-                gameMenuCallbacks.showMenu(device);
+                runOnUiThread(() -> gameMenuCallbacks.showMenu(device));
             }
         }
+    }
+
+    @Override
+    public boolean handleControllerMenuInput(int buttonFlags, float leftStickX,
+                                             float leftStickY) {
+        if (gameMenuCallbacks == null || !gameMenuCallbacks.isMenuOpen()) {
+            return false;
+        }
+        runOnUiThread(() -> gameMenuCallbacks.handleControllerState(
+                buttonFlags, leftStickX, leftStickY));
+        return true;
+    }
+
+    @Override
+    public boolean isControllerMenuOpen() {
+        return gameMenuCallbacks != null && gameMenuCallbacks.isMenuOpen();
     }
 
     public void hideGameMenu() {

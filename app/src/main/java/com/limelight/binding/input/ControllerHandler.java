@@ -26,8 +26,10 @@ import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.os.VibratorManager;
 import android.util.SparseArray;
+import android.util.SparseLongArray;
 import android.view.InputDevice;
 import android.view.InputEvent;
+import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.Surface;
@@ -43,6 +45,9 @@ import com.limelight.binding.input.driver.UsbDriverListener;
 import com.limelight.binding.input.driver.UsbDriverService;
 import com.limelight.nvstream.NvConnection;
 import com.limelight.nvstream.input.ControllerPacket;
+import com.example.usbbtonandroid.DualSenseInput;
+import com.example.usbbtonandroid.DualSenseTouchPoint;
+import com.limelight.dualsense.DualSenseBridge;
 import com.limelight.nvstream.input.MouseButtonPacket;
 import com.limelight.nvstream.jni.MoonBridge;
 import com.limelight.preferences.PreferenceConfiguration;
@@ -73,6 +78,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     private static final long GYRO_AIM_PEAK_HOLD_NS = 30_000_000L;
     private static final float GYRO_AIM_SENSOR_SENSITIVITY = 0.22f;
     private static final float GYRO_AIM_DRIVER_SENSITIVITY = 0.004f;
+    private static final float DUALSENSE_GYRO_UNITS_PER_DPS = 16.0f;
     private static final float GYRO_AIM_HORIZONTAL_GAIN = 1.15f;
     private static final float GYRO_AIM_COMPENSATION_INPUT_THRESHOLD = 0.0015f;
     private static final float KBM_GYRO_SENSOR_SCALE = 250.0f;
@@ -130,6 +136,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     private final Activity activityContext;
     private final double stickDeadzone;
     private final InputDeviceContext defaultContext = new InputDeviceContext();
+    private final BridgeControllerContext dualSenseBridgeContext = new BridgeControllerContext();
+    private final DualSenseBridge.InputListener dualSenseBridgeInputListener =
+            this::handleDualSenseBridgeInput;
     private final GameGestures gestures;
     private final InputManager inputManager;
     private final Vibrator deviceVibrator;
@@ -143,6 +152,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     private final Handler backgroundThreadHandler;
     private boolean hasGameController;
     private boolean stopped = false;
+    private long lastControllerShortcutRefreshMs;
 
     private final PreferenceConfiguration prefConfig;
     private short currentControllers, initialControllers;
@@ -232,6 +242,11 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
         // Register ourselves for input device notifications
         inputManager.registerInputDeviceListener(this, null);
+        DualSenseBridge.initialize(activityContext);
+        DualSenseBridge.addInputListener(dualSenseBridgeInputListener);
+        if (DualSenseBridge.getControllerConnected()) {
+            hasGameController = true;
+        }
     }
 
     private static InputDevice.MotionRange getMotionRangeForJoystickAxis(InputDevice dev, int axis) {
@@ -360,6 +375,10 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
         // Stop new device contexts from being created or used
         stopped = true;
+        DualSenseBridge.removeInputListener(dualSenseBridgeInputListener);
+        if (dualSenseBridgeContext.assignedControllerNumber) {
+            releaseControllerNumber(dualSenseBridgeContext);
+        }
 
         // Unregister our input device callbacks
         inputManager.unregisterInputDeviceListener(this);
@@ -453,6 +472,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     public static short getAttachedControllerMask(Context context) {
         int count = 0;
         short mask = 0;
+
+        DualSenseBridge.initialize(context);
+        // Do not include the raw HCI bridge in the metadata-less initial mask.
+        // Its first live HID report sends a controller-arrival packet containing
+        // the selected Xbox/PlayStation type. Preallocating this slot here makes
+        // hosts create a default X360 device before that metadata arrives.
 
         // Count all input devices that are gamepads
         InputManager im = (InputManager) context.getSystemService(Context.INPUT_SERVICE);
@@ -1358,6 +1383,16 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             rightStickX |= maxByMagnitude(rightStickX, defaultContext.rightStickX);
             rightStickY |= maxByMagnitude(rightStickY, defaultContext.rightStickY);
         }
+        if (dualSenseBridgeContext.assignedControllerNumber &&
+                dualSenseBridgeContext.controllerNumber == controllerNumber) {
+            inputMap |= dualSenseBridgeContext.inputMap;
+            leftTrigger |= maxByMagnitude(leftTrigger, dualSenseBridgeContext.leftTrigger);
+            rightTrigger |= maxByMagnitude(rightTrigger, dualSenseBridgeContext.rightTrigger);
+            leftStickX |= maxByMagnitude(leftStickX, dualSenseBridgeContext.leftStickX);
+            leftStickY |= maxByMagnitude(leftStickY, dualSenseBridgeContext.leftStickY);
+            rightStickX |= maxByMagnitude(rightStickX, dualSenseBridgeContext.rightStickX);
+            rightStickY |= maxByMagnitude(rightStickY, dualSenseBridgeContext.rightStickY);
+        }
 
         if (originalContext.mouseEmulationActive) {
             int changedMask = inputMap ^  originalContext.mouseEmulationLastInputMap;
@@ -1447,6 +1482,254 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                     leftStickX, leftStickY,
                     rightStickX, rightStickY);
         }
+    }
+
+    private void handleDualSenseBridgeInput(DualSenseInput input) {
+        if (stopped || input == null) {
+            return;
+        }
+        hasGameController = true;
+        currentControllers |= 1;
+        refreshControllerShortcutPreferences();
+        BridgeControllerContext context = dualSenseBridgeContext;
+        int buttonFlags = dualSenseButtonFlags(input);
+        float menuStickX = (input.getLeftX() - 128) / 127.0f;
+        float menuStickY = (input.getLeftY() - 128) / 127.0f;
+        if (gestures.isControllerMenuOpen()) {
+            releaseDualSenseBridgeTouches(context);
+            long now = android.os.SystemClock.uptimeMillis();
+            if (buttonFlags != context.bridgeLastMenuButtonFlags ||
+                    now - context.bridgeLastMenuDispatchTime >= 50) {
+                gestures.handleControllerMenuInput(buttonFlags, menuStickX, menuStickY);
+                context.bridgeLastMenuButtonFlags = buttonFlags;
+                context.bridgeLastMenuDispatchTime = now;
+            }
+            if (!context.menuInputCaptured) {
+                controllerKbmMapper.releaseAll(context);
+                context.inputMap = 0;
+                context.leftTrigger = 0;
+                context.rightTrigger = 0;
+                context.leftStickX = 0;
+                context.leftStickY = 0;
+                setBaseRightStick(context, (short) 0, (short) 0);
+                sendControllerInputPacket(context);
+                context.menuInputCaptured = true;
+            }
+            context.bridgeRawButtonFlags = buttonFlags;
+            return;
+        }
+        context.menuInputCaptured = false;
+        dispatchBridgeButtonTransitions(context, buttonFlags);
+
+        if (prefConfig.controllerKbmMode) {
+            handleDualSenseBridgeKbmAxes(context, input, menuStickX, menuStickY);
+            return;
+        }
+
+        context.leftTrigger = (byte) input.getLeftTrigger();
+        context.rightTrigger = (byte) input.getRightTrigger();
+        context.leftStickX = dualSenseStick(input.getLeftX(), false);
+        context.leftStickY = dualSenseStick(input.getLeftY(), true);
+        setBaseRightStick(context,
+                dualSenseStick(input.getRightX(), false),
+                dualSenseStick(input.getRightY(), true));
+
+        kotlin.Triple<Integer, Integer, Integer> gyro = input.getGyro();
+        if (gyro != null) {
+            if (prefConfig.gyroToRightStick) {
+                // Use the exact same processing path as wired driver gyro input. Response
+                // curve, peak hold, smoothing and anti-deadzone all live downstream here.
+                setGyroRightStickFromMotion(context,
+                        gyro.getFirst() / DUALSENSE_GYRO_UNITS_PER_DPS,
+                        gyro.getSecond() / DUALSENSE_GYRO_UNITS_PER_DPS,
+                        gyro.getThird() / DUALSENSE_GYRO_UNITS_PER_DPS,
+                        GYRO_AIM_DRIVER_SENSITIVITY);
+            }
+            if (context.playStationHostMode && shouldSendBridgeMotion(
+                    context.gyroReportRateHz, context.bridgeLastGyroHostReportNs)) {
+                context.bridgeLastGyroHostReportNs = System.nanoTime();
+                conn.sendControllerMotionEvent((byte) context.controllerNumber,
+                        MoonBridge.LI_MOTION_TYPE_GYRO,
+                        gyro.getFirst() / DUALSENSE_GYRO_UNITS_PER_DPS,
+                        gyro.getSecond() / DUALSENSE_GYRO_UNITS_PER_DPS,
+                        gyro.getThird() / DUALSENSE_GYRO_UNITS_PER_DPS);
+            }
+        }
+        sendControllerInputPacket(context);
+        kotlin.Triple<Integer, Integer, Integer> accel = input.getAccel();
+        if (accel != null && context.playStationHostMode && shouldSendBridgeMotion(
+                context.accelReportRateHz, context.bridgeLastAccelHostReportNs)) {
+            context.bridgeLastAccelHostReportNs = System.nanoTime();
+            conn.sendControllerMotionEvent((byte) context.controllerNumber,
+                    MoonBridge.LI_MOTION_TYPE_ACCEL,
+                    accel.getFirst() * SensorManager.GRAVITY_EARTH / 8192.0f,
+                    accel.getSecond() * SensorManager.GRAVITY_EARTH / 8192.0f,
+                    accel.getThird() * SensorManager.GRAVITY_EARTH / 8192.0f);
+        }
+        if (context.playStationHostMode) {
+            sendDualSenseBridgeTouchEvents(context, input.getTouches());
+        }
+    }
+
+    private void sendDualSenseBridgeTouchEvents(BridgeControllerContext context,
+                                                List<DualSenseTouchPoint> touches) {
+        SparseArray<DualSenseTouchPoint> current = new SparseArray<>();
+        for (DualSenseTouchPoint touch : touches) current.put(touch.getId(), touch);
+        for (int i = 0; i < context.bridgeTouches.size(); i++) {
+            int id = context.bridgeTouches.keyAt(i);
+            DualSenseTouchPoint previous = context.bridgeTouches.valueAt(i);
+            if (current.get(id) == null) {
+                sendDualSenseBridgeTouch(context, MoonBridge.LI_TOUCH_EVENT_UP, previous);
+            }
+        }
+        for (int i = 0; i < current.size(); i++) {
+            int id = current.keyAt(i);
+            DualSenseTouchPoint touch = current.valueAt(i);
+            DualSenseTouchPoint previous = context.bridgeTouches.get(id);
+            if (previous == null) {
+                sendDualSenseBridgeTouch(context, MoonBridge.LI_TOUCH_EVENT_DOWN, touch);
+            }
+            else if (previous.getX() != touch.getX() || previous.getY() != touch.getY()) {
+                sendDualSenseBridgeTouch(context, MoonBridge.LI_TOUCH_EVENT_MOVE, touch);
+            }
+        }
+        context.bridgeTouches.clear();
+        for (int i = 0; i < current.size(); i++) {
+            context.bridgeTouches.put(current.keyAt(i), current.valueAt(i));
+        }
+    }
+
+    private void sendDualSenseBridgeTouch(BridgeControllerContext context, byte eventType,
+                                          DualSenseTouchPoint touch) {
+        conn.sendControllerTouchEvent((byte) context.controllerNumber, eventType, touch.getId(),
+                Math.max(0f, Math.min(1f, touch.getX() / 1920.0f)),
+                Math.max(0f, Math.min(1f, touch.getY() / 1080.0f)), 1.0f);
+    }
+
+    private void releaseDualSenseBridgeTouches(BridgeControllerContext context) {
+        for (int i = 0; i < context.bridgeTouches.size(); i++) {
+            sendDualSenseBridgeTouch(context, MoonBridge.LI_TOUCH_EVENT_UP,
+                    context.bridgeTouches.valueAt(i));
+        }
+        context.bridgeTouches.clear();
+    }
+
+    private boolean shouldSendBridgeMotion(short reportRateHz, long lastReportNs) {
+        if (reportRateHz <= 0) {
+            return false;
+        }
+        long intervalNs = 1_000_000_000L / Math.max(1, reportRateHz);
+        return System.nanoTime() - lastReportNs >= intervalNs;
+    }
+
+    private void handleDualSenseBridgeKbmAxes(GenericControllerContext context,
+                                               DualSenseInput input, float lsX, float lsY) {
+        float rsX = (input.getRightX() - 128) / 127.0f;
+        float rsY = (input.getRightY() - 128) / 127.0f;
+        controllerKbmMapper.handleStick(ControllerKbmMapper.SOURCE_LEFT_STICK, lsX, lsY, context);
+        controllerKbmMapper.handleStick(ControllerKbmMapper.SOURCE_RIGHT_STICK, rsX, rsY, context);
+        ensureControllerKbmPolling(context);
+        kotlin.Triple<Integer, Integer, Integer> gyro = input.getGyro();
+        if (gyro != null && controllerKbmMapper.isGyroEnabled()) {
+            controllerKbmMapper.handleGyro(gyro.getFirst(), gyro.getSecond(),
+                    gyro.getThird(), KBM_GYRO_DRIVER_SCALE, context);
+        }
+
+        float threshold = controllerKbmMapper.getTriggerThreshold() * 2.55f;
+        boolean lt = input.getLeftTrigger() > threshold;
+        boolean rt = input.getRightTrigger() > threshold;
+        updateControllerKbmDigitalAxis(context, ControllerKbmMapper.SOURCE_LT, lt, context.kbmLeftTriggerPressed);
+        updateControllerKbmDigitalAxis(context, ControllerKbmMapper.SOURCE_RT, rt, context.kbmRightTriggerPressed);
+        context.kbmLeftTriggerPressed = lt;
+        context.kbmRightTriggerPressed = rt;
+    }
+
+    private static final int[] BRIDGE_BUTTON_FLAGS = {
+            ControllerPacket.BACK_FLAG, ControllerPacket.MISC_FLAG,
+            ControllerPacket.SPECIAL_BUTTON_FLAG, ControllerPacket.PLAY_FLAG,
+            ControllerPacket.A_FLAG, ControllerPacket.B_FLAG,
+            ControllerPacket.X_FLAG, ControllerPacket.Y_FLAG,
+            ControllerPacket.UP_FLAG, ControllerPacket.DOWN_FLAG,
+            ControllerPacket.LEFT_FLAG, ControllerPacket.RIGHT_FLAG,
+            ControllerPacket.LB_FLAG, ControllerPacket.RB_FLAG,
+            ControllerPacket.LS_CLK_FLAG, ControllerPacket.RS_CLK_FLAG,
+            ControllerPacket.TOUCHPAD_FLAG
+    };
+
+    private static final int[] BRIDGE_BUTTON_KEYS = {
+            KeyEvent.KEYCODE_BUTTON_SELECT, KeyEvent.KEYCODE_MEDIA_RECORD,
+            KeyEvent.KEYCODE_BUTTON_MODE, KeyEvent.KEYCODE_BUTTON_START,
+            KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_BUTTON_B,
+            KeyEvent.KEYCODE_BUTTON_X, KeyEvent.KEYCODE_BUTTON_Y,
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
+            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+            KeyEvent.KEYCODE_BUTTON_L1, KeyEvent.KEYCODE_BUTTON_R1,
+            KeyEvent.KEYCODE_BUTTON_THUMBL, KeyEvent.KEYCODE_BUTTON_THUMBR,
+            KeyEvent.KEYCODE_BUTTON_1
+    };
+
+    private void dispatchBridgeButtonTransitions(BridgeControllerContext context,
+                                                 int nextFlags) {
+        int changed = context.bridgeRawButtonFlags ^ nextFlags;
+        if (changed == 0) return;
+        long now = android.os.SystemClock.uptimeMillis();
+        for (int i = 0; i < BRIDGE_BUTTON_FLAGS.length; i++) {
+            int flag = BRIDGE_BUTTON_FLAGS[i];
+            if ((changed & flag) == 0) continue;
+            int keyCode = BRIDGE_BUTTON_KEYS[i];
+            boolean down = (nextFlags & flag) != 0;
+            long downTime;
+            if (down) {
+                downTime = now;
+                context.bridgeButtonDownTimes.put(keyCode, now);
+            }
+            else {
+                downTime = context.bridgeButtonDownTimes.get(keyCode, now);
+                context.bridgeButtonDownTimes.delete(keyCode);
+            }
+            KeyEvent event = new KeyEvent(downTime, now,
+                    down ? KeyEvent.ACTION_DOWN : KeyEvent.ACTION_UP,
+                    keyCode, 0, 0, KeyCharacterMap.VIRTUAL_KEYBOARD,
+                    0, 0, InputDevice.SOURCE_GAMEPAD);
+            if (down) handleButtonDown(context, event);
+            else handleButtonUp(context, event);
+        }
+        context.bridgeRawButtonFlags = nextFlags;
+    }
+
+    private short dualSenseStick(int value, boolean invert) {
+        int centered = (value - 128) * 257;
+        return clampStickValue(invert ? -centered : centered);
+    }
+
+    public static int dualSenseButtonFlags(DualSenseInput input) {
+        int flags = 0;
+        java.util.Set<String> pressed = input.getPressed();
+        if (pressed.contains("×")) flags |= ControllerPacket.A_FLAG;
+        if (pressed.contains("○")) flags |= ControllerPacket.B_FLAG;
+        if (pressed.contains("□")) flags |= ControllerPacket.X_FLAG;
+        if (pressed.contains("△")) flags |= ControllerPacket.Y_FLAG;
+        if (pressed.contains("L1")) flags |= ControllerPacket.LB_FLAG;
+        if (pressed.contains("R1")) flags |= ControllerPacket.RB_FLAG;
+        if (pressed.contains("L3")) flags |= ControllerPacket.LS_CLK_FLAG;
+        if (pressed.contains("R3")) flags |= ControllerPacket.RS_CLK_FLAG;
+        if (pressed.contains("Options")) flags |= ControllerPacket.PLAY_FLAG;
+        if (pressed.contains("Create")) flags |= ControllerPacket.BACK_FLAG;
+        if (pressed.contains("PS")) flags |= ControllerPacket.SPECIAL_BUTTON_FLAG;
+        if (pressed.contains("Touchpad")) {
+            flags |= ControllerPacket.TOUCHPAD_FLAG;
+        }
+        switch (input.getDpadHat()) {
+            case 0: flags |= ControllerPacket.UP_FLAG; break;
+            case 1: flags |= ControllerPacket.UP_FLAG | ControllerPacket.RIGHT_FLAG; break;
+            case 2: flags |= ControllerPacket.RIGHT_FLAG; break;
+            case 3: flags |= ControllerPacket.RIGHT_FLAG | ControllerPacket.DOWN_FLAG; break;
+            case 4: flags |= ControllerPacket.DOWN_FLAG; break;
+            case 5: flags |= ControllerPacket.DOWN_FLAG | ControllerPacket.LEFT_FLAG; break;
+            case 6: flags |= ControllerPacket.LEFT_FLAG; break;
+            case 7: flags |= ControllerPacket.LEFT_FLAG | ControllerPacket.UP_FLAG; break;
+        }
+        return flags;
     }
 
     private short clampStickValue(int value) {
@@ -1823,21 +2106,13 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             }
         }
 
-        boolean showStatus = gyroAimPreferences.getBoolean(
-                prefConfig.controllerKbmMode ?
-                        ControllerKbmMapper.PREF_GYRO_STATUS_OVERLAY :
-                        PreferenceConfiguration.GYRO_AIM_STATUS_OVERLAY_PREF_STRING,
-                prefConfig.controllerKbmMode ?
-                        ControllerKbmMapper.DEFAULT_GYRO_STATUS_OVERLAY :
-                        PreferenceConfiguration.DEFAULT_GYRO_AIM_STATUS_OVERLAY);
-        if (showStatus) {
-            int message = ControllerKbmMapper.GYRO_ACTIVATION_OFF.equals(nextMode) ?
-                    R.string.gyro_mode_off :
-                    ControllerKbmMapper.GYRO_ACTIVATION_HELD.equals(nextMode) ?
-                            R.string.gyro_mode_selected_buttons :
-                            R.string.gyro_mode_always_on;
-            Toast.makeText(activityContext, message, Toast.LENGTH_SHORT).show();
-        }
+        int message = ControllerKbmMapper.GYRO_ACTIVATION_OFF.equals(nextMode) ?
+                R.string.gyro_mode_off :
+                ControllerKbmMapper.GYRO_ACTIVATION_HELD.equals(nextMode) ?
+                        R.string.gyro_mode_selected_buttons :
+                        R.string.gyro_mode_always_on;
+        mainThreadHandler.post(() ->
+                Toast.makeText(activityContext, message, Toast.LENGTH_SHORT).show());
     }
 
     private boolean isGyroAimShareKey(int keyCode) {
@@ -2943,6 +3218,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             return;
         }
 
+        if (controllerNumber == dualSenseBridgeContext.controllerNumber &&
+                DualSenseBridge.getControllerConnected()) {
+            foundMatchingDevice = true;
+            vibrated = DualSenseBridge.sendRumble(lowFreqMotor, highFreqMotor);
+        }
+
         for (int i = 0; i < inputDeviceContexts.size(); i++) {
             InputDeviceContext deviceContext = inputDeviceContexts.valueAt(i);
 
@@ -3014,6 +3295,14 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     public void handleRumbleTriggers(short controllerNumber, short leftTrigger, short rightTrigger) {
         if (stopped) {
             return;
+        }
+
+        if (controllerNumber == dualSenseBridgeContext.controllerNumber &&
+                DualSenseBridge.getControllerConnected()) {
+            int left = ((leftTrigger & 0xFFFF) * 100) / 65535;
+            int right = ((rightTrigger & 0xFFFF) * 100) / 65535;
+            DualSenseBridge.setAdaptiveTriggers(left > 0 ? 2 : 0,
+                    right > 0 ? 2 : 0, Math.max(left, right));
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -3134,6 +3423,21 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         // Report rate is restricted to <= 200 Hz without the HIGH_SAMPLING_RATE_SENSORS permission
         reportRateHz = (short) Math.min(200, reportRateHz);
 
+        if (dualSenseBridgeContext.assignedControllerNumber &&
+                dualSenseBridgeContext.controllerNumber == controllerNumber &&
+                dualSenseBridgeContext.playStationHostMode) {
+            switch (motionType) {
+                case MoonBridge.LI_MOTION_TYPE_ACCEL:
+                    dualSenseBridgeContext.accelReportRateHz = reportRateHz;
+                    break;
+                case MoonBridge.LI_MOTION_TYPE_GYRO:
+                    dualSenseBridgeContext.gyroReportRateHz = reportRateHz;
+                    break;
+            }
+            LimeLog.info("DualSense Bridge motion state: type=" + motionType +
+                    ", rate=" + reportRateHz + " Hz");
+        }
+
         for (int i = 0; i < inputDeviceContexts.size() + usbDeviceContexts.size(); i++) {
             InputDeviceContext deviceContext;
             if (i < inputDeviceContexts.size()) {
@@ -3201,6 +3505,11 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             return;
         }
 
+        if (controllerNumber == dualSenseBridgeContext.controllerNumber &&
+                DualSenseBridge.getControllerConnected()) {
+            DualSenseBridge.sendLed(r, g, b);
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             for (int i = 0; i < inputDeviceContexts.size(); i++) {
                 InputDeviceContext deviceContext = inputDeviceContexts.valueAt(i);
@@ -3233,6 +3542,10 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
     public boolean handleButtonUp(KeyEvent event) {
         InputDeviceContext context = getContextForEvent(event);
+        return handleButtonUp(context, event);
+    }
+
+    private boolean handleButtonUp(InputDeviceContext context, KeyEvent event) {
         if (context == null) {
             return true;
         }
@@ -3509,6 +3822,10 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
     public boolean handleButtonDown(KeyEvent event) {
         InputDeviceContext context = getContextForEvent(event);
+        return handleButtonDown(context, event);
+    }
+
+    private boolean handleButtonDown(InputDeviceContext context, KeyEvent event) {
         if (context == null) {
             return true;
         }
@@ -3861,6 +4178,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
     private int filterUsbShareGuideQuickMenu(GenericControllerContext context,
                                               int buttonFlags) {
+        refreshControllerShortcutPreferences();
         boolean gyroShortcutEnabled =
                 prefConfig.gyroToRightStick || prefConfig.controllerKbmMode;
         if (!prefConfig.shareGuideQuickMenu && !gyroShortcutEnabled) {
@@ -3898,6 +4216,32 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             buttonFlags &= ~menuActivatorMask;
         }
         return buttonFlags;
+    }
+
+    private void refreshControllerShortcutPreferences() {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - lastControllerShortcutRefreshMs < 1000) {
+            return;
+        }
+        lastControllerShortcutRefreshMs = now;
+        prefConfig.gyroToRightStick = gyroAimPreferences.getBoolean(
+                "checkbox_gyro_to_right_stick", prefConfig.gyroToRightStick);
+        prefConfig.controllerKbmMode = gyroAimPreferences.getBoolean(
+                "checkbox_controller_kbm_mode", prefConfig.controllerKbmMode);
+        prefConfig.shareGuideQuickMenu = gyroAimPreferences.getBoolean(
+                "checkbox_share_guide_quick_menu", prefConfig.shareGuideQuickMenu);
+        prefConfig.gyroModeShortcutModifier = gyroAimPreferences.getInt(
+                PreferenceConfiguration.GYRO_MODE_SHORTCUT_MODIFIER_PREF_STRING,
+                KeyEvent.KEYCODE_BUTTON_SELECT);
+        prefConfig.gyroModeShortcutActivator = gyroAimPreferences.getInt(
+                PreferenceConfiguration.GYRO_MODE_SHORTCUT_ACTIVATOR_PREF_STRING,
+                KeyEvent.KEYCODE_BUTTON_Y);
+        prefConfig.quickMenuShortcutModifier = gyroAimPreferences.getInt(
+                PreferenceConfiguration.QUICK_MENU_SHORTCUT_MODIFIER_PREF_STRING,
+                KeyEvent.KEYCODE_BUTTON_SELECT);
+        prefConfig.quickMenuShortcutActivator = gyroAimPreferences.getInt(
+                PreferenceConfiguration.QUICK_MENU_SHORTCUT_ACTIVATOR_PREF_STRING,
+                KeyEvent.KEYCODE_BUTTON_MODE);
     }
 
     private void handleUsbShortcutChanges(GenericControllerContext context, int changed,
@@ -4063,6 +4407,64 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         usbDeviceContexts.put(controller.getControllerId(), context);
     }
 
+    class BridgeControllerContext extends InputDeviceContext {
+        boolean playStationHostMode;
+        long bridgeLastGyroHostReportNs;
+        long bridgeLastAccelHostReportNs;
+        final SparseArray<DualSenseTouchPoint> bridgeTouches = new SparseArray<>();
+
+        BridgeControllerContext() {
+            id = -7001;
+            external = true;
+            controllerNumber = 0;
+        }
+
+        @Override
+        public void sendControllerArrival() {
+            int supportedButtons = ControllerPacket.A_FLAG | ControllerPacket.B_FLAG |
+                    ControllerPacket.X_FLAG | ControllerPacket.Y_FLAG |
+                    ControllerPacket.UP_FLAG | ControllerPacket.DOWN_FLAG |
+                    ControllerPacket.LEFT_FLAG | ControllerPacket.RIGHT_FLAG |
+                    ControllerPacket.LB_FLAG | ControllerPacket.RB_FLAG |
+                    ControllerPacket.PLAY_FLAG | ControllerPacket.BACK_FLAG |
+                    ControllerPacket.LS_CLK_FLAG | ControllerPacket.RS_CLK_FLAG |
+                    ControllerPacket.SPECIAL_BUTTON_FLAG | ControllerPacket.TOUCHPAD_FLAG |
+                    ControllerPacket.MISC_FLAG;
+            boolean playStationMode = DualSenseBridge.HOST_MODE_PLAYSTATION.equals(
+                    DualSenseBridge.getHostControllerMode());
+            playStationHostMode = playStationMode;
+            short capabilities = MoonBridge.LI_CCAP_ANALOG_TRIGGERS | MoonBridge.LI_CCAP_RUMBLE;
+            if (playStationMode) {
+                capabilities |= MoonBridge.LI_CCAP_GYRO | MoonBridge.LI_CCAP_ACCEL |
+                        MoonBridge.LI_CCAP_RGB_LED | MoonBridge.LI_CCAP_TOUCHPAD;
+            }
+            else {
+                capabilities |= MoonBridge.LI_CCAP_TRIGGER_RUMBLE;
+            }
+            // This is an explicit user-selected host mode, so report a Sony controller
+            // directly instead of relying on the host's optional motion_as_ds4 heuristic.
+            byte reportedType = playStationMode ?
+                    MoonBridge.LI_CTYPE_PS : MoonBridge.LI_CTYPE_XBOX;
+
+            // Apollo ignores controller-arrival metadata when this player slot was
+            // already allocated by an earlier legacy multi-controller packet. This
+            // can happen with OSC or another early player-0 event. Explicitly remove
+            // the slot first; all three packets use the same reliable gamepad channel,
+            // so Apollo observes remove -> typed arrival -> active state in order.
+            short activeMask = getActiveControllerMask();
+            short maskWithoutBridge = (short) (activeMask & ~(1 << controllerNumber));
+            conn.sendControllerInput(controllerNumber, maskWithoutBridge,
+                    0, (byte) 0, (byte) 0,
+                    (short) 0, (short) 0, (short) 0, (short) 0);
+            int result = conn.sendControllerArrivalEvent((byte) controllerNumber, getActiveControllerMask(),
+                    reportedType,
+                    supportedButtons, capabilities);
+            LimeLog.info("DualSense Bridge controller arrival: mode=" +
+                    (playStationMode ? "PlayStation" : "Xbox") + ", result=" + result +
+                    ", controller=" + controllerNumber);
+        }
+    }
+
     class GenericControllerContext implements GameInputDevice{
         public int id;
         public boolean external;
@@ -4113,6 +4515,11 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         public int kbmGyroShareKeyCode = KeyEvent.KEYCODE_MEDIA_RECORD;
         public int kbmLastButtonFlags;
         public int usbShortcutLastButtonFlags;
+        public boolean menuInputCaptured;
+        public int bridgeRawButtonFlags;
+        public final SparseLongArray bridgeButtonDownTimes = new SparseLongArray();
+        public int bridgeLastMenuButtonFlags;
+        public long bridgeLastMenuDispatchTime;
         public boolean kbmLeftTriggerPressed;
         public boolean kbmRightTriggerPressed;
         public boolean kbmDpadLeft;

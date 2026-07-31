@@ -58,6 +58,12 @@
         android:theme="@style/AppTheme"
         >
 
+        <activity
+            android:name=".DualSenseBridgeActivity"
+            android:exported="false"
+            android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize"
+            android:screenOrientation="unspecified" />
+
         <provider
             android:name=".PosterContentProvider"
             android:authorities="poster.${applicationId}"

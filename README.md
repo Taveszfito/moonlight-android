@@ -40,3 +40,12 @@ This fork is based on [Artemis Android](https://github.com/ClassicOldSong/moonli
   - Save, load, delete, and reset controller mapping presets.
   - Export and import shareable controller mapping preset files.
   - Manage, load, import, export, and delete presets directly from the main menu without starting a stream.
+- **DualSense USB Bluetooth Bridge (Alpha)**
+  - Connect a PS5 DualSense controller through an external USB Bluetooth adapter for full app-side hardware access without Android's normal Bluetooth controller limitations.
+  - A standard USB Bluetooth HCI adapter with Bluetooth Classic (BR/EDR) and HID support is required; BLE-only adapters are not suitable. USB-C devices may also require an OTG adapter.
+  - **Tested and recommended adapter:** Baseus BA04 USB Bluetooth 5.0/5.1 using the BR8651 chipset. Other generic plug-and-play adapters may work, but compatibility is not guaranteed during the Alpha phase.
+  - Compared with standard Android Bluetooth mode, the Bridge provides more detailed vibration, full gyro access, touchpad support, lightbar control, battery information, shortcuts, and Quick Menu navigation.
+  - The app is ready to support the complete DualSense feature set, but Apollo currently emulates only a DualShock 4 on Windows. For now, in-game functionality is limited to features available through PS4 controller emulation.
+  - Once Apollo supports PS5 controller emulation and feedback, DualSense-only features such as adaptive triggers can work without redesigning the Bridge.
+  - The Bridge is a future-ready feature designed to unlock additional DualSense capabilities automatically as host support evolves.
+  - This feature is currently in **Alpha** and may still be unstable with some adapters or connections.

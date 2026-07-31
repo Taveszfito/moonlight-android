@@ -57,6 +57,9 @@ import com.limelight.LimeLog;
 import com.limelight.PcView;
 import com.limelight.R;
 import com.limelight.binding.input.virtual_controller.keyboard.KeyBoardControllerConfigurationLoader;
+import com.limelight.binding.input.ControllerHandler;
+import com.limelight.dualsense.DualSenseBridge;
+import com.limelight.nvstream.input.ControllerPacket;
 import com.limelight.binding.video.MediaCodecHelper;
 import com.limelight.utils.Dialog;
 import com.limelight.utils.FileUriUtils;
@@ -409,6 +412,19 @@ public class StreamSettings extends AppCompatActivity {
             private final String modifierKey;
             private final String activatorKey;
             private int firstKey = KeyEvent.KEYCODE_UNKNOWN;
+            private int bridgePreviousFlags;
+            private final DualSenseBridge.InputListener bridgeInputListener = input -> {
+                int flags = ControllerHandler.dualSenseButtonFlags(input);
+                int pressed = (bridgePreviousFlags ^ flags) & flags;
+                bridgePreviousFlags = flags;
+                if (pressed == 0) {
+                    return;
+                }
+                int keyCode = bridgeFlagToKeyCode(Integer.lowestOneBit(pressed));
+                if (keyCode != KeyEvent.KEYCODE_UNKNOWN && getActivity() != null) {
+                    requireActivity().runOnUiThread(() -> captureKeyCode(keyCode));
+                }
+            };
 
             private ControllerShortcutCaptureDialog(Preference preference,
                                                     String modifierKey,
@@ -437,7 +453,28 @@ public class StreamSettings extends AppCompatActivity {
                     return true;
                 }
 
-                int keyCode = event.getKeyCode();
+                captureKeyCode(event.getKeyCode());
+                return true;
+            }
+
+            @Override
+            protected void onStart() {
+                super.onStart();
+                bridgePreviousFlags = ControllerHandler.dualSenseButtonFlags(
+                        DualSenseBridge.getLatestInput());
+                DualSenseBridge.addInputListener(bridgeInputListener);
+            }
+
+            @Override
+            protected void onStop() {
+                DualSenseBridge.removeInputListener(bridgeInputListener);
+                super.onStop();
+            }
+
+            private void captureKeyCode(int keyCode) {
+                if (!isShowing()) {
+                    return;
+                }
                 if (firstKey == KeyEvent.KEYCODE_UNKNOWN) {
                     firstKey = keyCode;
                     setMessage(getString(R.string.controller_shortcut_capture_second,
@@ -461,7 +498,27 @@ public class StreamSettings extends AppCompatActivity {
                     updateControllerShortcutSummary(preference, modifierKey, activatorKey);
                     dismiss();
                 }
-                return true;
+            }
+
+            private int bridgeFlagToKeyCode(int flag) {
+                if (flag == ControllerPacket.A_FLAG) return KeyEvent.KEYCODE_BUTTON_A;
+                if (flag == ControllerPacket.B_FLAG) return KeyEvent.KEYCODE_BUTTON_B;
+                if (flag == ControllerPacket.X_FLAG) return KeyEvent.KEYCODE_BUTTON_X;
+                if (flag == ControllerPacket.Y_FLAG) return KeyEvent.KEYCODE_BUTTON_Y;
+                if (flag == ControllerPacket.UP_FLAG) return KeyEvent.KEYCODE_DPAD_UP;
+                if (flag == ControllerPacket.DOWN_FLAG) return KeyEvent.KEYCODE_DPAD_DOWN;
+                if (flag == ControllerPacket.LEFT_FLAG) return KeyEvent.KEYCODE_DPAD_LEFT;
+                if (flag == ControllerPacket.RIGHT_FLAG) return KeyEvent.KEYCODE_DPAD_RIGHT;
+                if (flag == ControllerPacket.LB_FLAG) return KeyEvent.KEYCODE_BUTTON_L1;
+                if (flag == ControllerPacket.RB_FLAG) return KeyEvent.KEYCODE_BUTTON_R1;
+                if (flag == ControllerPacket.LS_CLK_FLAG) return KeyEvent.KEYCODE_BUTTON_THUMBL;
+                if (flag == ControllerPacket.RS_CLK_FLAG) return KeyEvent.KEYCODE_BUTTON_THUMBR;
+                if (flag == ControllerPacket.PLAY_FLAG) return KeyEvent.KEYCODE_BUTTON_START;
+                if (flag == ControllerPacket.BACK_FLAG) return KeyEvent.KEYCODE_BUTTON_SELECT;
+                if (flag == ControllerPacket.SPECIAL_BUTTON_FLAG) return KeyEvent.KEYCODE_BUTTON_MODE;
+                if (flag == ControllerPacket.TOUCHPAD_FLAG) return KeyEvent.KEYCODE_BUTTON_1;
+                if (flag == ControllerPacket.MISC_FLAG) return KeyEvent.KEYCODE_MEDIA_RECORD;
+                return KeyEvent.KEYCODE_UNKNOWN;
             }
 
             private boolean isShortcutAssignedToOtherFunction(int modifier, int activator) {

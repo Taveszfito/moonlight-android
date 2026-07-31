@@ -878,4 +878,14 @@
 
     <string name="title_checkbox_full_screen">Enable Full Screen</string>
     <string name="summary_checkbox_full_screen">Hide system bars with immersive mode</string>
+    <string name="dualsense_bridge_title">DualSense USB Bluetooth Bridge</string>
+    <string name="dualsense_bridge_button">DualSense Bridge • ALPHA</string>
+    <string name="dualsense_bridge_alpha">ALPHA — experimental connection path</string>
+    <string name="dualsense_bridge_scan">Find / rescan adapter</string>
+    <string name="dualsense_bridge_reset">Reset connection</string>
+    <string name="dualsense_bridge_stop">Stop bridge</string>
+    <string name="dualsense_bridge_devices">Known and discovered controllers</string>
+    <string name="dualsense_bridge_output">DualSense output test</string>
+    <string name="dualsense_bridge_connect">Connect</string>
+    <string name="dualsense_bridge_no_devices">No controller discovered yet. Put the DualSense into pairing mode, then rescan.</string>
 </resources>

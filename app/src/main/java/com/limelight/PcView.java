@@ -22,6 +22,7 @@ import com.limelight.preferences.GlPreferences;
 import com.limelight.preferences.PreferenceConfiguration;
 import com.limelight.preferences.StreamSettings;
 import com.limelight.profiles.ProfilesManager;
+import com.limelight.dualsense.DualSenseBridge;
 import com.limelight.ui.AdapterFragment;
 import com.limelight.ui.AdapterFragmentCallbacks;
 import com.limelight.utils.Dialog;
@@ -122,6 +123,11 @@ public class PcView extends AppCompatActivity implements AdapterFragmentCallback
         }
 
         refreshProfileButton();
+        ExtendedFloatingActionButton bridgeButton = findViewById(R.id.dualsenseBridgeButton);
+        if (bridgeButton != null) {
+            bridgeButton.setText(DualSenseBridge.getControllerConnected() ?
+                    "DualSense • Connected" : getString(R.string.dualsense_bridge_button));
+        }
     }
 
     private final static int PAIR_ID = 2;
@@ -158,6 +164,7 @@ public class PcView extends AppCompatActivity implements AdapterFragmentCallback
         ImageButton addComputerButton = findViewById(R.id.manuallyAddPc);
         ImageButton helpButton = findViewById(R.id.helpButton);
         ExtendedFloatingActionButton profilesButton = findViewById(R.id.profilesButton);
+        ExtendedFloatingActionButton dualSenseBridgeButton = findViewById(R.id.dualsenseBridgeButton);
 
         settingsButton.setOnClickListener(new OnClickListener() {
             @Override
@@ -184,6 +191,8 @@ public class PcView extends AppCompatActivity implements AdapterFragmentCallback
                 startActivity(new Intent(PcView.this, ProfilesActivity.class));
             }
         });
+        dualSenseBridgeButton.setOnClickListener(v ->
+                startActivity(new Intent(PcView.this, DualSenseBridgeActivity.class)));
 
         // Amazon review didn't like the help button because the wiki was not entirely
         // navigable via the Fire TV remote (though the relevant parts were). Let's hide

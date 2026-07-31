@@ -9,6 +9,7 @@ import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Canvas;
 import android.graphics.Paint;
+import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
@@ -53,12 +54,15 @@ import android.widget.Toast;
 import android.util.TypedValue;
 
 import androidx.preference.PreferenceManager;
+import com.limelight.dualsense.DualSenseBridge;
+import com.example.usbbtonandroid.DualSenseInput;
 import androidx.appcompat.view.WindowCallbackWrapper;
 
 import com.limelight.binding.input.GameInputDevice;
 import com.limelight.binding.input.KeyboardTranslator;
 import com.limelight.binding.input.ControllerKbmMapper;
 import com.limelight.binding.input.ControllerHandler;
+import com.limelight.nvstream.input.ControllerPacket;
 import com.limelight.preferences.PreferenceConfiguration;
 import com.limelight.utils.KeyConfigHelper;
 import com.limelight.utils.KeyMapper;
@@ -100,6 +104,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
     private static final String MENU_ZOOM_MODE = "zoom_mode";
     private static final String MENU_ROTATE_SCREEN = "rotate_screen";
     private static final String MENU_ADVANCED = "advanced";
+    private static final String MENU_DUALSENSE_BRIDGE = "dualsense_bridge";
     private static final String MENU_CANCEL = "cancel";
 
     private static final String ADV_MOUSE_MODE = "advanced_mouse_mode";
@@ -130,6 +135,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
             MENU_TOGGLE_KEYBOARD,
             MENU_ZOOM_MODE,
             MENU_ROTATE_SCREEN,
+            MENU_DUALSENSE_BRIDGE,
             MENU_ADVANCED,
             MENU_CANCEL
     );
@@ -173,6 +179,8 @@ public class GameMenu implements Game.GameMenuCallbacks {
     private boolean quickMenuEditMode;
     private int draggedQuickMenuIndex = -1;
     private String draggedQuickMenuId;
+    private int bridgeLastButtonFlags;
+    private boolean bridgeStickCentered = true;
 
     public GameMenu(Game game, Context dialogScreenContext) {
         this.game = game;
@@ -390,6 +398,9 @@ public class GameMenu implements Game.GameMenuCallbacks {
         if (MENU_ADVANCED.equals(id)) {
             return R.drawable.ic_qm_tune;
         }
+        if (MENU_DUALSENSE_BRIDGE.equals(id)) {
+            return R.drawable.ic_qm_controller;
+        }
         if (ADV_MOUSE_MODE.equals(id)) {
             return R.drawable.ic_qm_mouse;
         }
@@ -525,6 +536,8 @@ public class GameMenu implements Game.GameMenuCallbacks {
         card.setBackground(roundedBackground(destructive ? 0xCC3A2026 : 0xCC202630, 18));
         card.setClickable(true);
         card.setFocusable(true);
+        card.setFocusableInTouchMode(true);
+        card.setTag("controller_menu_card");
         card.setOnClickListener(view -> onClick.run());
         card.setOnFocusChangeListener((view, hasFocus) -> {
             if (hasFocus) {
@@ -587,6 +600,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
                 ADV_MOUSE_MODE.equals(option.id) ||
                 ADV_GYRO_AIM_SETTINGS.equals(option.id) ||
                 ADV_CONTROLLER_KBM.equals(option.id) ||
+                MENU_DUALSENSE_BRIDGE.equals(option.id) ||
                 ADV_SEND_KEYS.equals(option.id) ||
                 ADV_VOLUME_BUTTONS.equals(option.id);
     }
@@ -754,6 +768,25 @@ public class GameMenu implements Game.GameMenuCallbacks {
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
         if (getString(R.string.quick_menu_title).equals(title)) {
+            TextView bridgeStatus = new TextView(getThemedContext());
+            DualSenseInput bridgeInput = DualSenseBridge.getLatestInput();
+            String bridgeLabel = DualSenseBridge.getControllerConnected() ?
+                    "DualSense connected" : "DualSense disconnected";
+            if (DualSenseBridge.getControllerConnected() &&
+                    bridgeInput.getBatteryPercent() >= 0) {
+                bridgeLabel += "  -  " + bridgeInput.getBatteryPercent() + "%";
+            }
+            bridgeStatus.setText(bridgeLabel);
+            bridgeStatus.setTextColor(DualSenseBridge.getControllerConnected() ?
+                    0xFF62D995 : 0x99FFFFFF);
+            bridgeStatus.setTextSize(13);
+            bridgeStatus.setMaxLines(1);
+            LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            statusParams.setMargins(dp(8), 0, dp(8), 0);
+            header.addView(bridgeStatus, statusParams);
+
             controllerNavigationHint = new TextView(getThemedContext());
             controllerNavigationHint.setText(R.string.game_menu_controller_navigation_hint);
             controllerNavigationHint.setTextColor(0x99FFFFFF);
@@ -803,6 +836,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
 
     private void applyControllerFocusStyle(View view) {
         view.setFocusable(true);
+        view.setFocusableInTouchMode(true);
         view.setOnFocusChangeListener((focusedView, hasFocus) -> {
             if (hasFocus) {
                 hideControllerNavigationHint();
@@ -920,11 +954,191 @@ public class GameMenu implements Game.GameMenuCallbacks {
 
     private boolean moveControllerFocus(View root, int direction) {
         View focused = root.findFocus();
-        if (focused == null) {
-            return root.requestFocus();
+        if (focused == null || focused == root) {
+            ArrayList<View> focusables = new ArrayList<>();
+            root.addFocusables(focusables, direction, View.FOCUSABLES_ALL);
+            for (View focusable : focusables) {
+                if (focusable != root && focusable.isShown() && focusable.isEnabled() &&
+                        focusable.requestFocus()) {
+                    hideControllerNavigationHint();
+                    return true;
+                }
+            }
+            return false;
         }
         View next = focused.focusSearch(direction);
-        return next != null && next.requestFocus();
+        if (next == null || next == focused || !next.isShown() || !next.isEnabled()) {
+            next = findBridgeDirectionalFocus(root, focused, direction);
+        }
+        boolean moved = next != null && next.requestFocus();
+        if (moved) hideControllerNavigationHint();
+        return moved;
+    }
+
+    private View findBridgeDirectionalFocus(View root, View focused, int direction) {
+        ArrayList<View> candidates = new ArrayList<>();
+        root.addFocusables(candidates, direction, View.FOCUSABLES_ALL);
+        Rect from = new Rect();
+        if (!focused.getGlobalVisibleRect(from)) {
+            return null;
+        }
+        float fromX = from.exactCenterX();
+        float fromY = from.exactCenterY();
+        View best = null;
+        float bestScore = Float.MAX_VALUE;
+        for (View candidate : candidates) {
+            if (candidate == focused || !candidate.isShown() || !candidate.isEnabled()) {
+                continue;
+            }
+            Rect to = new Rect();
+            if (!candidate.getGlobalVisibleRect(to)) {
+                continue;
+            }
+            float dx = to.exactCenterX() - fromX;
+            float dy = to.exactCenterY() - fromY;
+            float primary;
+            float secondary;
+            switch (direction) {
+                case View.FOCUS_LEFT:
+                    if (dx >= -1) continue;
+                    primary = -dx;
+                    secondary = Math.abs(dy);
+                    break;
+                case View.FOCUS_RIGHT:
+                    if (dx <= 1) continue;
+                    primary = dx;
+                    secondary = Math.abs(dy);
+                    break;
+                case View.FOCUS_UP:
+                    if (dy >= -1) continue;
+                    primary = -dy;
+                    secondary = Math.abs(dx);
+                    break;
+                case View.FOCUS_DOWN:
+                    if (dy <= 1) continue;
+                    primary = dy;
+                    secondary = Math.abs(dx);
+                    break;
+                default:
+                    continue;
+            }
+            float score = primary * 4f + secondary;
+            if (score < bestScore) {
+                bestScore = score;
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
+    @Override
+    public void handleControllerState(int buttonFlags, float leftStickX, float leftStickY) {
+        if (currentDialog == null || !currentDialog.isShowing() ||
+                currentDialog.getWindow() == null) {
+            bridgeLastButtonFlags = buttonFlags;
+            bridgeStickCentered = true;
+            return;
+        }
+
+        View root = currentDialog.getWindow().getDecorView();
+        int changed = bridgeLastButtonFlags ^ buttonFlags;
+        int pressed = changed & buttonFlags;
+        int released = changed & ~buttonFlags;
+
+        // The USB Bluetooth bridge is deliberately invisible to Android's InputManager.
+        // Drive the menu directly from its raw state instead of synthesizing InputEvents.
+        if ((pressed & ControllerPacket.LS_CLK_FLAG) != 0 && root.findFocus() == null) {
+            moveControllerFocus(root, View.FOCUS_FORWARD);
+        }
+
+        if ((pressed & ControllerPacket.UP_FLAG) != 0) {
+            moveBridgeControllerFocus(root, View.FOCUS_UP);
+        }
+        if ((pressed & ControllerPacket.DOWN_FLAG) != 0) {
+            moveBridgeControllerFocus(root, View.FOCUS_DOWN);
+        }
+        if ((pressed & ControllerPacket.LEFT_FLAG) != 0) {
+            moveBridgeControllerFocus(root, View.FOCUS_LEFT);
+        }
+        if ((pressed & ControllerPacket.RIGHT_FLAG) != 0) {
+            moveBridgeControllerFocus(root, View.FOCUS_RIGHT);
+        }
+
+        if ((released & ControllerPacket.A_FLAG) != 0) {
+            View focused = root.findFocus();
+            if (focused == null) {
+                moveControllerFocus(root, View.FOCUS_FORWARD);
+            }
+            else if (focused instanceof SeekBar) {
+                setControllerSliderCaptured((SeekBar) focused,
+                        controllerCapturedSeekBar != focused);
+            }
+            else {
+                focused.performClick();
+            }
+        }
+        if ((released & ControllerPacket.B_FLAG) != 0) {
+            performBridgeBack(currentDialog);
+        }
+        if ((released & ControllerPacket.PLAY_FLAG) != 0) {
+            hideMenu();
+        }
+
+        long now = android.os.SystemClock.uptimeMillis();
+        int stickDirection = 0;
+        if (Math.abs(leftStickX) > Math.abs(leftStickY) && Math.abs(leftStickX) > 0.65f) {
+            stickDirection = leftStickX > 0 ? View.FOCUS_RIGHT : View.FOCUS_LEFT;
+        }
+        else if (Math.abs(leftStickY) > 0.65f) {
+            stickDirection = leftStickY > 0 ? View.FOCUS_DOWN : View.FOCUS_UP;
+        }
+        if (stickDirection == 0) {
+            bridgeStickCentered = true;
+        }
+        else if (bridgeStickCentered || now - lastControllerNavigationTime >= 170) {
+            bridgeStickCentered = false;
+            lastControllerNavigationTime = now;
+            moveBridgeControllerFocus(root, stickDirection);
+        }
+        bridgeLastButtonFlags = buttonFlags;
+    }
+
+    private void moveBridgeControllerFocus(View root, int direction) {
+        if (controllerCapturedSeekBar != null &&
+                (direction == View.FOCUS_LEFT || direction == View.FOCUS_RIGHT)) {
+            adjustCapturedSlider(direction == View.FOCUS_RIGHT);
+        }
+        else {
+            moveControllerFocus(root, direction);
+        }
+    }
+
+    private void performBridgeBack(AlertDialog dialog) {
+        Button negative = dialog.getButton(AlertDialog.BUTTON_NEGATIVE);
+        if (negative != null && negative.getVisibility() == View.VISIBLE) {
+            negative.performClick();
+        }
+        else if (controllerBackAction != null) {
+            Runnable backAction = controllerBackAction;
+            dialog.dismiss();
+            backAction.run();
+        }
+        else {
+            dialog.dismiss();
+        }
+    }
+
+    private void dispatchBridgeMenuButton(int changed, int buttonFlags,
+                                          int mask, int keyCode) {
+        if ((changed & mask) == 0) {
+            return;
+        }
+        int action = (buttonFlags & mask) != 0 ?
+                KeyEvent.ACTION_DOWN : KeyEvent.ACTION_UP;
+        long now = android.os.SystemClock.uptimeMillis();
+        currentDialog.dispatchKeyEvent(new KeyEvent(now, now, action, keyCode, 0,
+                0, KeyCharacterMap.VIRTUAL_KEYBOARD, 0,
+                0, InputDevice.SOURCE_GAMEPAD));
     }
 
     private boolean handleControllerDialogKey(AlertDialog dialog, View root,
@@ -1043,6 +1257,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
         }
         Window window = dialog.getWindow();
         View root = window.getDecorView();
+        enableBridgeFocusInTouchMode(root);
         setControllerSliderCaptured(null, false);
         dialog.setOnKeyListener((ignored, keyCode, event) ->
                 handleControllerDialogKey(dialog, root, keyCode, event));
@@ -1055,10 +1270,21 @@ public class GameMenu implements Game.GameMenuCallbacks {
         }
 
         root.post(() -> {
+            enableBridgeFocusInTouchMode(root);
+            ArrayList<View> focusables = new ArrayList<>();
+            root.addFocusables(focusables, View.FOCUS_FORWARD,
+                    View.FOCUSABLES_ALL);
+            // Start on actual menu content rather than the close/edit icons in
+            // the header. The Bridge cannot take Android out of touch mode.
+            for (View focusable : focusables) {
+                if ("controller_menu_card".equals(focusable.getTag()) &&
+                        focusable.isShown() && focusable.isEnabled() &&
+                        focusable.requestFocus()) {
+                    hideControllerNavigationHint();
+                    return;
+                }
+            }
             if (root.findFocus() == null) {
-                ArrayList<View> focusables = new ArrayList<>();
-                root.addFocusables(focusables, View.FOCUS_FORWARD,
-                        View.FOCUSABLES_ALL);
                 for (View focusable : focusables) {
                     if (focusable.isShown() && focusable.isEnabled() &&
                             focusable.requestFocus()) {
@@ -1067,6 +1293,19 @@ public class GameMenu implements Game.GameMenuCallbacks {
                 }
             }
         });
+    }
+
+    private void enableBridgeFocusInTouchMode(View view) {
+        if (view.isFocusable() && (view.isClickable() || view instanceof SeekBar ||
+                view instanceof Spinner || view instanceof EditText)) {
+            view.setFocusableInTouchMode(true);
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                enableBridgeFocusInTouchMode(group.getChildAt(i));
+            }
+        }
     }
 
     private final class ControllerMenuWindowCallback extends WindowCallbackWrapper {
@@ -3596,11 +3835,66 @@ public class GameMenu implements Game.GameMenuCallbacks {
             options.add(new MenuOption(MENU_ROTATE_SCREEN, getString(R.string.game_menu_rotate_screen), true,
                     game::rotateScreen));
         }
+        options.add(new MenuOption(MENU_DUALSENSE_BRIDGE,
+                "DualSense Bridge • ALPHA",
+                () -> showDualSenseBridgeMenu(device)));
         options.add(new MenuOption(MENU_ADVANCED, getString(R.string.game_menu_advanced), true,
                 () -> showAdvancedMenu(device)));
         options.add(new MenuOption(MENU_CANCEL, getString(R.string.game_menu_cancel), null));
 
         return options;
+    }
+
+    private void showDualSenseBridgeMenu(GameInputDevice device) {
+        Handler handler = new Handler(Looper.getMainLooper());
+        List<MenuOption> options = new ArrayList<>();
+        String state = DualSenseBridge.getControllerConnected() ?
+                "Connected — input packets: " + DualSenseBridge.getInputPacketCount() :
+                "Not connected";
+        DualSenseInput bridgeInput = DualSenseBridge.getLatestInput();
+        if (DualSenseBridge.getControllerConnected() && bridgeInput.getBatteryPercent() >= 0) {
+            state += "\nBattery: " + bridgeInput.getBatteryPercent() + "% - " +
+                    bridgeInput.getBatteryStatus();
+        }
+        options.add(new MenuOption("dualsense_status",
+                state + "\n" + DualSenseBridge.getStatus(), () ->
+                showDualSenseBridgeMenu(device)));
+        options.add(new MenuOption("dualsense_scan", "Find / rescan USB adapter", () -> {
+            DualSenseBridge.scan(game);
+            handler.postDelayed(() -> showDualSenseBridgeMenu(device), 350);
+        }));
+        options.add(new MenuOption("dualsense_reset", "Reset bridge connection", () -> {
+            DualSenseBridge.reset(game);
+            handler.postDelayed(() -> showDualSenseBridgeMenu(device), 500);
+        }));
+        boolean playStationMode = DualSenseBridge.HOST_MODE_PLAYSTATION.equals(
+                DualSenseBridge.getHostControllerMode());
+        options.add(new MenuOption("dualsense_host_mode",
+                "Host controller: " + (playStationMode ? "PlayStation (native motion)" :
+                        "Xbox compatibility") + "\nApplies on the next stream connection", () -> {
+            DualSenseBridge.setHostControllerMode(playStationMode ?
+                    DualSenseBridge.HOST_MODE_XBOX :
+                    DualSenseBridge.HOST_MODE_PLAYSTATION);
+            showDualSenseBridgeMenu(device);
+        }));
+        for (com.example.usbbtonandroid.hci.HciUsbController.HciDevice controller :
+                DualSenseBridge.getDevices()) {
+            options.add(new MenuOption("dualsense_device_" + controller.getAddress(),
+                    controller.getName() + "\n" + controller.getState(), () -> {
+                DualSenseBridge.reconnect(controller.getAddress(), controller.getName());
+                handler.postDelayed(() -> showDualSenseBridgeMenu(device), 350);
+            }));
+            if (controller.getPaired()) {
+                options.add(new MenuOption("dualsense_forget_" + controller.getAddress(),
+                        "Forget " + controller.getName(), () -> {
+                    DualSenseBridge.forgetDevice(controller.getAddress());
+                    handler.postDelayed(() -> showDualSenseBridgeMenu(device), 350);
+                }));
+            }
+        }
+        options.add(new MenuOption(MENU_CANCEL, getString(R.string.game_menu_cancel), null));
+        showMenuDialog("DualSense Bridge • ALPHA",
+                options.toArray(new MenuOption[0]), () -> showMenu(device));
     }
 
     private void showRestoreQuickMenuDialog(GameInputDevice device, List<MenuOption> allOptions,
