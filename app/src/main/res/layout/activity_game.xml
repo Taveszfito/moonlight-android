@@ -50,6 +50,25 @@
         android:preferKeepClear="true"
         android:visibility="gone" />
 
+    <TextView
+        android:id="@+id/controllerLowBatteryOverlay"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_marginTop="54dp"
+        android:layout_marginEnd="12dp"
+        android:background="@drawable/controller_low_battery_overlay_background"
+        android:paddingStart="12dp"
+        android:paddingTop="7dp"
+        android:paddingEnd="12dp"
+        android:paddingBottom="7dp"
+        android:textColor="#FFF2F2"
+        android:textSize="13sp"
+        android:textStyle="bold"
+        android:elevation="20dp"
+        android:preferKeepClear="true"
+        android:visibility="gone" />
+
     <LinearLayout
         android:id="@+id/performanceOverlay"
         android:orientation="vertical"

@@ -21,6 +21,7 @@ import android.os.CombinedVibration;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.os.VibrationAttributes;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
@@ -139,6 +140,24 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     private final BridgeControllerContext dualSenseBridgeContext = new BridgeControllerContext();
     private final DualSenseBridge.InputListener dualSenseBridgeInputListener =
             this::handleDualSenseBridgeInput;
+    private static final long DUALSENSE_BRIDGE_STALE_INPUT_MS = 120;
+    private static final long DUALSENSE_BRIDGE_FAILSAFE_POLL_MS = 40;
+    private volatile long dualSenseBridgeLastInputAtMs;
+    private volatile boolean dualSenseBridgeFailsafeReleased = true;
+    private final Runnable dualSenseBridgeFailsafeRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (stopped) {
+                return;
+            }
+            long lastInput = dualSenseBridgeLastInputAtMs;
+            if (!dualSenseBridgeFailsafeReleased && lastInput != 0 &&
+                    SystemClock.uptimeMillis() - lastInput >= DUALSENSE_BRIDGE_STALE_INPUT_MS) {
+                releaseStaleDualSenseBridgeInput();
+            }
+            mainThreadHandler.postDelayed(this, DUALSENSE_BRIDGE_FAILSAFE_POLL_MS);
+        }
+    };
     private final GameGestures gestures;
     private final InputManager inputManager;
     private final Vibrator deviceVibrator;
@@ -244,6 +263,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         inputManager.registerInputDeviceListener(this, null);
         DualSenseBridge.initialize(activityContext);
         DualSenseBridge.addInputListener(dualSenseBridgeInputListener);
+        mainThreadHandler.postDelayed(dualSenseBridgeFailsafeRunnable,
+                DUALSENSE_BRIDGE_FAILSAFE_POLL_MS);
         if (DualSenseBridge.getControllerConnected()) {
             hasGameController = true;
         }
@@ -376,6 +397,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         // Stop new device contexts from being created or used
         stopped = true;
         DualSenseBridge.removeInputListener(dualSenseBridgeInputListener);
+        mainThreadHandler.removeCallbacks(dualSenseBridgeFailsafeRunnable);
         if (dualSenseBridgeContext.assignedControllerNumber) {
             releaseControllerNumber(dualSenseBridgeContext);
         }
@@ -1484,10 +1506,42 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         }
     }
 
+    private void releaseStaleDualSenseBridgeInput() {
+        if (dualSenseBridgeFailsafeReleased) {
+            return;
+        }
+        dualSenseBridgeFailsafeReleased = true;
+        BridgeControllerContext context = dualSenseBridgeContext;
+
+        // A lost HID report stream must never leave the last controller state held
+        // on the host. Release every digital/analog output without tearing down the
+        // radio link, so input can resume immediately when reports return.
+        controllerKbmMapper.releaseAll(context);
+        releaseDualSenseBridgeTouches(context);
+        context.inputMap = 0;
+        context.leftTrigger = 0;
+        context.rightTrigger = 0;
+        context.leftStickX = 0;
+        context.leftStickY = 0;
+        context.bridgeRawButtonFlags = 0;
+        context.bridgeLastMenuButtonFlags = 0;
+        setBaseRightStick(context, (short) 0, (short) 0);
+        resetGyroRightStick(context);
+
+        if (gestures.isControllerMenuOpen()) {
+            gestures.handleControllerMenuInput(0, 0, 0);
+        }
+        else {
+            sendControllerInputPacket(context);
+        }
+    }
+
     private void handleDualSenseBridgeInput(DualSenseInput input) {
         if (stopped || input == null) {
             return;
         }
+        dualSenseBridgeLastInputAtMs = SystemClock.uptimeMillis();
+        dualSenseBridgeFailsafeReleased = false;
         hasGameController = true;
         currentControllers |= 1;
         refreshControllerShortcutPreferences();
@@ -3507,7 +3561,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
         if (controllerNumber == dualSenseBridgeContext.controllerNumber &&
                 DualSenseBridge.getControllerConnected()) {
-            DualSenseBridge.sendLed(r, g, b);
+            DualSenseBridge.sendHostLed(r, g, b);
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {

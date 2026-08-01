@@ -6,6 +6,7 @@ import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
+import com.limelight.R
 import java.io.Closeable
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentHashMap
@@ -14,6 +15,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class HciUsbController(
     private val usbManager: UsbManager,
     private val device: UsbDevice,
+    private val stringProvider: (Int, Array<out Any>) -> String,
     private val onLog: (String) -> Unit,
     private val onStatus: (String) -> Unit,
     private val onDevice: (HciDevice) -> Unit,
@@ -21,6 +23,7 @@ class HciUsbController(
     private val loadLinkKey: (String) -> String?,
     private val saveLinkKey: (String, String) -> Unit
 ) : Closeable {
+    private fun text(id: Int, vararg args: Any): String = stringProvider(id, args)
     private val running = AtomicBoolean(false)
     private var connection: UsbDeviceConnection? = null
     private var hciInterface: UsbInterface? = null
@@ -62,7 +65,7 @@ class HciUsbController(
     private fun runProbe() {
         try {
             open()
-            onStatus("HCI Reset…")
+            onStatus(text(R.string.dualsense_bridge_status_hci_reset))
             requireCommandComplete(0x0C03)
             onLog("HCI Reset → Success")
 
@@ -74,33 +77,33 @@ class HciUsbController(
             val address = requireCommandComplete(0x1009)
             if (address.size >= 7) onLog("Local Address → ${formatAddress(address, 1)}")
 
-            onStatus("Bluetooth Classic eszközök keresése…")
+            onStatus(text(R.string.dualsense_bridge_status_classic_scan))
             sendCommand(0x0401, byteArrayOf(0x33, 0x8B.toByte(), 0x9E.toByte(), 0x08, 0x00))
             val discovered = resolveRemoteNames(scanUntilComplete())
             discoveredDevices.clear()
             discovered.forEach { discoveredDevices[it.address] = it }
             enableIncomingConnections()
-            onStatus("A keresés kész. Válassz eszközt, vagy kapcsold be a párosított kontrollert.")
+            onStatus(text(R.string.dualsense_bridge_status_scan_finished))
             hostLoop()
         } catch (t: Throwable) {
             if (running.get()) {
                 onLog("HIBA: ${t.message ?: t.javaClass.simpleName}")
-                onStatus("A próba sikertelen.")
+                onStatus(text(R.string.dualsense_bridge_status_probe_failed))
             }
         }
     }
 
-    fun connect(address: String, name: String = "Párosított eszköz") {
+    fun connect(address: String, name: String = text(R.string.dualsense_bridge_paired_device)) {
         val current = activeDevice
         val handle = activeHandle
         if (handle != null && current?.address == address) {
             if (hidChannelsReady) {
-                onStatus("A DualSense már stabilan kapcsolódik.")
+                onStatus(text(R.string.dualsense_bridge_status_already_connected))
             } else if (!hasHidChannelProgress()) {
-                onStatus("A rádiós link él; HID csatornák helyreállítása…")
+                onStatus(text(R.string.dualsense_bridge_status_restoring_hid))
                 requestHidChannels(handle)
             } else {
-                onStatus("A kapcsolat felépítése már folyamatban van…")
+                onStatus(text(R.string.dualsense_bridge_status_connection_in_progress))
             }
             return
         }
@@ -114,7 +117,7 @@ class HciUsbController(
             rssi = null,
             name = name
         )
-        onStatus("Kapcsolódási kérelem előkészítve…")
+        onStatus(text(R.string.dualsense_bridge_status_preparing_connection))
     }
 
     @Volatile private var pendingDisconnectAddress: String? = null
@@ -154,7 +157,7 @@ class HciUsbController(
                 pendingConnection = null
                 runCatching { connectAndPair(target) }.onFailure {
                     onLog("HIBA: ${it.message ?: it.javaClass.simpleName}")
-                    onStatus("A kapcsolódás sikertelen.")
+                    onStatus(text(R.string.dualsense_bridge_status_connection_failed))
                     publishDevice(target, "Sikertelen")
                 }
             }
@@ -163,7 +166,7 @@ class HciUsbController(
             if (active != null && encryptedAtMs > 0 && !hidOpenAttempted &&
                 now - encryptedAtMs >= HID_OPEN_DELAY_MS
             ) {
-                onStatus("Rádiós link él; HID csatornák felépítése…")
+                onStatus(text(R.string.dualsense_bridge_status_opening_hid))
                 requestHidChannels(active)
             }
             if (active != null && hidOpenAttempted && !hidChannelsReady &&
@@ -172,7 +175,8 @@ class HciUsbController(
                 hidOpenRetries < HID_MAX_RETRIES
             ) {
                 hidOpenRetries++
-                onStatus("HID csatornanyitás újrapróbálása ($hidOpenRetries/$HID_MAX_RETRIES)…")
+                onStatus(text(R.string.dualsense_bridge_status_retrying_hid,
+                    hidOpenRetries, HID_MAX_RETRIES))
                 pendingChannels.clear()
                 pendingConfigs.clear()
                 requestHidChannels(active)
@@ -190,7 +194,7 @@ class HciUsbController(
                 lastHidInputMs == 0L &&
                 now - encryptedAtMs >= HID_START_TIMEOUT_MS
             ) {
-                onStatus("A link él, de a HID adatfolyam még nem indult el.")
+                onStatus(text(R.string.dualsense_bridge_status_no_hid_stream))
             }
             val event = readEvent(500) ?: continue
             when (event.code) {
@@ -202,7 +206,7 @@ class HciUsbController(
                         "%02X%02X%02X".format(
                             event.parameters[8].u8(), event.parameters[7].u8(), event.parameters[6].u8()
                         ),
-                        null, "Párosított DualSense"
+                        null, text(R.string.dualsense_bridge_paired_name)
                     )
                     onLog("Incoming Connection Request ← $address")
                     connectAndPair(known, incomingAddress = addressBytes)
@@ -221,7 +225,8 @@ class HciUsbController(
             val rssi = parameters[6].toInt()
             onDevice(HciDevice(
                 device.address, device.name ?: "DualSense", device.deviceClass,
-                rssi, paired = true, state = "Kapcsolódva • élő"
+                rssi, paired = true,
+                state = text(R.string.dualsense_bridge_state_connected_live)
             ))
         } else {
             // RSSI is diagnostic only. A transient command failure is not a
@@ -236,7 +241,8 @@ class HciUsbController(
         val reason = parameters[3].u8()
         val description = disconnectReason(reason)
         onLog("Disconnection Complete → handle=0x${handle.hex4()} reason=0x${reason.hex2()} ($description)")
-        if (activeHandle == handle) markDisconnected("Szétkapcsolva: $description (0x${reason.hex2()})")
+        if (activeHandle == handle) markDisconnected(text(
+            R.string.dualsense_bridge_status_disconnected_reason, description, reason.hex2()))
     }
 
     private fun markDisconnected(reason: String) {
@@ -256,7 +262,8 @@ class HciUsbController(
         onStatus(reason)
         if (device != null) onDevice(HciDevice(
             device.address, device.name ?: "DualSense", device.deviceClass,
-            null, paired = loadLinkKey(device.address) != null, state = "Nincs kapcsolat"
+            null, paired = loadLinkKey(device.address) != null,
+            state = text(R.string.dualsense_bridge_state_disconnected)
         ))
     }
 
@@ -297,7 +304,7 @@ class HciUsbController(
         onLog("Interface ${iface.id} claimed; event endpoint 0x${endpoint.address.toString(16)}")
         onLog("ACL endpoint 0x${bulkIn.address.toString(16)}; raw input monitor started")
         inputWorker = Thread(::inputDispatchLoop, "dualsense-input-dispatch").apply {
-            priority = Thread.NORM_PRIORITY
+            priority = Thread.MAX_PRIORITY
             start()
         }
         aclWorker = Thread(::aclReadLoop, "usb-hci-acl-in").apply {
@@ -311,7 +318,14 @@ class HciUsbController(
     private fun inputDispatchLoop() {
         while (running.get()) {
             try {
-                val packet = inputQueue.take()
+                var packet = inputQueue.take()
+                // Every DualSense input report is a complete state snapshot. If the
+                // consumer briefly stalls, replaying queued historical states makes
+                // buttons appear stuck long after they were released. Collapse any
+                // backlog and process only the newest available snapshot.
+                while (true) {
+                    packet = inputQueue.poll() ?: break
+                }
                 val startedAt = System.currentTimeMillis()
                 onAclPacket(packet)
                 val duration = System.currentTimeMillis() - startedAt
@@ -392,7 +406,8 @@ class HciUsbController(
                     hidChannelsReady = true
                     if (now - lastActiveDevicePublishMs >= DEVICE_PUBLISH_INTERVAL_MS) {
                         lastActiveDevicePublishMs = now
-                        activeDevice?.let { publishDevice(it, "Kapcsolódva • HID aktív", paired = true) }
+                        activeDevice?.let { publishDevice(it,
+                            text(R.string.dualsense_bridge_state_connected_hid), paired = true) }
                     }
                 }
                 enqueueInput(packet)
@@ -520,7 +535,8 @@ class HciUsbController(
         val resolved = devices.toMutableList()
         devices.filter { it.name.isNullOrBlank() }.forEachIndexed { index, device ->
             if (!running.get()) return resolved
-            onStatus("Eszköznév lekérése (${index + 1}/${devices.size})…")
+            onStatus(text(R.string.dualsense_bridge_status_resolving_name,
+                index + 1, devices.size))
             onLog("Remote Name Request → ${device.address}")
             val parameters = ByteArray(10)
             device.addressLittleEndian.copyInto(parameters)
@@ -564,8 +580,8 @@ class HciUsbController(
     }
 
     private fun connectAndPair(device: InquiryDevice, incomingAddress: ByteArray? = null) {
-        onStatus("Kapcsolódás: ${device.name}…")
-        publishDevice(device, "Kapcsolódás…")
+        onStatus(text(R.string.dualsense_bridge_status_connecting_device, device.name ?: "DualSense"))
+        publishDevice(device, text(R.string.dualsense_bridge_state_connecting))
         if (incomingAddress != null) {
             onLog("Accept Connection Request → ${device.address}")
             sendCommand(0x0409, incomingAddress + byteArrayOf(0x00))
@@ -603,11 +619,11 @@ class HciUsbController(
                         hidOpenAttempted = false
                         hidChannelsReady = false
                         hidOpenRetries = 0
-                        onStatus("A visszaállított link már titkosított; HID indítása…")
+                        onStatus(text(R.string.dualsense_bridge_status_restored_encrypted))
                         publishDevice(device, "Titkosítva • HID-re vár", paired = true)
                         return
                     }
-                    onStatus("DualSense kapcsolódott; párosítás…")
+                    onStatus(text(R.string.dualsense_bridge_status_pairing))
                     publishDevice(device, "Hitelesítés…")
                     sendCommand(0x0411, byteArrayOf(
                         (connectionHandle and 0xFF).toByte(),
@@ -637,7 +653,7 @@ class HciUsbController(
                             hidOpenAttempted = false
                             hidChannelsReady = false
                             hidOpenRetries = 0
-                            onStatus("Titkosított link kész; HID indítása…")
+                            onStatus(text(R.string.dualsense_bridge_status_encrypted))
                             publishDevice(device, "Titkosítva • HID-re vár", paired = true)
                             return
                         }
@@ -682,13 +698,14 @@ class HciUsbController(
                 }
                 0x05 -> {
                     val reason = event.parameters.getOrNull(3)?.u8() ?: -1
-                    markDisconnected("Szétkapcsolva (0x${reason.hex2()})")
+                    markDisconnected(text(R.string.dualsense_bridge_status_disconnected_code,
+                        reason.hex2()))
                     error("Disconnected: reason=0x${reason.hex2()}")
                 }
             }
         }
         if (pairingComplete) {
-            onStatus("DualSense párosítva; titkosítási eseményre vár.")
+            onStatus(text(R.string.dualsense_bridge_status_paired))
         } else {
             error("Kapcsolódási/párosítási időtúllépés")
         }
@@ -715,13 +732,14 @@ class HciUsbController(
 
     private fun reportDevice(address: String, deviceClass: String, rssi: Int?, name: String?) {
         val label = buildString {
-            append(name ?: "Ismeretlen eszköz")
+            append(name ?: text(R.string.dualsense_bridge_unknown_device))
             append(" — $address, class=$deviceClass")
             if (rssi != null) append(", RSSI=$rssi dBm")
         }
         onDevice(HciDevice(
-            address, name ?: "Ismeretlen eszköz", deviceClass, rssi,
-            paired = loadLinkKey(address) != null, state = "Elérhető"
+            address, name ?: text(R.string.dualsense_bridge_unknown_device), deviceClass, rssi,
+            paired = loadLinkKey(address) != null,
+            state = text(R.string.dualsense_bridge_state_available)
         ))
         onLog("Inquiry Result → $label")
     }
@@ -732,7 +750,7 @@ class HciUsbController(
         paired: Boolean = loadLinkKey(device.address) != null
     ) {
         onDevice(HciDevice(
-            device.address, device.name ?: "Ismeretlen eszköz", device.deviceClass,
+            device.address, device.name ?: text(R.string.dualsense_bridge_unknown_device), device.deviceClass,
             device.rssi, paired, state
         ))
     }
@@ -849,15 +867,16 @@ class HciUsbController(
                             hidOpenAttemptAtMs = System.currentTimeMillis()
                             onStatus(
                                 when (status) {
-                                    0x0001 -> "HID csatorna: hitelesítés folyamatban…"
-                                    0x0002 -> "HID csatorna: engedélyezés folyamatban…"
-                                    else -> "HID csatorna függőben…"
+                                    0x0001 -> text(R.string.dualsense_bridge_status_hid_authentication)
+                                    0x0002 -> text(R.string.dualsense_bridge_status_hid_authorization)
+                                    else -> text(R.string.dualsense_bridge_status_hid_pending)
                                 }
                             )
                         }
                         else -> {
                             pendingChannels.remove(id)
-                            onStatus("HID csatornanyitás elutasítva: 0x${result.hex4()}")
+                            onStatus(text(R.string.dualsense_bridge_status_hid_rejected,
+                                result.hex4()))
                         }
                     }
                 }
@@ -881,14 +900,14 @@ class HciUsbController(
                     if (result == 0 && channel != null) {
                         pendingConfigs.remove(id)
                         if (channel.psm == 0x0011) {
-                            onStatus("HID Control kész; Interrupt csatorna nyitása…")
+                            onStatus(text(R.string.dualsense_bridge_status_hid_control_ready))
                             if (pendingChannels.values.none { it.psm == 0x0013 } &&
                                 channelsByLocalCid.values.none { it.psm == 0x0013 }
                             ) requestL2capChannel(handle, 0x0013)
                         } else if (channel.psm == 0x0013) {
                             hidInterruptRemoteCid = channel.remoteCid
                             hidChannelsReady = true
-                            onStatus("HID csatornák készek; input reportokra vár…")
+                            onStatus(text(R.string.dualsense_bridge_status_hid_waiting))
                             channelsByLocalCid.values.firstOrNull { it.psm == 0x0011 }
                                 ?.remoteCid?.let { controlCid ->
                                     sendAcl(handle, controlCid, byteArrayOf(0x71))

@@ -29,6 +29,8 @@ import com.limelight.binding.video.CrashListener;
 import com.limelight.binding.video.MediaCodecDecoderRenderer;
 import com.limelight.binding.video.MediaCodecHelper;
 import com.limelight.binding.video.PerfOverlayListener;
+import com.limelight.dualsense.DualSenseBridge;
+import com.example.usbbtonandroid.DualSenseInput;
 import com.limelight.nvstream.NvConnection;
 import com.limelight.nvstream.NvConnectionListener;
 import com.limelight.nvstream.StreamConfiguration;
@@ -240,6 +242,21 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     private boolean floatingButtonShown;
     private boolean overlayToggleZoomButtonShown;
     private TextView notificationOverlayView;
+    private TextView controllerLowBatteryOverlayView;
+    private boolean controllerBatteryWasLow;
+    private long lastControllerLowBatteryWarningMs;
+    private static final int CONTROLLER_LOW_BATTERY_PERCENT = 15;
+    private static final long CONTROLLER_LOW_BATTERY_REMINDER_MS = 5 * 60 * 1000L;
+    private final Runnable hideControllerLowBatteryOverlay = () -> {
+        if (controllerLowBatteryOverlayView != null) {
+            controllerLowBatteryOverlayView.animate().cancel();
+            controllerLowBatteryOverlayView.animate().alpha(0f).setDuration(250L)
+                    .withEndAction(() -> controllerLowBatteryOverlayView.setVisibility(View.GONE))
+                    .start();
+        }
+    };
+    private final DualSenseBridge.InputListener controllerBatteryInputListener =
+            this::handleControllerBatteryInput;
     private int requestedNotificationOverlayVisibility = View.GONE;
     private View performanceOverlayView;
 
@@ -536,6 +553,8 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         }
 
         notificationOverlayView = findViewById(R.id.notificationOverlay);
+        controllerLowBatteryOverlayView = findViewById(R.id.controllerLowBatteryOverlay);
+        DualSenseBridge.addInputListener(controllerBatteryInputListener);
 
         performanceOverlayView = findViewById(R.id.performanceOverlay);
 
@@ -1725,6 +1744,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
     @Override
     protected void onDestroy() {
+        DualSenseBridge.removeInputListener(controllerBatteryInputListener);
         super.onDestroy();
 
         instance = null;
@@ -1765,6 +1785,42 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         // Destroy the capture provider
         inputCaptureProvider.destroy();
         streamContainer.onDestroy();
+    }
+
+    private void handleControllerBatteryInput(DualSenseInput input) {
+        int percent = input.getBatteryPercent();
+        boolean warningEnabled = DualSenseBridge.isLowBatteryBlinkEnabled(this);
+        boolean batteryLow = warningEnabled && percent >= 0 &&
+                percent < CONTROLLER_LOW_BATTERY_PERCENT;
+        long now = android.os.SystemClock.elapsedRealtime();
+
+        if (batteryLow && (!controllerBatteryWasLow ||
+                now - lastControllerLowBatteryWarningMs >= CONTROLLER_LOW_BATTERY_REMINDER_MS)) {
+            controllerBatteryWasLow = true;
+            lastControllerLowBatteryWarningMs = now;
+            runOnUiThread(() -> showControllerLowBatteryOverlay(percent));
+        }
+        else if (!batteryLow && controllerBatteryWasLow) {
+            controllerBatteryWasLow = false;
+            runOnUiThread(() -> {
+                if (timerHandler != null) {
+                    timerHandler.removeCallbacks(hideControllerLowBatteryOverlay);
+                }
+                hideControllerLowBatteryOverlay.run();
+            });
+        }
+    }
+
+    private void showControllerLowBatteryOverlay(int percent) {
+        if (controllerLowBatteryOverlayView == null || isFinishing()) return;
+        controllerLowBatteryOverlayView.animate().cancel();
+        controllerLowBatteryOverlayView.setText(
+                getString(R.string.dualsense_controller_low_battery_overlay, percent));
+        controllerLowBatteryOverlayView.setAlpha(0f);
+        controllerLowBatteryOverlayView.setVisibility(View.VISIBLE);
+        controllerLowBatteryOverlayView.animate().alpha(0.92f).setDuration(180L).start();
+        timerHandler.removeCallbacks(hideControllerLowBatteryOverlay);
+        timerHandler.postDelayed(hideControllerLowBatteryOverlay, 5000L);
     }
 
     @Override

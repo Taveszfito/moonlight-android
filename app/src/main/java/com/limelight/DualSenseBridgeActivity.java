@@ -92,12 +92,12 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
         TextView title = text(getString(R.string.dualsense_bridge_title), 25, Color.WHITE);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         heading.addView(title);
-        heading.addView(text("External Bluetooth controller connection", 13, TEXT_SECONDARY));
+        heading.addView(text(getString(R.string.dualsense_bridge_subtitle), 13, TEXT_SECONDARY));
         header.addView(heading, weighted());
         header.addView(iconButton(android.R.drawable.ic_menu_manage,
-                "Controller test tools", v -> togglePanel(toolsPanel)));
+                getString(R.string.dualsense_bridge_tools), v -> togglePanel(toolsPanel)));
         header.addView(iconButton(android.R.drawable.ic_menu_info_details,
-                "Connection diagnostics", v -> {
+                getString(R.string.dualsense_bridge_diagnostics), v -> {
                     togglePanel(diagnosticsPanel);
                     if (diagnosticsPanel.getVisibility() == View.VISIBLE) {
                         logView.setText(DualSenseBridge.getLog());
@@ -115,7 +115,7 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
         controllerIcon.setGravity(Gravity.CENTER);
         stateRow.addView(controllerIcon, new LinearLayout.LayoutParams(dp(52), dp(52)));
         LinearLayout stateTexts = vertical();
-        statusTitle = text("Not connected", 18, Color.WHITE);
+        statusTitle = text(getString(R.string.dualsense_bridge_not_connected), 18, Color.WHITE);
         statusTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         statusDetails = text("", 13, TEXT_SECONDARY);
         statusDetails.setPadding(0, dp(3), 0, 0);
@@ -129,15 +129,15 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
         LinearLayout hostModeRow = horizontal();
         hostModeRow.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout hostModeText = vertical();
-        TextView hostModeTitle = text("PlayStation host mode", 15, Color.WHITE);
+        TextView hostModeTitle = text(getString(R.string.dualsense_bridge_host_mode), 15, Color.WHITE);
         hostModeTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         hostModeText.addView(hostModeTitle);
         hostModeText.addView(text(
-                "Expose native gyro and motion support; off uses Xbox compatibility mode",
+                getString(R.string.dualsense_bridge_host_mode_summary),
                 12, TEXT_SECONDARY));
         hostModeRow.addView(hostModeText, weighted());
         Switch hostModeSwitch = new Switch(this);
-        hostModeSwitch.setContentDescription("PlayStation host mode");
+        hostModeSwitch.setContentDescription(getString(R.string.dualsense_bridge_host_mode));
         hostModeSwitch.setChecked(DualSenseBridge.HOST_MODE_PLAYSTATION.equals(
                 DualSenseBridge.getHostControllerMode()));
         hostModeSwitch.setOnCheckedChangeListener((button, checked) ->
@@ -148,6 +148,45 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
         hostModeRow.setPadding(0, dp(12), 0, dp(2));
         connection.addView(hostModeRow);
 
+        LinearLayout batteryLedRow = horizontal();
+        batteryLedRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout batteryLedText = vertical();
+        TextView batteryLedTitle = text(getString(R.string.dualsense_bridge_battery_led),
+                15, Color.WHITE);
+        batteryLedTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        batteryLedText.addView(batteryLedTitle);
+        batteryLedText.addView(text(getString(R.string.dualsense_bridge_battery_led_summary),
+                12, TEXT_SECONDARY));
+        batteryLedRow.addView(batteryLedText, weighted());
+        Switch batteryLedSwitch = new Switch(this);
+        batteryLedSwitch.setContentDescription(getString(R.string.dualsense_bridge_battery_led));
+        batteryLedSwitch.setChecked(DualSenseBridge.isBatteryLedEnabled(this));
+        batteryLedSwitch.setOnCheckedChangeListener((button, checked) ->
+                DualSenseBridge.setBatteryLedEnabled(checked));
+        batteryLedRow.addView(batteryLedSwitch);
+        batteryLedRow.setPadding(0, dp(12), 0, dp(2));
+        connection.addView(batteryLedRow);
+
+        LinearLayout lowBatteryRow = horizontal();
+        lowBatteryRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout lowBatteryText = vertical();
+        TextView lowBatteryTitle = text(getString(R.string.dualsense_bridge_low_battery_blink),
+                15, Color.WHITE);
+        lowBatteryTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        lowBatteryText.addView(lowBatteryTitle);
+        lowBatteryText.addView(text(getString(R.string.dualsense_bridge_low_battery_blink_summary),
+                12, TEXT_SECONDARY));
+        lowBatteryRow.addView(lowBatteryText, weighted());
+        Switch lowBatterySwitch = new Switch(this);
+        lowBatterySwitch.setContentDescription(
+                getString(R.string.dualsense_bridge_low_battery_blink));
+        lowBatterySwitch.setChecked(DualSenseBridge.isLowBatteryBlinkEnabled(this));
+        lowBatterySwitch.setOnCheckedChangeListener((button, checked) ->
+                DualSenseBridge.setLowBatteryBlinkEnabled(checked));
+        lowBatteryRow.addView(lowBatterySwitch);
+        lowBatteryRow.setPadding(0, dp(12), 0, dp(2));
+        connection.addView(lowBatteryRow);
+
         Button scan = actionButton(getString(R.string.dualsense_bridge_scan), true,
                 v -> DualSenseBridge.scan(this));
         scan.setCompoundDrawablesWithIntrinsicBounds(android.R.drawable.ic_menu_search, 0, 0, 0);
@@ -155,22 +194,22 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
         connection.addView(scan, match(dp(14)));
 
         LinearLayout secondaryActions = horizontal();
-        secondaryActions.addView(actionButton("Reset adapter", false,
+        secondaryActions.addView(actionButton(getString(R.string.dualsense_bridge_reset_adapter), false,
                 v -> DualSenseBridge.reset(this)), weightedWithMargin());
-        secondaryActions.addView(actionButton("Disconnect", false,
+        secondaryActions.addView(actionButton(getString(R.string.dualsense_bridge_disconnect), false,
                 v -> DualSenseBridge.disconnectBridge()), weightedWithMargin());
         connection.addView(secondaryActions);
         root.addView(connection, match(dp(12)));
 
-        root.addView(sectionTitle("Available & saved devices",
-                "Select a controller to connect through the USB Bluetooth adapter"));
+        root.addView(sectionTitle(getString(R.string.dualsense_bridge_devices_title),
+                getString(R.string.dualsense_bridge_devices_summary)));
         deviceContainer = vertical();
         root.addView(deviceContainer);
 
         diagnosticsPanel = card();
         diagnosticsPanel.setVisibility(View.GONE);
-        diagnosticsPanel.addView(panelHeader("Connection diagnostics",
-                "Live input and low-level HCI log", diagnosticsPanel));
+        diagnosticsPanel.addView(panelHeader(getString(R.string.dualsense_bridge_diagnostics),
+                getString(R.string.dualsense_bridge_diagnostics_summary), diagnosticsPanel));
         inputView = text("", 13, Color.WHITE);
         inputView.setPadding(0, dp(8), 0, dp(12));
         diagnosticsPanel.addView(inputView);
@@ -229,7 +268,8 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
         if (statusTitle == null) return;
         boolean connected = DualSenseBridge.getControllerConnected();
         DualSenseInput input = DualSenseBridge.getLatestInput();
-        statusTitle.setText(connected ? "DualSense connected" : "No controller connected");
+        statusTitle.setText(connected ? R.string.dualsense_bridge_connected :
+                R.string.dualsense_bridge_not_connected);
         statusTitle.setTextColor(connected ? CONNECTED : Color.WHITE);
         statusDetails.setText(DualSenseBridge.getStatus());
         if (connected && input.getBatteryPercent() >= 0) {
@@ -259,8 +299,8 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
         deviceContainer.removeAllViews();
         if (devices.isEmpty()) {
             LinearLayout empty = card();
-            empty.addView(text("No controllers found", 16, Color.WHITE));
-            TextView hint = text("Put the controller into pairing mode, then tap Find devices.",
+            empty.addView(text(getString(R.string.dualsense_bridge_no_controllers), 16, Color.WHITE));
+            TextView hint = text(getString(R.string.dualsense_bridge_pairing_hint),
                     13, TEXT_SECONDARY);
             hint.setPadding(0, dp(5), 0, 0);
             empty.addView(hint);
@@ -290,7 +330,7 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
                     view -> DualSenseBridge.reconnect(device.getAddress(), device.getName())),
                     weightedWithMargin());
             if (device.getPaired()) {
-                deviceActions.addView(actionButton("Forget", false,
+                deviceActions.addView(actionButton(getString(R.string.dualsense_bridge_forget), false,
                         view -> DualSenseBridge.forgetDevice(device.getAddress())),
                         weightedWithMargin());
             }
