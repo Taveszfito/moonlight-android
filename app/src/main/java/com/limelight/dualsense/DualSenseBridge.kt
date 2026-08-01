@@ -457,10 +457,14 @@ object DualSenseBridge {
             },
             { address -> keyPrefs().getString(address, null) },
             { address, key -> keyPrefs().edit().putString(address, key).apply() }
-        ).also { it.start(fastRecovery) }
+        ).also { it.start() }
     }
 
     private fun beginSmartRecovery() {
+        // Never restart or rebuild the link while the first HID session is still
+        // being negotiated. The standalone implementation simply waits here and
+        // reliably reaches its first input report.
+        if (!controllerConnected && lastInputAtMs == 0L) return
         if (smartRecoveryInProgress) return
         smartRecoveryInProgress = true
         adapterRecoveryPerformed = false

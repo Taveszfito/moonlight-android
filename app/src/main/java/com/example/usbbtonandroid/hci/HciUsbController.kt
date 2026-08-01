@@ -43,7 +43,6 @@ class HciUsbController(
     @Volatile private var pendingConnection: InquiryDevice? = null
     @Volatile private var pendingDiscovery = false
     @Volatile private var pendingLinkRecovery = false
-    @Volatile private var fastRecoveryStartup = false
     @Volatile private var activeDevice: InquiryDevice? = null
     @Volatile private var activeHandle: Int? = null
     @Volatile private var encryptedAtMs = 0L
@@ -51,10 +50,12 @@ class HciUsbController(
     @Volatile private var hidOpenAttempted = false
     @Volatile private var hidOpenAttemptAtMs = 0L
     @Volatile private var hidChannelsReady = false
+    @Volatile private var hidControlReady = false
     @Volatile private var hidReadyAtMs = 0L
-    @Volatile private var hidStartupRecoveryTriggered = false
     @Volatile private var hidChannelReopenAtMs = 0L
+    @Volatile private var hidInterruptReopenAtMs = 0L
     private var hidOpenRetries = 0
+    private var hidInterruptOpenRetries = 0
     private var nextSignalId = 0x40
     private var nextLocalCid = 0x0040
     @Volatile private var hidInterruptRemoteCid: Int? = null
@@ -73,15 +74,17 @@ class HciUsbController(
     @Volatile private var lastIncidentAtMs = 0L
     @Volatile private var lastIncidentType = INCIDENT_NONE
     @Volatile private var lastIncidentDurationMs = 0L
+    @Volatile private var postConnectTuningStage = 0
+    @Volatile private var postConnectTuningAtMs = 0L
+    @Volatile private var lastExitLowPowerModeAtMs = 0L
     // Signaling is received on the ACL reader while fallback/recovery runs on
     // the HCI event worker. These maps must never be ordinary mutable maps.
     private val pendingChannels = ConcurrentHashMap<Int, L2capChannel>()
     private val pendingConfigs = ConcurrentHashMap<Int, L2capChannel>()
     private val channelsByLocalCid = ConcurrentHashMap<Int, L2capChannel>()
 
-    fun start(fastRecovery: Boolean = false) {
+    fun start() {
         if (!running.compareAndSet(false, true)) return
-        fastRecoveryStartup = fastRecovery
         worker = Thread(::runProbe, "usb-hci-probe").also { it.start() }
     }
 
@@ -100,19 +103,16 @@ class HciUsbController(
             val address = requireCommandComplete(0x1009)
             if (address.size >= 7) onLog("Local Address → ${formatAddress(address, 1)}")
 
-            if (fastRecoveryStartup) {
-                enableIncomingConnections()
-                onStatus(text(R.string.dualsense_bridge_status_recovery_waiting))
-                onLog("Fast recovery ready → page scan enabled; waiting for paired controller")
-            } else {
-                onStatus(text(R.string.dualsense_bridge_status_classic_scan))
-                sendCommand(0x0401, byteArrayOf(0x33, 0x8B.toByte(), 0x9E.toByte(), 0x08, 0x00))
-                val discovered = resolveRemoteNames(scanUntilComplete())
-                discoveredDevices.clear()
-                discovered.forEach { discoveredDevices[it.address] = it }
-                enableIncomingConnections()
-                onStatus(text(R.string.dualsense_bridge_status_scan_finished))
-            }
+            // Always use the proven standalone startup path. Skipping inquiry on
+            // recovery leaves cheap HCI dongles with stale page/clock state and
+            // produces an ACL link that often never becomes a usable HID session.
+            onStatus(text(R.string.dualsense_bridge_status_classic_scan))
+            sendCommand(0x0401, byteArrayOf(0x33, 0x8B.toByte(), 0x9E.toByte(), 0x08, 0x00))
+            val discovered = resolveRemoteNames(scanUntilComplete())
+            discoveredDevices.clear()
+            discovered.forEach { discoveredDevices[it.address] = it }
+            enableIncomingConnections()
+            onStatus(text(R.string.dualsense_bridge_status_scan_finished))
             hostLoop()
         } catch (t: Throwable) {
             if (running.get()) {
@@ -156,7 +156,9 @@ class HciUsbController(
     }
 
     fun requestLinkRecovery() {
-        pendingLinkRecovery = true
+        // Recovery is only allowed after this session has delivered real input.
+        // During first connection it must not tear down a valid-but-slow HID pair.
+        if (lastHidInputMs != 0L) pendingLinkRecovery = true
     }
 
     fun requestDiscovery() {
@@ -225,6 +227,11 @@ class HciUsbController(
             }
             val now = System.currentTimeMillis()
             val active = activeHandle
+            if (active != null && postConnectTuningStage != 0 &&
+                now >= postConnectTuningAtMs
+            ) {
+                applyNextPostConnectTuning(active, now)
+            }
             if (active != null && hidChannelReopenAtMs != 0L && now >= hidChannelReopenAtMs) {
                 hidChannelReopenAtMs = 0L
                 hidOpenAttempted = false
@@ -249,17 +256,24 @@ class HciUsbController(
                 pendingConfigs.clear()
                 requestHidChannels(active)
             }
-            if (active != null && hidChannelsReady && lastHidInputMs == 0L &&
-                hidReadyAtMs != 0L
+            if (active != null && hidInterruptReopenAtMs != 0L &&
+                now >= hidInterruptReopenAtMs
             ) {
-                val readyForMs = now - hidReadyAtMs
-                if (!hidStartupRecoveryTriggered &&
-                    readyForMs >= HID_INPUT_START_RECOVERY_MS) {
-                    hidStartupRecoveryTriggered = true
-                    onStatus(text(R.string.dualsense_bridge_status_hid_no_input_recovery))
-                    onLog("HID startup watchdog → no input for $readyForMs ms; recovering link")
-                    pendingLinkRecovery = true
-                }
+                hidInterruptReopenAtMs = 0L
+                onLog("HID Interrupt retry → opening clean channel")
+                requestL2capChannel(active, 0x0013)
+            }
+            if (active != null && hidControlReady && !hidChannelsReady &&
+                lastHidInputMs == 0L &&
+                now - hidOpenAttemptAtMs >= HID_INTERRUPT_STAGE_TIMEOUT_MS &&
+                hidInterruptOpenRetries < HID_MAX_RETRIES
+            ) {
+                hidInterruptOpenRetries++
+                onLog(
+                    "HID Interrupt stage timeout → retry " +
+                        "$hidInterruptOpenRetries/$HID_MAX_RETRIES"
+                )
+                retryInterruptChannel(active)
             }
             activeHandle?.let { handle ->
                 // Never issue diagnostic HCI commands while the real-time HID stream is
@@ -292,6 +306,7 @@ class HciUsbController(
                     connectAndPair(known, incomingAddress = addressBytes)
                 }
                 0x05 -> handleDisconnection(event.parameters)
+                0x14 -> handleModeChange(event.parameters)
                 0x0E -> handleLinkCheckResult(event.parameters)
             }
         }
@@ -349,10 +364,15 @@ class HciUsbController(
         hidOpenAttempted = false
         hidOpenAttemptAtMs = 0
         hidChannelsReady = false
+        hidControlReady = false
         hidReadyAtMs = 0L
-        hidStartupRecoveryTriggered = false
         hidChannelReopenAtMs = 0L
+        hidInterruptReopenAtMs = 0L
         hidOpenRetries = 0
+        hidInterruptOpenRetries = 0
+        postConnectTuningStage = 0
+        postConnectTuningAtMs = 0L
+        lastExitLowPowerModeAtMs = 0L
         pendingChannels.clear()
         pendingConfigs.clear()
         channelsByLocalCid.clear()
@@ -573,7 +593,13 @@ class HciUsbController(
                 if (isHidInput) {
                     val previousHidInputMs = lastHidInputMs
                     lastHidInputMs = now
-                    hidStartupRecoveryTriggered = false
+                    if (previousHidInputMs == 0L) {
+                        // Keep all optional radio tuning out of pairing and L2CAP
+                        // negotiation. Enable it only after a real input report
+                        // proves the complete HID path is operational.
+                        postConnectTuningStage = 1
+                        postConnectTuningAtMs = now
+                    }
                     lastHidInputElapsedMs = SystemClock.elapsedRealtime()
                     if (previousHidInputMs != 0L) {
                         val interval = now - previousHidInputMs
@@ -805,7 +831,9 @@ class HciUsbController(
                         lastHidInputMs = 0
                         hidOpenAttempted = false
                         hidChannelsReady = false
+                        hidControlReady = false
                         hidOpenRetries = 0
+                        hidInterruptOpenRetries = 0
                         onStatus(text(R.string.dualsense_bridge_status_restored_encrypted))
                         publishDevice(device, "Titkosítva • HID-re vár", paired = true)
                         return
@@ -839,7 +867,9 @@ class HciUsbController(
                             lastHidInputMs = 0
                             hidOpenAttempted = false
                             hidChannelsReady = false
+                            hidControlReady = false
                             hidOpenRetries = 0
+                            hidInterruptOpenRetries = 0
                             onStatus(text(R.string.dualsense_bridge_status_encrypted))
                             publishDevice(device, "Titkosítva • HID-re vár", paired = true)
                             return
@@ -1089,6 +1119,8 @@ class HciUsbController(
                     if (result == 0 && channel != null) {
                         pendingConfigs.remove(id)
                         if (channel.psm == 0x0011) {
+                            hidControlReady = true
+                            hidOpenAttemptAtMs = System.currentTimeMillis()
                             onStatus(text(R.string.dualsense_bridge_status_hid_control_ready))
                             if (pendingChannels.values.none { it.psm == 0x0013 } &&
                                 channelsByLocalCid.values.none { it.psm == 0x0013 }
@@ -1096,9 +1128,9 @@ class HciUsbController(
                         } else if (channel.psm == 0x0013) {
                             hidInterruptRemoteCid = channel.remoteCid
                             hidChannelsReady = true
+                            hidInterruptOpenRetries = 0
                             outputConnectionEpoch++
                             hidReadyAtMs = System.currentTimeMillis()
-                            hidStartupRecoveryTriggered = false
                             onStatus(text(R.string.dualsense_bridge_status_hid_waiting))
                             channelsByLocalCid.values.firstOrNull { it.psm == 0x0011 }
                                 ?.remoteCid?.let { controlCid ->
@@ -1166,15 +1198,17 @@ class HciUsbController(
         channelsByLocalCid.entries.removeIf { it.value.psm == 0x0011 || it.value.psm == 0x0013 }
         hidInterruptRemoteCid = null
         hidChannelsReady = false
+        hidControlReady = false
         hidReadyAtMs = 0L
-        hidStartupRecoveryTriggered = false
         lastHidInputMs = 0L
         hidOpenRetries = 0
+        hidInterruptOpenRetries = 0
         // Keep the normal opener dormant until the controller has acknowledged
         // the old channel teardown, then negotiate a clean control/interrupt pair.
         hidOpenAttempted = true
         hidOpenAttemptAtMs = System.currentTimeMillis()
         hidChannelReopenAtMs = hidOpenAttemptAtMs + HID_CHANNEL_REOPEN_DELAY_MS
+        hidInterruptReopenAtMs = 0L
         onStatus(text(R.string.dualsense_bridge_status_recovery_waiting))
     }
 
@@ -1184,6 +1218,7 @@ class HciUsbController(
             channelsByLocalCid.values.any { it.psm == 0x0011 || it.psm == 0x0013 }
 
     private fun requestL2capChannel(handle: Int, psm: Int) {
+        hidOpenAttemptAtMs = System.currentTimeMillis()
         val localCid = nextLocalCid++
         val id = nextSignalId++ and 0xFF
         pendingChannels[id] = L2capChannel(psm, localCid, null)
@@ -1196,6 +1231,7 @@ class HciUsbController(
     }
 
     private fun sendConfigRequest(handle: Int, remoteCid: Int, channel: L2capChannel) {
+        hidOpenAttemptAtMs = System.currentTimeMillis()
         val id = nextSignalId++ and 0xFF
         pendingConfigs[id] = channel
         sendAcl(handle, 0x0001, byteArrayOf(
@@ -1203,6 +1239,77 @@ class HciUsbController(
             remoteCid.toByte(), (remoteCid ushr 8).toByte(),
             0x00, 0x00
         ))
+    }
+
+    private fun applyNextPostConnectTuning(handle: Int, now: Long) {
+        val handleBytes = byteArrayOf(handle.toByte(), (handle ushr 8).toByte())
+        when (postConnectTuningStage) {
+            1 -> {
+                // Disable Hold/Sniff/Park entry after HID is fully live. This
+                // matches a desktop-style always-active game controller link.
+                runCatching {
+                    sendCommand(0x080D, handleBytes + byteArrayOf(0x00, 0x00))
+                }.onSuccess {
+                    onLog("Live HID link policy → active/low latency")
+                }.onFailure {
+                    onLog("Live link policy failed: ${it.message}")
+                }
+                postConnectTuningStage = 2
+                postConnectTuningAtMs = now + POST_CONNECT_COMMAND_GAP_MS
+            }
+            2 -> {
+                // 12.8 s supervision timeout tolerates short radio/USB stalls
+                // without declaring the controller disconnected.
+                runCatching {
+                    sendCommand(0x0C37, handleBytes + byteArrayOf(0x00, 0x50))
+                }.onSuccess {
+                    onLog("Live link supervision timeout → 12.8 s")
+                }.onFailure {
+                    onLog("Live supervision setup failed: ${it.message}")
+                }
+                postConnectTuningStage = 0
+                postConnectTuningAtMs = 0L
+            }
+        }
+    }
+
+    private fun handleModeChange(parameters: ByteArray) {
+        if (parameters.size < 4 || parameters[0].u8() != 0) return
+        val handle = parameters.le16(1) and 0x0FFF
+        val mode = parameters[3].u8()
+        if (handle != activeHandle || mode == 0 || lastHidInputMs == 0L) return
+        val now = System.currentTimeMillis()
+        if (now - lastExitLowPowerModeAtMs < EXIT_LOW_POWER_RETRY_MS) return
+        lastExitLowPowerModeAtMs = now
+        runCatching {
+            sendCommand(0x0804, byteArrayOf(handle.toByte(), (handle ushr 8).toByte()))
+        }.onSuccess {
+            onLog("Live HID entered low-power mode $mode → requesting active mode")
+        }.onFailure {
+            onLog("Unable to restore active HID mode: ${it.message}")
+        }
+    }
+
+    private fun retryInterruptChannel(handle: Int) {
+        val staleInterruptChannels = channelsByLocalCid.values.filter { it.psm == 0x0013 }
+        staleInterruptChannels.forEach { channel ->
+            channel.remoteCid?.let { remoteCid ->
+                val id = nextSignalId++ and 0xFF
+                runCatching {
+                    sendAcl(handle, 0x0001, byteArrayOf(
+                        0x06, id.toByte(), 0x04, 0x00,
+                        remoteCid.toByte(), (remoteCid ushr 8).toByte(),
+                        channel.localCid.toByte(), (channel.localCid ushr 8).toByte()
+                    ))
+                }
+            }
+        }
+        pendingChannels.entries.removeIf { it.value.psm == 0x0013 }
+        pendingConfigs.entries.removeIf { it.value.psm == 0x0013 }
+        channelsByLocalCid.entries.removeIf { it.value.psm == 0x0013 }
+        hidInterruptRemoteCid = null
+        hidOpenAttemptAtMs = System.currentTimeMillis()
+        hidInterruptReopenAtMs = hidOpenAttemptAtMs + HID_CHANNEL_REOPEN_DELAY_MS
     }
 
     private fun readEvent(timeoutMs: Int): HciEvent? {
@@ -1315,14 +1422,16 @@ class HciUsbController(
         private const val REMOTE_NAME_TIMEOUT_MS = 8_000
         private const val CONNECTION_TIMEOUT_MS = 45_000
         private const val LINK_CHECK_INTERVAL_MS = 3_000L
+        private const val POST_CONNECT_COMMAND_GAP_MS = 500L
+        private const val EXIT_LOW_POWER_RETRY_MS = 2_000L
         private const val HID_OPEN_DELAY_MS = 750L
         private const val HID_CHANNEL_REOPEN_DELAY_MS = 350L
         // BlueZ does not tear down a valid HID channel pair merely because the
         // controller has not emitted its first report yet. Allow slow controller
         // wake-up and cheap dongle firmware substantially more time.
-        private const val HID_INPUT_START_RECOVERY_MS = 15_000L
         private const val HID_START_TIMEOUT_MS = 6_000L
         private const val HID_RETRY_INTERVAL_MS = 3_000L
+        private const val HID_INTERRUPT_STAGE_TIMEOUT_MS = 3_000L
         private const val HID_MAX_RETRIES = 3
         private const val MAX_ACL_PAYLOAD = 4096
         private const val MAX_USB_CARRY_BYTES = 8192
