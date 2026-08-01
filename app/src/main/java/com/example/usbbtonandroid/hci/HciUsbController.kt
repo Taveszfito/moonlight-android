@@ -6,6 +6,7 @@ import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
+import android.os.SystemClock
 import com.limelight.R
 import java.io.Closeable
 import java.util.concurrent.ArrayBlockingQueue
@@ -33,9 +34,16 @@ class HciUsbController(
     private var worker: Thread? = null
     private var aclWorker: Thread? = null
     private var inputWorker: Thread? = null
+    private var outputWorker: Thread? = null
     private val inputQueue = ArrayBlockingQueue<AclPacket>(INPUT_QUEUE_CAPACITY)
+    private val outputSignal = ArrayBlockingQueue<Unit>(1)
+    @Volatile private var latestOutputConfig: com.example.usbbtonandroid.DualSenseOutputConfig? = null
+    @Volatile private var outputConnectionEpoch = 0L
     private val discoveredDevices = linkedMapOf<String, InquiryDevice>()
     @Volatile private var pendingConnection: InquiryDevice? = null
+    @Volatile private var pendingDiscovery = false
+    @Volatile private var pendingLinkRecovery = false
+    @Volatile private var fastRecoveryStartup = false
     @Volatile private var activeDevice: InquiryDevice? = null
     @Volatile private var activeHandle: Int? = null
     @Volatile private var encryptedAtMs = 0L
@@ -43,22 +51,37 @@ class HciUsbController(
     @Volatile private var hidOpenAttempted = false
     @Volatile private var hidOpenAttemptAtMs = 0L
     @Volatile private var hidChannelsReady = false
+    @Volatile private var hidReadyAtMs = 0L
+    @Volatile private var hidStartupRecoveryTriggered = false
+    @Volatile private var hidChannelReopenAtMs = 0L
     private var hidOpenRetries = 0
     private var nextSignalId = 0x40
     private var nextLocalCid = 0x0040
     @Volatile private var hidInterruptRemoteCid: Int? = null
     private var outputSequence = 0
+    @Volatile private var lastOutputErrorLogMs = 0L
     private var droppedInputPackets = 0L
     @Volatile private var lastActiveDevicePublishMs = 0L
     @Volatile private var lastAclLogMs = 0L
+    @Volatile private var lastUsbAclAtMs = 0L
+    @Volatile private var lastHidInputElapsedMs = 0L
+    @Volatile private var linkQualityPercent = 100
+    @Volatile private var lastHidGapMs = 0L
+    @Volatile private var lastInputDispatchMs = 0L
+    @Volatile private var lastInputDispatchDurationMs = 0L
+    @Volatile private var lastOutputStallMs = 0L
+    @Volatile private var lastIncidentAtMs = 0L
+    @Volatile private var lastIncidentType = INCIDENT_NONE
+    @Volatile private var lastIncidentDurationMs = 0L
     // Signaling is received on the ACL reader while fallback/recovery runs on
     // the HCI event worker. These maps must never be ordinary mutable maps.
     private val pendingChannels = ConcurrentHashMap<Int, L2capChannel>()
     private val pendingConfigs = ConcurrentHashMap<Int, L2capChannel>()
     private val channelsByLocalCid = ConcurrentHashMap<Int, L2capChannel>()
 
-    fun start() {
+    fun start(fastRecovery: Boolean = false) {
         if (!running.compareAndSet(false, true)) return
+        fastRecoveryStartup = fastRecovery
         worker = Thread(::runProbe, "usb-hci-probe").also { it.start() }
     }
 
@@ -77,13 +100,19 @@ class HciUsbController(
             val address = requireCommandComplete(0x1009)
             if (address.size >= 7) onLog("Local Address → ${formatAddress(address, 1)}")
 
-            onStatus(text(R.string.dualsense_bridge_status_classic_scan))
-            sendCommand(0x0401, byteArrayOf(0x33, 0x8B.toByte(), 0x9E.toByte(), 0x08, 0x00))
-            val discovered = resolveRemoteNames(scanUntilComplete())
-            discoveredDevices.clear()
-            discovered.forEach { discoveredDevices[it.address] = it }
-            enableIncomingConnections()
-            onStatus(text(R.string.dualsense_bridge_status_scan_finished))
+            if (fastRecoveryStartup) {
+                enableIncomingConnections()
+                onStatus(text(R.string.dualsense_bridge_status_recovery_waiting))
+                onLog("Fast recovery ready → page scan enabled; waiting for paired controller")
+            } else {
+                onStatus(text(R.string.dualsense_bridge_status_classic_scan))
+                sendCommand(0x0401, byteArrayOf(0x33, 0x8B.toByte(), 0x9E.toByte(), 0x08, 0x00))
+                val discovered = resolveRemoteNames(scanUntilComplete())
+                discoveredDevices.clear()
+                discovered.forEach { discoveredDevices[it.address] = it }
+                enableIncomingConnections()
+                onStatus(text(R.string.dualsense_bridge_status_scan_finished))
+            }
             hostLoop()
         } catch (t: Throwable) {
             if (running.get()) {
@@ -126,12 +155,26 @@ class HciUsbController(
         pendingDisconnectAddress = address.uppercase()
     }
 
+    fun requestLinkRecovery() {
+        pendingLinkRecovery = true
+    }
+
+    fun requestDiscovery() {
+        pendingDiscovery = true
+    }
+
     fun sendOutput(config: com.example.usbbtonandroid.DualSenseOutputConfig): Boolean {
-        val handle = activeHandle ?: return false
-        val cid = hidInterruptRemoteCid ?: return false
-        val report = com.example.usbbtonandroid.DualSenseBtOutputBuilder.build(config, outputSequence++)
-        sendAcl(handle, cid, byteArrayOf(0xA2.toByte()) + report)
-        onLog("DualSense BT output → CID=0x${cid.hex4()}")
+        // Never send a DualSense output report during link/HID negotiation.
+        // These reports also contain lightbar and player LED control fields and
+        // can disturb controller-side startup on some Bluetooth firmware. The
+        // first valid input report is our proof that the complete HID path is live.
+        if (activeHandle == null || hidInterruptRemoteCid == null || lastHidInputMs == 0L) {
+            return false
+        }
+        // Rumble and LED callbacks can arrive in bursts. Never perform a blocking
+        // USB write on their callback thread; only the newest complete state matters.
+        latestOutputConfig = config
+        outputSignal.offer(Unit)
         return true
     }
 
@@ -143,6 +186,25 @@ class HciUsbController(
     private fun hostLoop() {
         var lastLinkCheck = 0L
         while (running.get()) {
+            if (pendingDiscovery) {
+                pendingDiscovery = false
+                if (activeHandle == null) {
+                    runCatching { performLiveDiscovery() }.onFailure {
+                        onLog("Live inquiry failed: ${it.message ?: it.javaClass.simpleName}")
+                        onStatus(text(R.string.dualsense_bridge_status_probe_failed))
+                        runCatching { enableIncomingConnections() }
+                    }
+                } else {
+                    onStatus(text(R.string.dualsense_bridge_status_already_connected))
+                }
+            }
+            if (pendingLinkRecovery) {
+                pendingLinkRecovery = false
+                val handle = activeHandle
+                if (handle != null) {
+                    rebuildHidChannels(handle)
+                }
+            }
             pendingDisconnectAddress?.let { address ->
                 pendingDisconnectAddress = null
                 if (activeDevice?.address?.uppercase() == address) {
@@ -163,6 +225,12 @@ class HciUsbController(
             }
             val now = System.currentTimeMillis()
             val active = activeHandle
+            if (active != null && hidChannelReopenAtMs != 0L && now >= hidChannelReopenAtMs) {
+                hidChannelReopenAtMs = 0L
+                hidOpenAttempted = false
+                onLog("Smart recovery → reopening HID control and interrupt channels")
+                requestHidChannels(active)
+            }
             if (active != null && encryptedAtMs > 0 && !hidOpenAttempted &&
                 now - encryptedAtMs >= HID_OPEN_DELAY_MS
             ) {
@@ -180,6 +248,18 @@ class HciUsbController(
                 pendingChannels.clear()
                 pendingConfigs.clear()
                 requestHidChannels(active)
+            }
+            if (active != null && hidChannelsReady && lastHidInputMs == 0L &&
+                hidReadyAtMs != 0L
+            ) {
+                val readyForMs = now - hidReadyAtMs
+                if (!hidStartupRecoveryTriggered &&
+                    readyForMs >= HID_INPUT_START_RECOVERY_MS) {
+                    hidStartupRecoveryTriggered = true
+                    onStatus(text(R.string.dualsense_bridge_status_hid_no_input_recovery))
+                    onLog("HID startup watchdog → no input for $readyForMs ms; recovering link")
+                    pendingLinkRecovery = true
+                }
             }
             activeHandle?.let { handle ->
                 // Never issue diagnostic HCI commands while the real-time HID stream is
@@ -215,6 +295,20 @@ class HciUsbController(
                 0x0E -> handleLinkCheckResult(event.parameters)
             }
         }
+    }
+
+    private fun performLiveDiscovery() {
+        onStatus(text(R.string.dualsense_bridge_status_classic_scan))
+        onLog("Live HCI Inquiry → clearing stale discovery cache")
+        discoveredDevices.clear()
+        sendCommand(0x0401, byteArrayOf(
+            0x33, 0x8B.toByte(), 0x9E.toByte(), 0x08, 0x00
+        ))
+        val discovered = resolveRemoteNames(scanUntilComplete())
+        discovered.forEach { discoveredDevices[it.address] = it }
+        enableIncomingConnections()
+        onStatus(text(R.string.dualsense_bridge_status_scan_finished))
+        onLog("Live HCI Inquiry complete → ${discovered.size} device(s)")
     }
 
     private fun handleLinkCheckResult(parameters: ByteArray) {
@@ -255,6 +349,9 @@ class HciUsbController(
         hidOpenAttempted = false
         hidOpenAttemptAtMs = 0
         hidChannelsReady = false
+        hidReadyAtMs = 0L
+        hidStartupRecoveryTriggered = false
+        hidChannelReopenAtMs = 0L
         hidOpenRetries = 0
         pendingChannels.clear()
         pendingConfigs.clear()
@@ -307,11 +404,64 @@ class HciUsbController(
             priority = Thread.MAX_PRIORITY
             start()
         }
+        outputWorker = Thread(::outputDispatchLoop, "dualsense-output-dispatch").apply {
+            priority = Thread.NORM_PRIORITY + 1
+            start()
+        }
         aclWorker = Thread(::aclReadLoop, "usb-hci-acl-in").apply {
             // HCI/L2CAP reception is the real-time edge of the pipeline. It must
             // not lose time to UI rendering or Wi-Fi/HID relay work.
             priority = Thread.MAX_PRIORITY
             start()
+        }
+    }
+
+    private fun outputDispatchLoop() {
+        var lastWriteAtMs = 0L
+        var lastSentConfig: com.example.usbbtonandroid.DualSenseOutputConfig? = null
+        var lastSentEpoch = -1L
+        while (running.get()) {
+            try {
+                outputSignal.take()
+                val waitMs = OUTPUT_MIN_INTERVAL_MS -
+                    (System.currentTimeMillis() - lastWriteAtMs)
+                if (waitMs > 0) Thread.sleep(waitMs)
+                outputSignal.clear()
+                val config = latestOutputConfig ?: continue
+                val epoch = outputConnectionEpoch
+                if (config == lastSentConfig && epoch == lastSentEpoch) continue
+                val handle = activeHandle ?: continue
+                val cid = hidInterruptRemoteCid ?: continue
+                val report = com.example.usbbtonandroid.DualSenseBtOutputBuilder.build(
+                    config, outputSequence++
+                )
+                val startedAt = System.currentTimeMillis()
+                val sent = runCatching {
+                    sendAcl(handle, cid, byteArrayOf(0xA2.toByte()) + report,
+                        OUTPUT_WRITE_TIMEOUT_MS, false)
+                    true
+                }.onFailure { error ->
+                    recordIncident(INCIDENT_OUTPUT_ERROR, 0L)
+                    val now = System.currentTimeMillis()
+                    if (now - lastOutputErrorLogMs >= OUTPUT_ERROR_LOG_INTERVAL_MS) {
+                        lastOutputErrorLogMs = now
+                        onLog("DualSense output write failed: ${error.message ?: error.javaClass.simpleName}")
+                    }
+                }.getOrDefault(false)
+                lastWriteAtMs = System.currentTimeMillis()
+                if (sent) {
+                    lastSentConfig = config
+                    lastSentEpoch = epoch
+                }
+                val duration = System.currentTimeMillis() - startedAt
+                if (duration >= OUTPUT_STALL_LOG_MS) {
+                    lastOutputStallMs = duration
+                    recordIncident(INCIDENT_OUTPUT_STALL, duration)
+                    onLog("DualSense output USB stall: $duration ms")
+                }
+            } catch (_: InterruptedException) {
+                break
+            }
         }
     }
 
@@ -329,7 +479,10 @@ class HciUsbController(
                 val startedAt = System.currentTimeMillis()
                 onAclPacket(packet)
                 val duration = System.currentTimeMillis() - startedAt
+                lastInputDispatchMs = SystemClock.elapsedRealtime()
+                lastInputDispatchDurationMs = duration
                 if (duration >= INPUT_DISPATCH_STALL_LOG_MS) {
+                    recordIncident(INCIDENT_APP_STALL, duration)
                     onLog("App input dispatch stall: $duration ms")
                 }
             } catch (_: InterruptedException) {
@@ -347,30 +500,40 @@ class HciUsbController(
         inputQueue.poll()
         inputQueue.offer(packet)
         droppedInputPackets++
+        recordIncident(INCIDENT_QUEUE_OVERRUN, 0L)
         if (droppedInputPackets == 1L || droppedInputPackets % 100L == 0L) {
             onLog("Input queue overrun: $droppedInputPackets packet(s) dropped")
         }
     }
 
     private fun aclReadLoop() {
-        val buffer = ByteArray(4096)
-        var pending = ByteArray(0)
+        // Reuse one carry buffer instead of copying the complete pending stream on
+        // every report. This keeps GC away from the real-time input edge.
+        val pending = ByteArray(MAX_USB_CARRY_BYTES)
+        var pendingSize = 0
         while (running.get()) {
-            val size = connection?.bulkTransfer(aclIn, buffer, buffer.size, 500) ?: -1
+            if (pendingSize == pending.size) {
+                onLog("ACL carry buffer full ($pendingSize); reset")
+                pendingSize = 0
+            }
+            val size = connection?.bulkTransfer(
+                aclIn, pending, pendingSize, pending.size - pendingSize, ACL_READ_TIMEOUT_MS
+            ) ?: -1
             if (size <= 0) continue
-            pending += buffer.copyOf(size)
+            lastUsbAclAtMs = SystemClock.elapsedRealtime()
+            pendingSize += size
             var offset = 0
-            while (offset + 4 <= pending.size) {
+            while (offset + 4 <= pendingSize) {
                 val handleAndFlags = pending.le16(offset)
                 val dataLength = pending.le16(offset + 2)
                 if (dataLength > MAX_ACL_PAYLOAD) {
                     onLog("Érvénytelen ACL hossz=$dataLength; USB stream újraszinkronizálva")
-                    pending = ByteArray(0)
+                    pendingSize = 0
                     offset = 0
                     break
                 }
                 val packetEnd = offset + 4 + dataLength
-                if (packetEnd > pending.size) break
+                if (packetEnd > pendingSize) break
                 val handle = handleAndFlags and 0x0FFF
                 val packetBoundary = (handleAndFlags ushr 12) and 0x03
                 val aclPayload = pending.copyOfRange(offset + 4, packetEnd)
@@ -396,12 +559,38 @@ class HciUsbController(
                             "cid=${cid?.let { "0x${it.hex4()}" } ?: "continuation"} len=$dataLength"
                     )
                 }
-                if (cid == 0x0001) handleL2capSignaling(handle, payload)
-                if (cid != null && cid != 0x0001 && payload.firstOrNull()?.u8() == 0xA1) {
+                if (cid == 0x0001) {
+                    runCatching { handleL2capSignaling(handle, payload) }
+                        .onFailure { error ->
+                            onLog(
+                                "L2CAP signaling error: " +
+                                    (error.message ?: error.javaClass.simpleName)
+                            )
+                        }
+                }
+                val isHidInput = cid != null && cid != 0x0001 &&
+                    payload.firstOrNull()?.u8() == 0xA1
+                if (isHidInput) {
                     val previousHidInputMs = lastHidInputMs
                     lastHidInputMs = now
+                    hidStartupRecoveryTriggered = false
+                    lastHidInputElapsedMs = SystemClock.elapsedRealtime()
+                    if (previousHidInputMs != 0L) {
+                        val interval = now - previousHidInputMs
+                        val sampleQuality = when {
+                            interval <= 12L -> 100
+                            interval <= 30L -> 90
+                            interval <= 60L -> 75
+                            interval <= 120L -> 55
+                            interval <= HID_GAP_LOG_MS -> 30
+                            else -> 0
+                        }
+                        linkQualityPercent = (linkQualityPercent * 9 + sampleQuality) / 10
+                    }
                     if (previousHidInputMs != 0L && now - previousHidInputMs >= HID_GAP_LOG_MS) {
-                        onLog("HID radio/USB input gap: ${now - previousHidInputMs} ms")
+                        lastHidGapMs = now - previousHidInputMs
+                        recordIncident(INCIDENT_RADIO_USB_GAP, lastHidGapMs)
+                        onLog("HID radio/USB input gap: $lastHidGapMs ms")
                     }
                     hidChannelsReady = true
                     if (now - lastActiveDevicePublishMs >= DEVICE_PUBLISH_INTERVAL_MS) {
@@ -410,19 +599,15 @@ class HciUsbController(
                             text(R.string.dualsense_bridge_state_connected_hid), paired = true) }
                     }
                 }
-                enqueueInput(packet)
+                if (isHidInput) enqueueInput(packet)
                 offset = packetEnd
             }
             if (offset > 0) {
-                pending = if (offset == pending.size) {
-                    ByteArray(0)
-                } else {
-                    pending.copyOfRange(offset, pending.size)
+                val remaining = pendingSize - offset
+                if (remaining > 0) {
+                    System.arraycopy(pending, offset, pending, 0, remaining)
                 }
-            }
-            if (pending.size > MAX_USB_CARRY_BYTES) {
-                onLog("ACL carry buffer túlcsordult (${pending.size}); törölve")
-                pending = ByteArray(0)
+                pendingSize = remaining
             }
         }
     }
@@ -613,6 +798,8 @@ class HciUsbController(
                     activeHandle = connectionHandle
                     activeDevice = device
                     onLog("Connection Complete → handle=0x${connectionHandle.hex4()}")
+                    publishDevice(device, text(R.string.dualsense_bridge_state_connected_live),
+                        paired = loadLinkKey(device.address) != null)
                     if (event.parameters[10].u8() != 0) {
                         encryptedAtMs = System.currentTimeMillis()
                         lastHidInputMs = 0
@@ -785,7 +972,8 @@ class HciUsbController(
     }
 
     @Synchronized
-    private fun sendAcl(handle: Int, cid: Int, payload: ByteArray) {
+    private fun sendAcl(handle: Int, cid: Int, payload: ByteArray,
+                        timeoutMs: Int = COMMAND_TIMEOUT_MS, logPacket: Boolean = true) {
         val l2cap = ByteArray(4 + payload.size)
         l2cap[0] = payload.size.toByte()
         l2cap[1] = (payload.size ushr 8).toByte()
@@ -799,9 +987,11 @@ class HciUsbController(
         packet[2] = l2cap.size.toByte()
         packet[3] = (l2cap.size ushr 8).toByte()
         l2cap.copyInto(packet, 4)
-        val sent = connection?.bulkTransfer(aclOut, packet, packet.size, COMMAND_TIMEOUT_MS) ?: -1
+        val sent = connection?.bulkTransfer(aclOut, packet, packet.size, timeoutMs) ?: -1
         check(sent == packet.size) { "ACL OUT write: $sent/${packet.size}" }
-        onLog("TX ACL handle=0x${handle.hex4()} cid=0x${cid.hex4()} len=${payload.size}")
+        if (logPacket) {
+            onLog("TX ACL handle=0x${handle.hex4()} cid=0x${cid.hex4()} len=${payload.size}")
+        }
     }
 
     private fun handleL2capSignaling(handle: Int, payload: ByteArray) {
@@ -834,12 +1024,11 @@ class HciUsbController(
                         remoteCid.toByte(), (remoteCid ushr 8).toByte(),
                         0x00, 0x00, 0x00, 0x00
                     ))
-                    val configId = nextSignalId++ and 0xFF
-                    sendAcl(handle, 0x0001, byteArrayOf(
-                        0x04, configId.toByte(), 0x04, 0x00,
-                        remoteCid.toByte(), (remoteCid ushr 8).toByte(),
-                        0x00, 0x00
-                    ))
+                    // Keep the request identifier associated with this channel.
+                    // A Configuration Response contains the peer-side CID, so a
+                    // lookup in our local-CID map is not reliable for channels
+                    // initiated by the controller.
+                    sendConfigRequest(handle, remoteCid, channel)
                 }
                 0x03 -> if (data.size >= 8) {
                     val remoteCid = data.le16(0)
@@ -907,6 +1096,9 @@ class HciUsbController(
                         } else if (channel.psm == 0x0013) {
                             hidInterruptRemoteCid = channel.remoteCid
                             hidChannelsReady = true
+                            outputConnectionEpoch++
+                            hidReadyAtMs = System.currentTimeMillis()
+                            hidStartupRecoveryTriggered = false
                             onStatus(text(R.string.dualsense_bridge_status_hid_waiting))
                             channelsByLocalCid.values.firstOrNull { it.psm == 0x0011 }
                                 ?.remoteCid?.let { controlCid ->
@@ -930,6 +1122,14 @@ class HciUsbController(
                         scid.toByte(), (scid ushr 8).toByte()
                     ))
                 }
+                0x07 -> if (data.size >= 4) {
+                    val dcid = data.le16(0)
+                    val scid = data.le16(2)
+                    onLog(
+                        "L2CAP Disconnection Response ← DCID=0x${dcid.hex4()} " +
+                            "SCID=0x${scid.hex4()}"
+                    )
+                }
                 else -> onLog("L2CAP signaling code=0x${code.hex2()} id=$id len=$length")
             }
             offset += 4 + length
@@ -941,6 +1141,41 @@ class HciUsbController(
         hidOpenAttempted = true
         hidOpenAttemptAtMs = System.currentTimeMillis()
         requestL2capChannel(handle, 0x0011)
+    }
+
+    /** Rebuild HID without dropping the encrypted Bluetooth ACL connection. */
+    private fun rebuildHidChannels(handle: Int) {
+        onLog("Smart recovery → rebuilding HID channels on live ACL 0x${handle.hex4()}")
+        val hidChannels = channelsByLocalCid.values
+            .filter { it.psm == 0x0011 || it.psm == 0x0013 }
+        hidChannels.forEach { channel ->
+            channel.remoteCid?.let { remoteCid ->
+                val id = nextSignalId++ and 0xFF
+                runCatching {
+                    sendAcl(handle, 0x0001, byteArrayOf(
+                        0x06, id.toByte(), 0x04, 0x00,
+                        remoteCid.toByte(), (remoteCid ushr 8).toByte(),
+                        channel.localCid.toByte(), (channel.localCid ushr 8).toByte()
+                    ))
+                }.onFailure { onLog("HID channel close failed: ${it.message}") }
+            }
+        }
+
+        pendingChannels.entries.removeIf { it.value.psm == 0x0011 || it.value.psm == 0x0013 }
+        pendingConfigs.entries.removeIf { it.value.psm == 0x0011 || it.value.psm == 0x0013 }
+        channelsByLocalCid.entries.removeIf { it.value.psm == 0x0011 || it.value.psm == 0x0013 }
+        hidInterruptRemoteCid = null
+        hidChannelsReady = false
+        hidReadyAtMs = 0L
+        hidStartupRecoveryTriggered = false
+        lastHidInputMs = 0L
+        hidOpenRetries = 0
+        // Keep the normal opener dormant until the controller has acknowledged
+        // the old channel teardown, then negotiate a clean control/interrupt pair.
+        hidOpenAttempted = true
+        hidOpenAttemptAtMs = System.currentTimeMillis()
+        hidChannelReopenAtMs = hidOpenAttemptAtMs + HID_CHANNEL_REOPEN_DELAY_MS
+        onStatus(text(R.string.dualsense_bridge_status_recovery_waiting))
     }
 
     private fun hasHidChannelProgress(): Boolean =
@@ -978,7 +1213,12 @@ class HciUsbController(
         val parameterLength = buffer[1].u8()
         check(size >= parameterLength + 2) { "Hiányos HCI event: $size/${parameterLength + 2}" }
         val event = HciEvent(buffer[0].u8(), buffer.copyOfRange(2, 2 + parameterLength))
-        onLog("RX EVT 0x${event.code.hex2()} ($parameterLength byte)")
+        // Number Of Completed Packets can arrive at output report frequency.
+        // Processing it is critical, logging every instance would create its own
+        // allocation/lock pressure and undermine the flow-control improvement.
+        if (event.code != 0x13) {
+            onLog("RX EVT 0x${event.code.hex2()} ($parameterLength byte)")
+        }
         return event
     }
 
@@ -988,7 +1228,23 @@ class HciUsbController(
         worker?.interrupt()
         aclWorker?.interrupt()
         inputWorker?.interrupt()
+        outputWorker?.interrupt()
         inputQueue.clear()
+        outputSignal.clear()
+        latestOutputConfig = null
+    }
+
+    fun getDiagnostics(): LinkDiagnostics = LinkDiagnostics(
+        lastUsbAclAtMs, lastHidInputElapsedMs, linkQualityPercent,
+        lastHidGapMs, lastInputDispatchMs, lastInputDispatchDurationMs,
+        droppedInputPackets, lastOutputStallMs, lastIncidentAtMs,
+        lastIncidentType, lastIncidentDurationMs
+    )
+
+    private fun recordIncident(type: String, durationMs: Long) {
+        lastIncidentType = type
+        lastIncidentDurationMs = durationMs
+        lastIncidentAtMs = SystemClock.elapsedRealtime()
     }
 
     private fun release() {
@@ -1034,13 +1290,37 @@ class HciUsbController(
         val rawHex: String
     )
 
+    data class LinkDiagnostics(
+        val lastUsbAclAtMs: Long,
+        val lastHidInputAtMs: Long,
+        val linkQualityPercent: Int,
+        val lastHidGapMs: Long,
+        val lastInputDispatchAtMs: Long,
+        val lastInputDispatchDurationMs: Long,
+        val droppedInputPackets: Long,
+        val lastOutputStallMs: Long,
+        val lastIncidentAtMs: Long,
+        val lastIncidentType: String,
+        val lastIncidentDurationMs: Long
+    )
+
     companion object {
         private const val COMMAND_TIMEOUT_MS = 5_000
+        private const val OUTPUT_WRITE_TIMEOUT_MS = 80
+        private const val OUTPUT_MIN_INTERVAL_MS = 8L
+        private const val OUTPUT_STALL_LOG_MS = 40L
+        private const val OUTPUT_ERROR_LOG_INTERVAL_MS = 2_000L
+        private const val ACL_READ_TIMEOUT_MS = 250
         private const val INQUIRY_TIMEOUT_MS = 15_000
         private const val REMOTE_NAME_TIMEOUT_MS = 8_000
         private const val CONNECTION_TIMEOUT_MS = 45_000
         private const val LINK_CHECK_INTERVAL_MS = 3_000L
         private const val HID_OPEN_DELAY_MS = 750L
+        private const val HID_CHANNEL_REOPEN_DELAY_MS = 350L
+        // BlueZ does not tear down a valid HID channel pair merely because the
+        // controller has not emitted its first report yet. Allow slow controller
+        // wake-up and cheap dongle firmware substantially more time.
+        private const val HID_INPUT_START_RECOVERY_MS = 15_000L
         private const val HID_START_TIMEOUT_MS = 6_000L
         private const val HID_RETRY_INTERVAL_MS = 3_000L
         private const val HID_MAX_RETRIES = 3
@@ -1052,6 +1332,12 @@ class HciUsbController(
         private const val INPUT_DISPATCH_STALL_LOG_MS = 100L
         private const val INPUT_QUEUE_CAPACITY = 32
         private const val USB_RECIP_INTERFACE = 0x01
+        const val INCIDENT_NONE = "none"
+        const val INCIDENT_RADIO_USB_GAP = "radio_usb_gap"
+        const val INCIDENT_APP_STALL = "app_stall"
+        const val INCIDENT_QUEUE_OVERRUN = "queue_overrun"
+        const val INCIDENT_OUTPUT_STALL = "output_stall"
+        const val INCIDENT_OUTPUT_ERROR = "output_error"
 
         fun looksLikeBluetoothHci(device: UsbDevice): Boolean =
             (0 until device.interfaceCount).map(device::getInterface).any(::isBluetoothInterface)

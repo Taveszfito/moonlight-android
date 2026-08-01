@@ -191,8 +191,10 @@ public class PcView extends AppCompatActivity implements AdapterFragmentCallback
                 startActivity(new Intent(PcView.this, ProfilesActivity.class));
             }
         });
-        dualSenseBridgeButton.setOnClickListener(v ->
-                startActivity(new Intent(PcView.this, DualSenseBridgeActivity.class)));
+        if (dualSenseBridgeButton != null) {
+            dualSenseBridgeButton.setOnClickListener(v ->
+                    startActivity(new Intent(PcView.this, DualSenseBridgeActivity.class)));
+        }
 
         // Amazon review didn't like the help button because the wiki was not entirely
         // navigable via the Fire TV remote (though the relevant parts were). Let's hide

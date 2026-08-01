@@ -290,7 +290,10 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
         signature.append("connected=").append(connected).append(';');
         for (HciUsbController.HciDevice device : devices) {
             signature.append(device.getAddress()).append('|')
-                    .append(device.getPaired()).append(';');
+                    .append(device.getPaired()).append('|')
+                    .append(device.getState()).append('|')
+                    .append(device.getRssi()).append('|')
+                    .append(device.getName()).append(';');
         }
         if (signature.toString().equals(lastDeviceSignature)) {
             return;

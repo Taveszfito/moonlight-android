@@ -32,6 +32,7 @@ object DualSenseBridge {
     const val HOST_MODE_PLAYSTATION = "playstation"
     private const val PREF_BATTERY_LED_ENABLED = "battery_led_enabled"
     private const val PREF_LOW_BATTERY_BLINK_ENABLED = "low_battery_blink_enabled"
+    private const val PREF_CONNECTION_OVERLAY_ENABLED = "connection_overlay_enabled"
     private const val LOW_BATTERY_THRESHOLD_PERCENT = 15
 
     fun interface InputListener { fun onInput(input: DualSenseInput) }
@@ -45,10 +46,16 @@ object DualSenseBridge {
     private val inputListeners = CopyOnWriteArraySet<InputListener>()
     private val stateListeners = CopyOnWriteArraySet<StateListener>()
     private val devicesByAddress = linkedMapOf<String, HciUsbController.HciDevice>()
+    private val deviceLastSeenAt = linkedMapOf<String, Long>()
+    private val ignoredDeviceCallbacksUntil = mutableMapOf<String, Long>()
     private val logLines = ArrayDeque<String>()
     private val outputLock = Any()
     private var outputConfig = DualSenseOutputConfig()
     @Volatile private var ledOverrideActive = false
+    @Volatile private var batteryLedEnabled = true
+    @Volatile private var lowBatteryBlinkEnabled = true
+    @Volatile private var connectionOverlayEnabled = false
+    @Volatile private var lastStreamRelayAtMs = 0L
     private var lastBatteryLedPercent = -1
     @Volatile private var lowBatteryBlinkActive = false
     @Volatile private var lowBatteryBlinkShowingRed = false
@@ -56,13 +63,27 @@ object DualSenseBridge {
     private val watchdogHandler = Handler(Looper.getMainLooper())
     @Volatile private var lastInputAtMs = 0L
     @Volatile private var activeControllerAddress: String? = null
+    @Volatile private var smartRecoveryInProgress = false
+    @Volatile private var adapterRecoveryPerformed = false
     private const val INPUT_TIMEOUT_MS = 2500L
+    // Preserve and rebuild the live Bluetooth link first. A complete adapter
+    // restart is deliberately delayed as the final fallback.
+    private const val ADAPTER_RECOVERY_DELAY_MS = 15_000L
+    private val adapterRecovery = Runnable {
+        if (!smartRecoveryInProgress || controllerConnected) return@Runnable
+        val device = adapter ?: return@Runnable
+        adapterRecoveryPerformed = true
+        updateStatus(s(R.string.dualsense_bridge_status_adapter_recovery))
+        startController(device, true)
+    }
     private val connectionWatchdog = object : Runnable {
         override fun run() {
             if (controllerConnected && lastInputAtMs != 0L &&
                 SystemClock.elapsedRealtime() - lastInputAtMs > INPUT_TIMEOUT_MS) {
+                beginSmartRecovery()
                 markControllerDisconnected(s(R.string.dualsense_bridge_status_connection_lost))
             }
+            expireStaleDiscoveredDevices()
             watchdogHandler.postDelayed(this, 500L)
         }
     }
@@ -145,6 +166,9 @@ object DualSenseBridge {
                 @Suppress("DEPRECATION") appContext.registerReceiver(receiver, filter)
             }
             initialized = true
+            batteryLedEnabled = keyPrefs().getBoolean(PREF_BATTERY_LED_ENABLED, true)
+            lowBatteryBlinkEnabled = keyPrefs().getBoolean(PREF_LOW_BATTERY_BLINK_ENABLED, true)
+            connectionOverlayEnabled = keyPrefs().getBoolean(PREF_CONNECTION_OVERLAY_ENABLED, false)
             watchdogHandler.post(connectionWatchdog)
             loadSavedDevices()
             updateStatus(s(R.string.dualsense_bridge_status_ready))
@@ -165,8 +189,13 @@ object DualSenseBridge {
             return
         }
         if (controller != null && found.deviceId == adapter?.deviceId) {
-            updateStatus(if (controllerConnected) s(R.string.dualsense_bridge_status_connected)
-                else s(R.string.dualsense_bridge_status_scanning))
+            if (controllerConnected) {
+                updateStatus(s(R.string.dualsense_bridge_status_connected))
+            } else {
+                clearStaleAvailableDevices()
+                updateStatus(s(R.string.dualsense_bridge_status_scanning))
+                controller?.requestDiscovery()
+            }
             return
         }
         if (usbManager.hasPermission(found)) {
@@ -199,11 +228,10 @@ object DualSenseBridge {
     @JvmStatic fun getHostControllerMode(): String = keyPrefs().getString(
         "host_controller_mode", HOST_MODE_XBOX) ?: HOST_MODE_XBOX
 
-    @JvmStatic fun isBatteryLedEnabled(context: Context): Boolean =
-        context.applicationContext.getSharedPreferences("dualsense_hci_keys", Context.MODE_PRIVATE)
-            .getBoolean(PREF_BATTERY_LED_ENABLED, true)
+    @JvmStatic fun isBatteryLedEnabled(context: Context): Boolean = batteryLedEnabled
 
     @JvmStatic fun setBatteryLedEnabled(enabled: Boolean) {
+        batteryLedEnabled = enabled
         keyPrefs().edit().putBoolean(PREF_BATTERY_LED_ENABLED, enabled).apply()
         lastBatteryLedPercent = -1
         if (enabled) {
@@ -214,13 +242,49 @@ object DualSenseBridge {
         }
     }
 
-    @JvmStatic fun isLowBatteryBlinkEnabled(context: Context): Boolean =
-        context.applicationContext.getSharedPreferences("dualsense_hci_keys", Context.MODE_PRIVATE)
-            .getBoolean(PREF_LOW_BATTERY_BLINK_ENABLED, true)
+    @JvmStatic fun isLowBatteryBlinkEnabled(context: Context): Boolean = lowBatteryBlinkEnabled
 
     @JvmStatic fun setLowBatteryBlinkEnabled(enabled: Boolean) {
+        lowBatteryBlinkEnabled = enabled
         keyPrefs().edit().putBoolean(PREF_LOW_BATTERY_BLINK_ENABLED, enabled).apply()
         updateLowBatteryBlinkState(latestInput.batteryPercent)
+    }
+
+    @JvmStatic fun isConnectionOverlayEnabled(): Boolean = connectionOverlayEnabled
+
+    @JvmStatic fun setConnectionOverlayEnabled(enabled: Boolean) {
+        connectionOverlayEnabled = enabled
+        keyPrefs().edit().putBoolean(PREF_CONNECTION_OVERLAY_ENABLED, enabled).apply()
+    }
+
+    @JvmStatic fun markStreamInputForwarded() {
+        lastStreamRelayAtMs = SystemClock.elapsedRealtime()
+    }
+
+    @JvmStatic fun getDiagnosticsSnapshot(): DiagnosticsSnapshot {
+        val now = SystemClock.elapsedRealtime()
+        val link = controller?.getDiagnostics()
+        val hidAge = if (link == null || link.lastHidInputAtMs == 0L) Long.MAX_VALUE
+            else now - link.lastHidInputAtMs
+        val effectiveQuality = when {
+            !controllerConnected || hidAge > 1_000L -> 0
+            hidAge > 250L -> minOf(link?.linkQualityPercent ?: 0, 40)
+            hidAge > 80L -> minOf(link?.linkQualityPercent ?: 0, 75)
+            else -> link?.linkQualityPercent ?: 0
+        }
+        return DiagnosticsSnapshot(
+            controllerConnected, latestInput.batteryPercent, effectiveQuality,
+            if (hidAge == Long.MAX_VALUE) -1L else hidAge,
+            link?.lastHidGapMs ?: 0L,
+            link?.lastInputDispatchDurationMs ?: 0L,
+            link?.droppedInputPackets ?: 0L,
+            if (lastStreamRelayAtMs == 0L) -1L else now - lastStreamRelayAtMs,
+            link?.lastOutputStallMs ?: 0L,
+            link?.lastIncidentType ?: HciUsbController.INCIDENT_NONE,
+            if (link == null || link.lastIncidentAtMs == 0L) -1L else now - link.lastIncidentAtMs,
+            link?.lastIncidentDurationMs ?: 0L,
+            smartRecoveryInProgress, adapterRecoveryPerformed
+        )
     }
 
     @JvmStatic fun setHostControllerMode(mode: String) {
@@ -231,13 +295,22 @@ object DualSenseBridge {
 
     @JvmStatic fun forgetDevice(address: String) {
         val normalized = address.uppercase()
+        synchronized(devicesByAddress) {
+            // Ignore the delayed disconnect/device callbacks generated by this
+            // explicit forget operation. Otherwise they immediately recreate
+            // the row which the user has just removed.
+            ignoredDeviceCallbacksUntil[normalized] =
+                SystemClock.elapsedRealtime() + FORGET_CALLBACK_GUARD_MS
+            deviceLastSeenAt.remove(normalized)
+            devicesByAddress.remove(normalized)
+        }
+        if (activeControllerAddress == normalized) activeControllerAddress = null
         controller?.disconnect(normalized)
         keyPrefs().edit()
             .remove(normalized)
             .remove("name_$normalized")
             .remove("class_$normalized")
             .apply()
-        synchronized(devicesByAddress) { devicesByAddress.remove(normalized) }
         updateStatus(s(R.string.dualsense_bridge_status_forgotten))
     }
 
@@ -293,7 +366,12 @@ object DualSenseBridge {
         else -> TriggerMode.OFF
     }
 
-    private fun startController(device: UsbDevice) {
+    private fun startController(device: UsbDevice, fastRecovery: Boolean = false) {
+        if (!fastRecovery) {
+            smartRecoveryInProgress = false
+            adapterRecoveryPerformed = false
+            watchdogHandler.removeCallbacks(adapterRecovery)
+        }
         closeController(null)
         adapter = device
         controllerConnected = false
@@ -313,26 +391,65 @@ object DualSenseBridge {
                 updateStatus(value)
             },
             { item ->
+                val normalizedAddress = item.address.uppercase()
+                synchronized(devicesByAddress) {
+                    val ignoreUntil = ignoredDeviceCallbacksUntil[normalizedAddress] ?: 0L
+                    if (SystemClock.elapsedRealtime() < ignoreUntil) {
+                        return@HciUsbController
+                    }
+                    ignoredDeviceCallbacksUntil.remove(normalizedAddress)
+                }
                 val active = item.state == s(R.string.dualsense_bridge_state_connected_hid) ||
                     item.state == s(R.string.dualsense_bridge_state_connected_live)
                 val inactive = item.state == s(R.string.dualsense_bridge_state_disconnected)
                 val displayed = if (inactive) item.copy(rssi = null) else item
-                synchronized(devicesByAddress) { devicesByAddress[item.address] = displayed }
+                synchronized(devicesByAddress) {
+                    devicesByAddress[normalizedAddress] = displayed
+                    if (active || item.state == s(R.string.dualsense_bridge_state_available)) {
+                        deviceLastSeenAt[normalizedAddress] = SystemClock.elapsedRealtime()
+                    }
+                }
                 if (item.name != s(R.string.dualsense_bridge_unknown_device)) saveDevice(item)
                 if (active) {
                     activeControllerAddress = item.address
                 }
                 else if (inactive && item.address == activeControllerAddress) {
+                    beginSmartRecovery()
                     markControllerDisconnected(item.state)
                 }
                 notifyState()
             },
             { packet ->
                 DualSenseInputParser.parse(packet.payload)?.let { input ->
+                    val firstUsableInput = !controllerConnected
                     latestInput = input
                     inputPacketCount++
                     controllerConnected = true
+                    if (smartRecoveryInProgress) {
+                        smartRecoveryInProgress = false
+                        adapterRecoveryPerformed = false
+                        watchdogHandler.removeCallbacks(adapterRecovery)
+                        appendLog(s(R.string.dualsense_bridge_status_recovery_success))
+                    }
                     lastInputAtMs = SystemClock.elapsedRealtime()
+                    if (firstUsableInput) {
+                        // A parsed input report is the only authoritative signal
+                        // that the complete radio → ACL → L2CAP → HID path works.
+                        // Replace any stale intermediate text such as
+                        // "waiting for input reports" at this exact transition.
+                        status = s(R.string.dualsense_bridge_status_connected)
+                        appendLog(s(R.string.dualsense_bridge_state_connected_hid))
+                        activeControllerAddress?.let { address ->
+                            synchronized(devicesByAddress) {
+                                devicesByAddress[address]?.let { device ->
+                                    devicesByAddress[address] = device.copy(
+                                        state = s(R.string.dualsense_bridge_state_connected_hid)
+                                    )
+                                }
+                            }
+                        }
+                        notifyState()
+                    }
                     updateBatteryLedIfNeeded(input.batteryPercent)
                     updateLowBatteryBlinkState(input.batteryPercent)
                     inputListeners.forEach { it.onInput(input) }
@@ -340,7 +457,17 @@ object DualSenseBridge {
             },
             { address -> keyPrefs().getString(address, null) },
             { address, key -> keyPrefs().edit().putString(address, key).apply() }
-        ).also { it.start() }
+        ).also { it.start(fastRecovery) }
+    }
+
+    private fun beginSmartRecovery() {
+        if (smartRecoveryInProgress) return
+        smartRecoveryInProgress = true
+        adapterRecoveryPerformed = false
+        appendLog(s(R.string.dualsense_bridge_status_link_recovery))
+        controller?.requestLinkRecovery()
+        watchdogHandler.removeCallbacks(adapterRecovery)
+        watchdogHandler.postDelayed(adapterRecovery, ADAPTER_RECOVERY_DELAY_MS)
     }
 
     private fun closeController(message: String?) {
@@ -362,7 +489,7 @@ object DualSenseBridge {
     }
 
     private fun updateBatteryLedIfNeeded(percent: Int) {
-        if (!keyPrefs().getBoolean(PREF_BATTERY_LED_ENABLED, true) ||
+        if (!batteryLedEnabled ||
             ledOverrideActive || percent < 0 || percent == lastBatteryLedPercent) return
         lastBatteryLedPercent = percent
         val clamped = percent.coerceIn(0, 100)
@@ -380,12 +507,12 @@ object DualSenseBridge {
     }
 
     private fun shouldBlinkForLowBattery(): Boolean =
-        controllerConnected && latestInput.batteryPercent in 0 until LOW_BATTERY_THRESHOLD_PERCENT &&
-            keyPrefs().getBoolean(PREF_LOW_BATTERY_BLINK_ENABLED, true)
+        controllerConnected && latestInput.batteryPercent in 0..LOW_BATTERY_THRESHOLD_PERCENT &&
+            lowBatteryBlinkEnabled
 
     private fun updateLowBatteryBlinkState(percent: Int) {
-        val shouldBlink = controllerConnected && percent in 0 until LOW_BATTERY_THRESHOLD_PERCENT &&
-            keyPrefs().getBoolean(PREF_LOW_BATTERY_BLINK_ENABLED, true)
+        val shouldBlink = controllerConnected && percent in 0..LOW_BATTERY_THRESHOLD_PERCENT &&
+            lowBatteryBlinkEnabled
         if (shouldBlink && !lowBatteryBlinkActive) {
             lowBatteryBlinkActive = true
             lowBatteryBlinkPhase = 0
@@ -432,6 +559,42 @@ object DualSenseBridge {
         notifyState()
     }
 
+    private fun expireStaleDiscoveredDevices() {
+        val now = SystemClock.elapsedRealtime()
+        var changed = false
+        synchronized(devicesByAddress) {
+            val iterator = devicesByAddress.entries.iterator()
+            while (iterator.hasNext()) {
+                val entry = iterator.next()
+                val device = entry.value
+                val lastSeen = deviceLastSeenAt[entry.key] ?: continue
+                if (!device.paired &&
+                    device.state == s(R.string.dualsense_bridge_state_available) &&
+                    now - lastSeen >= DISCOVERED_DEVICE_EXPIRY_MS
+                ) {
+                    iterator.remove()
+                    deviceLastSeenAt.remove(entry.key)
+                    changed = true
+                }
+            }
+        }
+        if (changed) notifyState()
+    }
+
+    private fun clearStaleAvailableDevices() {
+        synchronized(devicesByAddress) {
+            val iterator = devicesByAddress.entries.iterator()
+            while (iterator.hasNext()) {
+                val entry = iterator.next()
+                if (!entry.value.paired) {
+                    deviceLastSeenAt.remove(entry.key)
+                    iterator.remove()
+                }
+            }
+        }
+        notifyState()
+    }
+
     private fun appendLog(value: String) {
         synchronized(logLines) {
             logLines.addLast(value)
@@ -459,6 +622,26 @@ object DualSenseBridge {
                 null, true, s(R.string.dualsense_bridge_state_saved))
         }
     }
+
+    data class DiagnosticsSnapshot(
+        val connected: Boolean,
+        val batteryPercent: Int,
+        val linkQualityPercent: Int,
+        val hidInputAgeMs: Long,
+        val lastHidGapMs: Long,
+        val appDispatchDurationMs: Long,
+        val droppedInputPackets: Long,
+        val streamRelayAgeMs: Long,
+        val outputStallMs: Long,
+        val lastIncidentType: String,
+        val lastIncidentAgeMs: Long,
+        val lastIncidentDurationMs: Long,
+        val recoveryInProgress: Boolean,
+        val adapterRecoveryPerformed: Boolean
+    )
+
+    private const val DISCOVERED_DEVICE_EXPIRY_MS = 30_000L
+    private const val FORGET_CALLBACK_GUARD_MS = 5_000L
 
     @Suppress("DEPRECATION")
     private fun Intent.usbDevice(): UsbDevice? = if (Build.VERSION.SDK_INT >= 33) {

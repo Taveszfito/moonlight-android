@@ -31,6 +31,7 @@ import com.limelight.binding.video.MediaCodecHelper;
 import com.limelight.binding.video.PerfOverlayListener;
 import com.limelight.dualsense.DualSenseBridge;
 import com.example.usbbtonandroid.DualSenseInput;
+import com.example.usbbtonandroid.hci.HciUsbController;
 import com.limelight.nvstream.NvConnection;
 import com.limelight.nvstream.NvConnectionListener;
 import com.limelight.nvstream.StreamConfiguration;
@@ -243,6 +244,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     private boolean overlayToggleZoomButtonShown;
     private TextView notificationOverlayView;
     private TextView controllerLowBatteryOverlayView;
+    private TextView controllerConnectionOverlayView;
     private boolean controllerBatteryWasLow;
     private long lastControllerLowBatteryWarningMs;
     private static final int CONTROLLER_LOW_BATTERY_PERCENT = 15;
@@ -257,6 +259,13 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     };
     private final DualSenseBridge.InputListener controllerBatteryInputListener =
             this::handleControllerBatteryInput;
+    private final Runnable updateControllerConnectionOverlay = new Runnable() {
+        @Override
+        public void run() {
+            refreshControllerConnectionOverlay();
+            if (timerHandler != null) timerHandler.postDelayed(this, 500L);
+        }
+    };
     private int requestedNotificationOverlayVisibility = View.GONE;
     private View performanceOverlayView;
 
@@ -554,7 +563,9 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
         notificationOverlayView = findViewById(R.id.notificationOverlay);
         controllerLowBatteryOverlayView = findViewById(R.id.controllerLowBatteryOverlay);
+        controllerConnectionOverlayView = findViewById(R.id.controllerConnectionOverlay);
         DualSenseBridge.addInputListener(controllerBatteryInputListener);
+        timerHandler.post(updateControllerConnectionOverlay);
 
         performanceOverlayView = findViewById(R.id.performanceOverlay);
 
@@ -1791,7 +1802,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         int percent = input.getBatteryPercent();
         boolean warningEnabled = DualSenseBridge.isLowBatteryBlinkEnabled(this);
         boolean batteryLow = warningEnabled && percent >= 0 &&
-                percent < CONTROLLER_LOW_BATTERY_PERCENT;
+                percent <= CONTROLLER_LOW_BATTERY_PERCENT;
         long now = android.os.SystemClock.elapsedRealtime();
 
         if (batteryLow && (!controllerBatteryWasLow ||
@@ -1821,6 +1832,65 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         controllerLowBatteryOverlayView.animate().alpha(0.92f).setDuration(180L).start();
         timerHandler.removeCallbacks(hideControllerLowBatteryOverlay);
         timerHandler.postDelayed(hideControllerLowBatteryOverlay, 5000L);
+    }
+
+    private void refreshControllerConnectionOverlay() {
+        if (controllerConnectionOverlayView == null) return;
+        if (!DualSenseBridge.isConnectionOverlayEnabled()) {
+            controllerConnectionOverlayView.setVisibility(View.GONE);
+            return;
+        }
+
+        DualSenseBridge.DiagnosticsSnapshot snapshot = DualSenseBridge.getDiagnosticsSnapshot();
+        int quality = snapshot.getLinkQualityPercent();
+        String linkState;
+        if (!snapshot.getConnected()) linkState = getString(R.string.dualsense_diag_disconnected);
+        else if (snapshot.getHidInputAgeMs() > 250L) linkState = getString(R.string.dualsense_diag_interrupted);
+        else linkState = getString(R.string.dualsense_diag_active);
+
+        String cause = getString(R.string.dualsense_diag_no_recent_issue);
+        if (snapshot.getRecoveryInProgress()) {
+            cause = getString(snapshot.getAdapterRecoveryPerformed() ?
+                    R.string.dualsense_diag_adapter_recovery :
+                    R.string.dualsense_diag_link_recovery);
+        }
+        else if (snapshot.getConnected() && snapshot.getHidInputAgeMs() > 250L) {
+            cause = getString(R.string.dualsense_diag_radio_usb_path);
+        }
+        else if (snapshot.getStreamRelayAgeMs() > 250L && snapshot.getHidInputAgeMs() >= 0L &&
+                snapshot.getHidInputAgeMs() <= 250L) {
+            cause = getString(R.string.dualsense_diag_app_relay_path);
+        }
+        else if (snapshot.getLastIncidentAgeMs() >= 0L &&
+                snapshot.getLastIncidentAgeMs() < 30_000L) {
+            String type = snapshot.getLastIncidentType();
+            if (HciUsbController.INCIDENT_RADIO_USB_GAP.equals(type)) {
+                cause = getString(R.string.dualsense_diag_radio_usb_gap,
+                        snapshot.getLastIncidentDurationMs());
+            }
+            else if (HciUsbController.INCIDENT_APP_STALL.equals(type)) {
+                cause = getString(R.string.dualsense_diag_app_stall,
+                        snapshot.getLastIncidentDurationMs());
+            }
+            else if (HciUsbController.INCIDENT_QUEUE_OVERRUN.equals(type)) {
+                cause = getString(R.string.dualsense_diag_queue_overrun);
+            }
+            else if (HciUsbController.INCIDENT_OUTPUT_STALL.equals(type) ||
+                    HciUsbController.INCIDENT_OUTPUT_ERROR.equals(type)) {
+                cause = getString(R.string.dualsense_diag_output_path,
+                        snapshot.getLastIncidentDurationMs());
+            }
+        }
+
+        String battery = snapshot.getBatteryPercent() >= 0 ?
+                "  ·  " + snapshot.getBatteryPercent() + "%" : "";
+        controllerConnectionOverlayView.setText(getString(
+                R.string.dualsense_diag_overlay_text, linkState, quality, battery,
+                Math.max(0L, snapshot.getHidInputAgeMs()),
+                snapshot.getDroppedInputPackets(), cause));
+        controllerConnectionOverlayView.setTextColor(quality >= 85 ? 0xFFE8FFF0 :
+                quality >= 50 ? 0xFFFFF1C2 : 0xFFFFD6D6);
+        controllerConnectionOverlayView.setVisibility(View.VISIBLE);
     }
 
     @Override

@@ -90,7 +90,9 @@ object DualSenseInputParser {
         val charging = (raw ushr 4) and 0x0F
         if (charging == 0x2) return 100
         if (charging == 0xA || charging == 0xB || charging == 0xF) return 0
-        return ((raw and 0x0F) * 10 + 5).coerceAtMost(100)
+        // DualSense exposes a coarse 0-10 capacity level, not an exact percentage.
+        // Report its real 10% steps instead of presenting artificial 5% midpoints.
+        return ((raw and 0x0F) * 10).coerceAtMost(100)
     }
 
     private fun batteryStatus(p: ByteArray, base: Int): String {

@@ -3877,6 +3877,14 @@ public class GameMenu implements Game.GameMenuCallbacks {
                     DualSenseBridge.HOST_MODE_PLAYSTATION);
             showDualSenseBridgeMenu(device);
         }));
+        boolean diagnosticsOverlay = DualSenseBridge.isConnectionOverlayEnabled();
+        options.add(new MenuOption("dualsense_connection_overlay",
+                getString(R.string.dualsense_diag_quick_menu) + ": " +
+                        (diagnosticsOverlay ? getString(R.string.game_menu_on) :
+                                getString(R.string.game_menu_off)), () -> {
+            DualSenseBridge.setConnectionOverlayEnabled(!diagnosticsOverlay);
+            showDualSenseBridgeMenu(device);
+        }));
         for (com.example.usbbtonandroid.hci.HciUsbController.HciDevice controller :
                 DualSenseBridge.getDevices()) {
             options.add(new MenuOption("dualsense_device_" + controller.getAddress(),

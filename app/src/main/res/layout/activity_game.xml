@@ -51,11 +51,30 @@
         android:visibility="gone" />
 
     <TextView
+        android:id="@+id/controllerConnectionOverlay"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_marginTop="12dp"
+        android:layout_marginEnd="12dp"
+        android:background="@drawable/controller_connection_overlay_background"
+        android:paddingStart="11dp"
+        android:paddingTop="8dp"
+        android:paddingEnd="11dp"
+        android:paddingBottom="8dp"
+        android:textColor="#E8FFF0"
+        android:textSize="11sp"
+        android:fontFamily="monospace"
+        android:elevation="21dp"
+        android:preferKeepClear="true"
+        android:visibility="gone" />
+
+    <TextView
         android:id="@+id/controllerLowBatteryOverlay"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="top|end"
-        android:layout_marginTop="54dp"
+        android:layout_marginTop="118dp"
         android:layout_marginEnd="12dp"
         android:background="@drawable/controller_low_battery_overlay_background"
         android:paddingStart="12dp"

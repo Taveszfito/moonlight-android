@@ -1570,6 +1570,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 context.menuInputCaptured = true;
             }
             context.bridgeRawButtonFlags = buttonFlags;
+            DualSenseBridge.markStreamInputForwarded();
             return;
         }
         context.menuInputCaptured = false;
@@ -1577,6 +1578,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
         if (prefConfig.controllerKbmMode) {
             handleDualSenseBridgeKbmAxes(context, input, menuStickX, menuStickY);
+            DualSenseBridge.markStreamInputForwarded();
             return;
         }
 
@@ -1623,6 +1625,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         if (context.playStationHostMode) {
             sendDualSenseBridgeTouchEvents(context, input.getTouches());
         }
+        DualSenseBridge.markStreamInputForwarded();
     }
 
     private void sendDualSenseBridgeTouchEvents(BridgeControllerContext context,
