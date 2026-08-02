@@ -1,5 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string-array name="controller_emulation_names">
+        <item>@string/controller_emulation_auto</item>
+        <item>@string/controller_emulation_xbox</item>
+        <item>@string/controller_emulation_ds4</item>
+        <item>@string/controller_emulation_ds5</item>
+    </string-array>
+    <string-array name="controller_emulation_values" translatable="false">
+        <item>auto</item>
+        <item>xbox</item>
+        <item>ds4</item>
+        <item>ds5</item>
+    </string-array>
     <string-array name="resolution_names">
         <item>@string/resolution_360p</item>
         <item>@string/resolution_480p</item>

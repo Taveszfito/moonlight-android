@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="title_controller_emulation_mode">Host controller emulation</string>
+    <string name="summary_controller_emulation_mode">Auto follows the connected controller. A host-side forced controller setting always takes priority.</string>
+    <string name="controller_emulation_auto">Automatic</string>
+    <string name="controller_emulation_xbox">Xbox 360</string>
+    <string name="controller_emulation_ds4">DualShock 4</string>
+    <string name="controller_emulation_ds5">DualSense</string>
     <!-- Shortcut strings -->
     <string name="scut_deleted_pc">PC deleted</string>
     <string name="scut_not_paired">PC not paired</string>

@@ -66,6 +66,21 @@ import java.util.Map;
 
 public class ControllerHandler implements InputManager.InputDeviceListener, UsbDriverListener {
 
+    private static final String CONTROLLER_EMULATION_MODE_PREF = "controller_emulation_mode";
+
+    private byte applyControllerEmulationPreference(byte detectedType) {
+        String mode = PreferenceManager.getDefaultSharedPreferences(activityContext)
+                .getString(CONTROLLER_EMULATION_MODE_PREF, "auto");
+        if ("xbox".equals(mode)) return MoonBridge.LI_CTYPE_XBOX;
+        if ("ds4".equals(mode)) return MoonBridge.LI_CTYPE_PS4;
+        if ("ds5".equals(mode)) return MoonBridge.LI_CTYPE_PS5;
+        return detectedType;
+    }
+
+    private static boolean isDualSenseProduct(int vendorId, int productId) {
+        return vendorId == 0x054c && (productId == 0x0ce6 || productId == 0x0df2);
+    }
+
     private static final int MAXIMUM_BUMPER_UP_DELAY_MS = 100;
 
     private static final int START_DOWN_TIME_MOUSE_MODE_MS = 750;
@@ -4541,8 +4556,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                     ControllerPacket.LS_CLK_FLAG | ControllerPacket.RS_CLK_FLAG |
                     ControllerPacket.SPECIAL_BUTTON_FLAG | ControllerPacket.TOUCHPAD_FLAG |
                     ControllerPacket.MISC_FLAG;
-            boolean playStationMode = DualSenseBridge.HOST_MODE_PLAYSTATION.equals(
-                    DualSenseBridge.getHostControllerMode());
+            byte reportedType = applyControllerEmulationPreference(MoonBridge.LI_CTYPE_PS5);
+            boolean playStationMode = reportedType == MoonBridge.LI_CTYPE_PS4 ||
+                    reportedType == MoonBridge.LI_CTYPE_PS5;
             playStationHostMode = playStationMode;
             short capabilities = MoonBridge.LI_CCAP_ANALOG_TRIGGERS | MoonBridge.LI_CCAP_RUMBLE;
             if (prefConfig.enableBatteryReport) {
@@ -4555,11 +4571,6 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             else {
                 capabilities |= MoonBridge.LI_CCAP_TRIGGER_RUMBLE;
             }
-            // This is an explicit user-selected host mode, so report a Sony controller
-            // directly instead of relying on the host's optional motion_as_ds4 heuristic.
-            byte reportedType = playStationMode ?
-                    MoonBridge.LI_CTYPE_PS : MoonBridge.LI_CTYPE_XBOX;
-
             // Apollo ignores controller-arrival metadata when this player slot was
             // already allocated by an earlier legacy multi-controller packet. This
             // can happen with OSC or another early player-0 event. Explicitly remove
@@ -4576,7 +4587,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             bridgeLastBatteryPercent = -2;
             bridgeLastBatteryState = (byte) -1;
             LimeLog.info("DualSense Bridge controller arrival: mode=" +
-                    (playStationMode ? "PlayStation" : "Xbox") + ", result=" + result +
+                    reportedType + ", result=" + result +
                     ", controller=" + controllerNumber);
         }
     }
@@ -4887,7 +4898,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                     type = MoonBridge.LI_CTYPE_XBOX;
                     break;
                 case 0x054c: // Sony
-                    type = MoonBridge.LI_CTYPE_PS;
+                    type = isDualSenseProduct(inputDevice.getVendorId(), inputDevice.getProductId()) ?
+                            MoonBridge.LI_CTYPE_PS5 : MoonBridge.LI_CTYPE_PS4;
                     break;
                 case 0x057e: // Nintendo
                     type = MoonBridge.LI_CTYPE_NINTENDO;
@@ -4947,7 +4959,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 // Light.hasRgbControl() was totally broken prior to Android 14.
                 // It always returned true because LIGHT_CAPABILITY_RGB was defined as 0,
                 // so we will just guess RGB is supported if it's a PlayStation controller.
-                if (hasRgbLed && (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE || type == MoonBridge.LI_CTYPE_PS)) {
+                if (hasRgbLed && (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE ||
+                        type == MoonBridge.LI_CTYPE_PS || type == MoonBridge.LI_CTYPE_PS4 || type == MoonBridge.LI_CTYPE_PS5)) {
                     capabilities |= MoonBridge.LI_CCAP_RGB_LED;
                 }
             }
@@ -4966,7 +4979,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             }
 
             byte reportedType;
-            if (type != MoonBridge.LI_CTYPE_PS && sensorManager != null) {
+            if (type != MoonBridge.LI_CTYPE_PS && type != MoonBridge.LI_CTYPE_PS4 &&
+                    type != MoonBridge.LI_CTYPE_PS5 && sensorManager != null) {
                 // Override the detected controller type if we're emulating motion sensors on an Xbox controller
                 Toast.makeText(activityContext, activityContext.getResources().getText(R.string.toast_controller_type_changed), Toast.LENGTH_LONG).show();
                 reportedType = MoonBridge.LI_CTYPE_UNKNOWN;
@@ -4978,6 +4992,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 // Report the true type to the host PC if we're not emulating motion sensors
                 reportedType = type;
             }
+            reportedType = applyControllerEmulationPreference(reportedType);
 
             // We can perform basic rumble with any vibrator
             if (vibrator != null) {

@@ -3867,16 +3867,6 @@ public class GameMenu implements Game.GameMenuCallbacks {
             DualSenseBridge.reset(game);
             handler.postDelayed(() -> showDualSenseBridgeMenu(device), 500);
         }));
-        boolean playStationMode = DualSenseBridge.HOST_MODE_PLAYSTATION.equals(
-                DualSenseBridge.getHostControllerMode());
-        options.add(new MenuOption("dualsense_host_mode",
-                "Host controller: " + (playStationMode ? "PlayStation (native motion)" :
-                        "Xbox compatibility") + "\nApplies on the next stream connection", () -> {
-            DualSenseBridge.setHostControllerMode(playStationMode ?
-                    DualSenseBridge.HOST_MODE_XBOX :
-                    DualSenseBridge.HOST_MODE_PLAYSTATION);
-            showDualSenseBridgeMenu(device);
-        }));
         boolean diagnosticsOverlay = DualSenseBridge.isConnectionOverlayEnabled();
         options.add(new MenuOption("dualsense_connection_overlay",
                 getString(R.string.dualsense_diag_quick_menu) + ": " +

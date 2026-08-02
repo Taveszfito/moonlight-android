@@ -126,28 +126,6 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
         stateRow.addView(batteryView);
         connection.addView(stateRow);
 
-        LinearLayout hostModeRow = horizontal();
-        hostModeRow.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout hostModeText = vertical();
-        TextView hostModeTitle = text(getString(R.string.dualsense_bridge_host_mode), 15, Color.WHITE);
-        hostModeTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        hostModeText.addView(hostModeTitle);
-        hostModeText.addView(text(
-                getString(R.string.dualsense_bridge_host_mode_summary),
-                12, TEXT_SECONDARY));
-        hostModeRow.addView(hostModeText, weighted());
-        Switch hostModeSwitch = new Switch(this);
-        hostModeSwitch.setContentDescription(getString(R.string.dualsense_bridge_host_mode));
-        hostModeSwitch.setChecked(DualSenseBridge.HOST_MODE_PLAYSTATION.equals(
-                DualSenseBridge.getHostControllerMode()));
-        hostModeSwitch.setOnCheckedChangeListener((button, checked) ->
-                DualSenseBridge.setHostControllerMode(checked ?
-                        DualSenseBridge.HOST_MODE_PLAYSTATION :
-                        DualSenseBridge.HOST_MODE_XBOX));
-        hostModeRow.addView(hostModeSwitch);
-        hostModeRow.setPadding(0, dp(12), 0, dp(2));
-        connection.addView(hostModeRow);
-
         LinearLayout batteryLedRow = horizontal();
         batteryLedRow.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout batteryLedText = vertical();

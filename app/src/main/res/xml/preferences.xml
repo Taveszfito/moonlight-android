@@ -10,6 +10,14 @@
         app:initialExpandedChildrenCount="3"
         app:iconSpaceReserved="false">
         <ListPreference
+            android:defaultValue="auto"
+            android:entries="@array/controller_emulation_names"
+            android:entryValues="@array/controller_emulation_values"
+            android:key="controller_emulation_mode"
+            android:summary="@string/summary_controller_emulation_mode"
+            android:title="@string/title_controller_emulation_mode"
+            app:iconSpaceReserved="false" />
+        <ListPreference
             android:defaultValue="1280x720"
             android:entries="@array/resolution_names"
             android:entryValues="@array/resolution_values"

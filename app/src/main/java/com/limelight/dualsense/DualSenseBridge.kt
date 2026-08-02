@@ -29,8 +29,6 @@ import java.util.concurrent.CopyOnWriteArraySet
  */
 object DualSenseBridge {
     const val ACTION_USB_PERMISSION = "com.limelight.DUALSENSE_USB_PERMISSION"
-    const val HOST_MODE_XBOX = "xbox"
-    const val HOST_MODE_PLAYSTATION = "playstation"
     private const val PREF_BATTERY_LED_ENABLED = "battery_led_enabled"
     private const val PREF_LOW_BATTERY_BLINK_ENABLED = "low_battery_blink_enabled"
     private const val PREF_CONNECTION_OVERLAY_ENABLED = "connection_overlay_enabled"
@@ -229,9 +227,6 @@ object DualSenseBridge {
 
     @JvmStatic fun disconnectBridge() = closeController(s(R.string.dualsense_bridge_status_stopped))
 
-    @JvmStatic fun getHostControllerMode(): String = keyPrefs().getString(
-        "host_controller_mode", HOST_MODE_XBOX) ?: HOST_MODE_XBOX
-
     @JvmStatic fun isBatteryLedEnabled(context: Context): Boolean = batteryLedEnabled
 
     @JvmStatic fun setBatteryLedEnabled(enabled: Boolean) {
@@ -290,12 +285,6 @@ object DualSenseBridge {
             smartRecoveryInProgress, adapterRecoveryPerformed,
             synchronized(incidentHistoryLines) { incidentHistoryLines.joinToString("\n") }
         )
-    }
-
-    @JvmStatic fun setHostControllerMode(mode: String) {
-        val normalized = if (mode == HOST_MODE_PLAYSTATION) HOST_MODE_PLAYSTATION else HOST_MODE_XBOX
-        keyPrefs().edit().putString("host_controller_mode", normalized).apply()
-        notifyState()
     }
 
     @JvmStatic fun forgetDevice(address: String) {

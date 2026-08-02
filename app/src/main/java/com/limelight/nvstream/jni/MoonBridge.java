@@ -102,6 +102,10 @@ public class MoonBridge {
     public static final byte LI_CTYPE_XBOX     = 0x01;
     public static final byte LI_CTYPE_PS       = 0x02;
     public static final byte LI_CTYPE_NINTENDO = 0x03;
+    // Artemis Extended controller-generation hints. Older hosts safely treat
+    // unknown values as their default controller type.
+    public static final byte LI_CTYPE_PS4      = 0x04;
+    public static final byte LI_CTYPE_PS5      = 0x05;
 
     public static final short LI_CCAP_ANALOG_TRIGGERS = 0x01;
     public static final short LI_CCAP_RUMBLE          = 0x02;
