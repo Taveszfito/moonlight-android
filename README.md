@@ -45,7 +45,7 @@ This fork is based on [Artemis Android](https://github.com/ClassicOldSong/moonli
   - A standard USB Bluetooth HCI adapter with Bluetooth Classic (BR/EDR) and HID support is required; BLE-only adapters are not suitable. USB-C devices may also require an OTG adapter.
   - **Tested and recommended adapter:** Baseus BA04 USB Bluetooth 5.0/5.1 using the BR8651 chipset. Other generic plug-and-play adapters may work, but compatibility is not guaranteed during the Alpha phase.
   - Compared with standard Android Bluetooth mode, the Bridge provides more detailed vibration, full gyro access, touchpad support, lightbar control, battery information, shortcuts, and Quick Menu navigation.
-  - The app is ready to support the complete DualSense feature set, but Apollo currently emulates only a DualShock 4 on Windows. For now, in-game functionality is limited to features available through PS4 controller emulation.
-  - Once Apollo supports PS5 controller emulation and feedback, DualSense-only features such as adaptive triggers can work without redesigning the Bridge.
-  - The Bridge is a future-ready feature designed to unlock additional DualSense capabilities automatically as host support evolves.
+  - For full PS5 controller support and native host-side DualSense emulation, use [Apollo Extended](https://github.com/Taveszfito/Apollo-Extended).
+  - With Apollo Extended, the client and host negotiate Xbox 360, DualShock 4, or native USB DualSense emulation. Native DualSense feedback, including adaptive triggers, vibration, lightbar, and player LEDs, is forwarded to the physical controller through the Bridge.
+  - The **Host controller emulation (Extended)** setting is only effective when the host is running Apollo Extended. With another Sunshine or Apollo host, this Extended negotiation is unavailable and the host can only expose the controller through its normal compatibility path, typically as a DualShock 4 without PS5-only feedback.
   - This feature is currently in **Alpha** and may still be unstable with some adapters or connections.
