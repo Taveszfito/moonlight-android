@@ -3991,6 +3991,12 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 connecting = false;
                 updatePipAutoEnter();
 
+                // A resumed/replaced host session has a fresh input context even
+                // when the physical DualSense stayed connected throughout the
+                // transition. Explicitly redeclare it instead of waiting for an
+                // Android input-device arrival or the next Bridge HID callback.
+                controllerHandler.onStreamConnected();
+
                 // Hide the mouse cursor now after a short delay.
                 // Doing it before dismissing the spinner seems to be undone
                 // when the spinner gets displayed. On Android Q, even now

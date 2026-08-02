@@ -323,6 +323,9 @@ object DualSenseBridge {
         notifyState()
     }
 
+    /** Latest complete DualSense state for stream watchdog recovery. */
+    @JvmStatic fun getLatestInputSnapshot(): DualSenseInput = latestInput
+
     @JvmStatic fun sendRumble(lowFrequency: Short, highFrequency: Short): Boolean {
         val left = (lowFrequency.toInt() ushr 8) and 0xFF
         val right = (highFrequency.toInt() ushr 8) and 0xFF

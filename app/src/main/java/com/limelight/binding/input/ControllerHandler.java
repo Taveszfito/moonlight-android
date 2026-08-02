@@ -178,8 +178,11 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             this::handleDualSenseBridgeInput;
     private static final long DUALSENSE_BRIDGE_STALE_INPUT_MS = 120;
     private static final long DUALSENSE_BRIDGE_FAILSAFE_POLL_MS = 40;
+    private static final long DUALSENSE_BRIDGE_STREAM_WATCHDOG_MS = 500;
+    private static final long DUALSENSE_BRIDGE_FRESH_HID_MS = 750;
     private volatile long dualSenseBridgeLastInputAtMs;
     private volatile boolean dualSenseBridgeFailsafeReleased = true;
+    private volatile boolean dualSenseBridgeStreamConnected;
     private final Runnable dualSenseBridgeFailsafeRunnable = new Runnable() {
         @Override
         public void run() {
@@ -192,6 +195,36 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 releaseStaleDualSenseBridgeInput();
             }
             mainThreadHandler.postDelayed(this, DUALSENSE_BRIDGE_FAILSAFE_POLL_MS);
+        }
+    };
+    private final Runnable dualSenseBridgeStreamWatchdogRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (stopped || !dualSenseBridgeStreamConnected) {
+                return;
+            }
+
+            // The process-wide Bridge may continue receiving HID reports while a
+            // stream/activity transition loses this ControllerHandler callback.
+            // If the radio-side report is fresh but this handler has not forwarded
+            // anything recently, replay the latest complete DualSense snapshot.
+            // DualSense input reports are full-state snapshots, so this is safe and
+            // restores forwarding without reconnecting the Bluetooth controller.
+            DualSenseBridge.DiagnosticsSnapshot diagnostics =
+                    DualSenseBridge.getDiagnosticsSnapshot();
+            long now = SystemClock.uptimeMillis();
+            if (DualSenseBridge.getControllerConnected() &&
+                    diagnostics.getHidInputAgeMs() >= 0 &&
+                    diagnostics.getHidInputAgeMs() <= DUALSENSE_BRIDGE_FRESH_HID_MS &&
+                    (dualSenseBridgeLastInputAtMs == 0 ||
+                            now - dualSenseBridgeLastInputAtMs >=
+                                    DUALSENSE_BRIDGE_STREAM_WATCHDOG_MS)) {
+                LimeLog.warning("DualSense Bridge stream watchdog restored a missed input callback");
+                handleDualSenseBridgeInput(DualSenseBridge.getLatestInputSnapshot());
+            }
+
+            mainThreadHandler.postDelayed(this,
+                    DUALSENSE_BRIDGE_STREAM_WATCHDOG_MS);
         }
     };
     private final GameGestures gestures;
@@ -432,8 +465,10 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
         // Stop new device contexts from being created or used
         stopped = true;
+        dualSenseBridgeStreamConnected = false;
         DualSenseBridge.removeInputListener(dualSenseBridgeInputListener);
         mainThreadHandler.removeCallbacks(dualSenseBridgeFailsafeRunnable);
+        mainThreadHandler.removeCallbacks(dualSenseBridgeStreamWatchdogRunnable);
         if (dualSenseBridgeContext.assignedControllerNumber) {
             releaseControllerNumber(dualSenseBridgeContext);
         }
@@ -1540,6 +1575,38 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                     leftStickX, leftStickY,
                     rightStickX, rightStickY);
         }
+    }
+
+    /**
+     * Bind the process-wide DualSense Bridge to a newly established stream.
+     * Controller arrival must not depend on the next physical HID report because
+     * Moonlight can replace/resume a host session while the controller remains
+     * continuously connected.
+     */
+    public void onStreamConnected() {
+        if (stopped) {
+            return;
+        }
+
+        dualSenseBridgeStreamConnected = true;
+        dualSenseBridgeLastInputAtMs = 0;
+        dualSenseBridgeContext.lastExtendedAcceptedMode = -1;
+        dualSenseBridgeContext.extendedRequestAttempts = 0;
+        dualSenseBridgeContext.lastExtendedRequestAtMs = 0;
+
+        if (DualSenseBridge.getControllerConnected()) {
+            hasGameController = true;
+            currentControllers |= 1;
+            if (!dualSenseBridgeContext.assignedControllerNumber) {
+                assignControllerNumberIfNeeded(dualSenseBridgeContext);
+            }
+            dualSenseBridgeContext.sendControllerArrival();
+            LimeLog.info("DualSense Bridge declared controller for new stream session");
+        }
+
+        mainThreadHandler.removeCallbacks(dualSenseBridgeStreamWatchdogRunnable);
+        mainThreadHandler.postDelayed(dualSenseBridgeStreamWatchdogRunnable,
+                DUALSENSE_BRIDGE_STREAM_WATCHDOG_MS);
     }
 
     private void releaseStaleDualSenseBridgeInput() {
