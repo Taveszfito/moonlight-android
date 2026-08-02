@@ -68,39 +68,34 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
     private static final String CONTROLLER_EMULATION_MODE_PREF = "controller_emulation_mode";
 
-    // High capability bits reserved for the Apollo Extended / Artemis Extended
-    // emulation handshake. Legacy hosts ignore them and still receive a valid
-    // standard Moonlight controller type.
+    private static final byte EXTENDED_EMULATION_AUTO = 0;
+    private static final byte EXTENDED_EMULATION_XBOX = 1;
+    private static final byte EXTENDED_EMULATION_DS4 = 2;
+    private static final byte EXTENDED_EMULATION_DS5 = 3;
     private static final short EXTENDED_EMULATION_MAGIC = (short) 0xEC00;
-    private static final short EXTENDED_EMULATION_XBOX = 0x0100;
-    private static final short EXTENDED_EMULATION_DS4 = 0x0200;
-    private static final short EXTENDED_EMULATION_DS5 = 0x0300;
 
     private byte applyControllerEmulationPreference(byte detectedType) {
-        String mode = PreferenceManager.getDefaultSharedPreferences(activityContext)
-                .getString(CONTROLLER_EMULATION_MODE_PREF, "auto");
-        if ("xbox".equals(mode)) return MoonBridge.LI_CTYPE_XBOX;
-        if ("ds4".equals(mode) || "ds5".equals(mode)) return MoonBridge.LI_CTYPE_PS;
-        // Keep the wire type standards-compliant for fallback hosts. Extended
-        // hosts recover the exact Sony generation from the capability marker.
         if (detectedType == MoonBridge.LI_CTYPE_PS4 || detectedType == MoonBridge.LI_CTYPE_PS5) {
             return MoonBridge.LI_CTYPE_PS;
         }
         return detectedType;
     }
 
-    private short applyExtendedEmulationPreference(short capabilities, byte detectedType) {
+    private byte requestedExtendedEmulationMode(byte detectedType) {
         String mode = PreferenceManager.getDefaultSharedPreferences(activityContext)
                 .getString(CONTROLLER_EMULATION_MODE_PREF, "auto");
-        short requestedMode;
-        if ("xbox".equals(mode)) requestedMode = EXTENDED_EMULATION_XBOX;
-        else if ("ds4".equals(mode)) requestedMode = EXTENDED_EMULATION_DS4;
-        else if ("ds5".equals(mode)) requestedMode = EXTENDED_EMULATION_DS5;
-        else if (detectedType == MoonBridge.LI_CTYPE_XBOX) requestedMode = EXTENDED_EMULATION_XBOX;
-        else if (detectedType == MoonBridge.LI_CTYPE_PS5) requestedMode = EXTENDED_EMULATION_DS5;
-        else if (detectedType == MoonBridge.LI_CTYPE_PS || detectedType == MoonBridge.LI_CTYPE_PS4) requestedMode = EXTENDED_EMULATION_DS4;
-        else requestedMode = 0;
-        return (short) (capabilities | EXTENDED_EMULATION_MAGIC | requestedMode);
+        if ("xbox".equals(mode)) return EXTENDED_EMULATION_XBOX;
+        if ("ds4".equals(mode)) return EXTENDED_EMULATION_DS4;
+        if ("ds5".equals(mode)) return EXTENDED_EMULATION_DS5;
+        if (detectedType == MoonBridge.LI_CTYPE_XBOX) return EXTENDED_EMULATION_XBOX;
+        if (detectedType == MoonBridge.LI_CTYPE_PS5) return EXTENDED_EMULATION_DS5;
+        if (detectedType == MoonBridge.LI_CTYPE_PS || detectedType == MoonBridge.LI_CTYPE_PS4) return EXTENDED_EMULATION_DS4;
+        return EXTENDED_EMULATION_AUTO;
+    }
+
+    private short extendedEmulationCapabilities(short capabilities, byte detectedType) {
+        return (short) (capabilities | EXTENDED_EMULATION_MAGIC |
+                (requestedExtendedEmulationMode(detectedType) << 8));
     }
 
     private static boolean isDualSenseProduct(int vendorId, int productId) {
@@ -1590,6 +1585,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         if (!context.assignedControllerNumber) {
             assignControllerNumberIfNeeded(context);
         }
+        context.maybeRenegotiateExtendedEmulation();
         int buttonFlags = dualSenseButtonFlags(input);
         float menuStickX = (input.getLeftX() - 128) / 127.0f;
         float menuStickY = (input.getLeftY() - 128) / 127.0f;
@@ -4582,6 +4578,10 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         long bridgeLastAccelHostReportNs;
         int bridgeLastBatteryPercent = -2;
         byte bridgeLastBatteryState = (byte) -1;
+        byte lastExtendedRequestedMode = -1;
+        byte lastExtendedAcceptedMode = -1;
+        int extendedRequestAttempts;
+        long lastExtendedRequestAtMs;
         final SparseArray<DualSenseTouchPoint> bridgeTouches = new SparseArray<>();
 
         BridgeControllerContext() {
@@ -4602,8 +4602,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                     ControllerPacket.SPECIAL_BUTTON_FLAG | ControllerPacket.TOUCHPAD_FLAG |
                     ControllerPacket.MISC_FLAG;
             byte reportedType = applyControllerEmulationPreference(MoonBridge.LI_CTYPE_PS5);
-            boolean playStationMode = reportedType == MoonBridge.LI_CTYPE_PS4 ||
-                    reportedType == MoonBridge.LI_CTYPE_PS5;
+            byte requestedMode = requestedExtendedEmulationMode(MoonBridge.LI_CTYPE_PS5);
+            boolean playStationMode = requestedMode == EXTENDED_EMULATION_DS4 ||
+                    requestedMode == EXTENDED_EMULATION_DS5;
             playStationHostMode = playStationMode;
             short capabilities = MoonBridge.LI_CCAP_ANALOG_TRIGGERS | MoonBridge.LI_CCAP_RUMBLE;
             if (prefConfig.enableBatteryReport) {
@@ -4616,7 +4617,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             else {
                 capabilities |= MoonBridge.LI_CCAP_TRIGGER_RUMBLE;
             }
-            capabilities = applyExtendedEmulationPreference(capabilities, MoonBridge.LI_CTYPE_PS5);
+            capabilities = extendedEmulationCapabilities(capabilities, MoonBridge.LI_CTYPE_PS5);
             // Apollo ignores controller-arrival metadata when this player slot was
             // already allocated by an earlier legacy multi-controller packet. This
             // can happen with OSC or another early player-0 event. Explicitly remove
@@ -4630,12 +4631,63 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             int result = conn.sendControllerArrivalEvent((byte) controllerNumber, getActiveControllerMask(),
                     reportedType,
                     supportedButtons, capabilities);
+            lastExtendedRequestedMode = requestedMode;
+            lastExtendedAcceptedMode = -1;
+            extendedRequestAttempts = 1;
+            lastExtendedRequestAtMs = SystemClock.uptimeMillis();
             bridgeLastBatteryPercent = -2;
             bridgeLastBatteryState = (byte) -1;
             LimeLog.info("DualSense Bridge controller arrival: mode=" +
                     reportedType + ", result=" + result +
                     ", controller=" + controllerNumber);
         }
+
+        void maybeRenegotiateExtendedEmulation() {
+            byte requestedMode = requestedExtendedEmulationMode(MoonBridge.LI_CTYPE_PS5);
+            long now = SystemClock.uptimeMillis();
+            if (requestedMode != lastExtendedRequestedMode) {
+                lastExtendedRequestedMode = requestedMode;
+                lastExtendedAcceptedMode = -1;
+                extendedRequestAttempts = 0;
+            }
+            if (lastExtendedAcceptedMode == requestedMode || extendedRequestAttempts >= 3 ||
+                    now - lastExtendedRequestAtMs < 1000) {
+                return;
+            }
+
+            int supportedButtons = ControllerPacket.A_FLAG | ControllerPacket.B_FLAG |
+                    ControllerPacket.X_FLAG | ControllerPacket.Y_FLAG |
+                    ControllerPacket.UP_FLAG | ControllerPacket.DOWN_FLAG |
+                    ControllerPacket.LEFT_FLAG | ControllerPacket.RIGHT_FLAG |
+                    ControllerPacket.LB_FLAG | ControllerPacket.RB_FLAG |
+                    ControllerPacket.PLAY_FLAG | ControllerPacket.BACK_FLAG |
+                    ControllerPacket.LS_CLK_FLAG | ControllerPacket.RS_CLK_FLAG |
+                    ControllerPacket.SPECIAL_BUTTON_FLAG | ControllerPacket.TOUCHPAD_FLAG |
+                    ControllerPacket.MISC_FLAG;
+            short capabilities = MoonBridge.LI_CCAP_ANALOG_TRIGGERS | MoonBridge.LI_CCAP_RUMBLE;
+            if (prefConfig.enableBatteryReport) capabilities |= MoonBridge.LI_CCAP_BATTERY_STATE;
+            if (requestedMode == EXTENDED_EMULATION_DS4 || requestedMode == EXTENDED_EMULATION_DS5) {
+                capabilities |= MoonBridge.LI_CCAP_GYRO | MoonBridge.LI_CCAP_ACCEL |
+                        MoonBridge.LI_CCAP_RGB_LED | MoonBridge.LI_CCAP_TOUCHPAD;
+            } else {
+                capabilities |= MoonBridge.LI_CCAP_TRIGGER_RUMBLE;
+            }
+            capabilities = extendedEmulationCapabilities(capabilities, MoonBridge.LI_CTYPE_PS5);
+            conn.sendControllerArrivalEvent((byte) controllerNumber, getActiveControllerMask(),
+                    MoonBridge.LI_CTYPE_PS, supportedButtons, capabilities);
+            extendedRequestAttempts++;
+            lastExtendedRequestAtMs = now;
+            LimeLog.info("Artemis Extended emulation request retry " + extendedRequestAttempts +
+                    ": mode=" + requestedMode);
+        }
+    }
+
+    public void handleExtendedEmulationAck(short controllerNumber, byte requested, byte accepted, byte status) {
+        if (controllerNumber != dualSenseBridgeContext.controllerNumber) return;
+        dualSenseBridgeContext.lastExtendedAcceptedMode = status == 0 ? accepted : -1;
+        dualSenseBridgeContext.playStationHostMode = status == 0 &&
+                (accepted == EXTENDED_EMULATION_DS4 || accepted == EXTENDED_EMULATION_DS5);
+        if (status == 0) dualSenseBridgeContext.extendedRequestAttempts = 3;
     }
 
     class GenericControllerContext implements GameInputDevice{
@@ -5040,8 +5092,6 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             }
             reportedType = applyControllerEmulationPreference(reportedType);
 
-            capabilities = applyExtendedEmulationPreference(capabilities, type);
-
             // We can perform basic rumble with any vibrator
             if (vibrator != null) {
                 capabilities |= MoonBridge.LI_CCAP_RUMBLE;
@@ -5060,6 +5110,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                     supportedButtonFlags |= ControllerPacket.TOUCHPAD_FLAG;
                 }
             }
+
+            capabilities = extendedEmulationCapabilities(capabilities, type);
 
             conn.sendControllerArrivalEvent((byte)controllerNumber, getActiveControllerMask(),
                     reportedType, supportedButtonFlags, capabilities);

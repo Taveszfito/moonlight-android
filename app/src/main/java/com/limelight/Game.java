@@ -4098,6 +4098,21 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     public void setAdaptiveTriggers(short controllerNumber, byte eventFlags,
                                     byte typeLeft, byte typeRight,
                                     byte[] left, byte[] right) {
+        if ((eventFlags & 0x40) != 0 && typeLeft == 0x41 && typeRight == 0x45 &&
+                left != null && left.length >= 5 && left[0] == 0x58 && left[1] == 1) {
+            int requested = left[2] & 0xFF;
+            int accepted = left[3] & 0xFF;
+            int status = left[4] & 0xFF;
+            LimeLog.info("Apollo Extended emulation ACK: controller=" + controllerNumber +
+                    ", requested=" + requested + ", accepted=" + accepted + ", status=" + status);
+            controllerHandler.handleExtendedEmulationAck(controllerNumber, (byte) requested,
+                    (byte) accepted, (byte) status);
+            runOnUiThread(() -> Toast.makeText(this,
+                    "Apollo Extended: controller mode " + accepted +
+                            (status == 0 ? " active" : " failed"),
+                    Toast.LENGTH_SHORT).show());
+            return;
+        }
         controllerHandler.handleAdaptiveTriggers(controllerNumber, eventFlags,
                 typeLeft, typeRight, left, right);
     }

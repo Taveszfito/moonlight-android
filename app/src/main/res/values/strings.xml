@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="title_controller_emulation_mode">Host controller emulation</string>
+    <string name="title_controller_emulation_mode">Host controller emulation (Extended)</string>
     <string name="summary_controller_emulation_mode">Auto follows the connected controller. A host-side forced controller setting always takes priority.</string>
     <string name="controller_emulation_auto">Automatic</string>
     <string name="controller_emulation_xbox">Xbox 360</string>
