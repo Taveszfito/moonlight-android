@@ -245,6 +245,8 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     private TextView notificationOverlayView;
     private TextView controllerLowBatteryOverlayView;
     private TextView controllerConnectionOverlayView;
+    private View controllerConnectionOverlayContainer;
+    private View controllerConnectionLogClearView;
     private boolean controllerBatteryWasLow;
     private long lastControllerLowBatteryWarningMs;
     private static final int CONTROLLER_LOW_BATTERY_PERCENT = 15;
@@ -564,6 +566,12 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         notificationOverlayView = findViewById(R.id.notificationOverlay);
         controllerLowBatteryOverlayView = findViewById(R.id.controllerLowBatteryOverlay);
         controllerConnectionOverlayView = findViewById(R.id.controllerConnectionOverlay);
+        controllerConnectionOverlayContainer = findViewById(R.id.controllerConnectionOverlayContainer);
+        controllerConnectionLogClearView = findViewById(R.id.controllerConnectionLogClear);
+        controllerConnectionLogClearView.setOnClickListener(view -> {
+            DualSenseBridge.clearIncidentHistory();
+            refreshControllerConnectionOverlay();
+        });
         DualSenseBridge.addInputListener(controllerBatteryInputListener);
         timerHandler.post(updateControllerConnectionOverlay);
 
@@ -1835,9 +1843,9 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     }
 
     private void refreshControllerConnectionOverlay() {
-        if (controllerConnectionOverlayView == null) return;
+        if (controllerConnectionOverlayView == null || controllerConnectionOverlayContainer == null) return;
         if (!DualSenseBridge.isConnectionOverlayEnabled()) {
-            controllerConnectionOverlayView.setVisibility(View.GONE);
+            controllerConnectionOverlayContainer.setVisibility(View.GONE);
             return;
         }
 
@@ -1884,13 +1892,20 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
         String battery = snapshot.getBatteryPercent() >= 0 ?
                 "  ·  " + snapshot.getBatteryPercent() + "%" : "";
-        controllerConnectionOverlayView.setText(getString(
+        String overlayText = getString(
                 R.string.dualsense_diag_overlay_text, linkState, quality, battery,
                 Math.max(0L, snapshot.getHidInputAgeMs()),
-                snapshot.getDroppedInputPackets(), cause));
+                snapshot.getDroppedInputPackets(), cause);
+        if (!snapshot.getRecentIncidentLog().isEmpty()) {
+            overlayText += "\n\n" + getString(R.string.dualsense_diag_recent_events) +
+                    "\n" + snapshot.getRecentIncidentLog();
+        }
+        controllerConnectionLogClearView.setVisibility(
+                snapshot.getRecentIncidentLog().isEmpty() ? View.GONE : View.VISIBLE);
+        controllerConnectionOverlayView.setText(overlayText);
         controllerConnectionOverlayView.setTextColor(quality >= 85 ? 0xFFE8FFF0 :
                 quality >= 50 ? 0xFFFFF1C2 : 0xFFFFD6D6);
-        controllerConnectionOverlayView.setVisibility(View.VISIBLE);
+        controllerConnectionOverlayContainer.setVisibility(View.VISIBLE);
     }
 
     @Override

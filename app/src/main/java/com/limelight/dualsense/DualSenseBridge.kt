@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.text.format.DateFormat
 import com.example.usbbtonandroid.DualSenseBtOutputBuilder
 import com.example.usbbtonandroid.DualSenseInput
 import com.example.usbbtonandroid.DualSenseInputParser
@@ -49,6 +50,7 @@ object DualSenseBridge {
     private val deviceLastSeenAt = linkedMapOf<String, Long>()
     private val ignoredDeviceCallbacksUntil = mutableMapOf<String, Long>()
     private val logLines = ArrayDeque<String>()
+    private val incidentHistoryLines = ArrayDeque<String>()
     private val outputLock = Any()
     private var outputConfig = DualSenseOutputConfig()
     @Volatile private var ledOverrideActive = false
@@ -80,6 +82,8 @@ object DualSenseBridge {
         override fun run() {
             if (controllerConnected && lastInputAtMs != 0L &&
                 SystemClock.elapsedRealtime() - lastInputAtMs > INPUT_TIMEOUT_MS) {
+                recordIncident(s(R.string.dualsense_diag_input_timeout_history,
+                    SystemClock.elapsedRealtime() - lastInputAtMs))
                 beginSmartRecovery()
                 markControllerDisconnected(s(R.string.dualsense_bridge_status_connection_lost))
             }
@@ -283,7 +287,8 @@ object DualSenseBridge {
             link?.lastIncidentType ?: HciUsbController.INCIDENT_NONE,
             if (link == null || link.lastIncidentAtMs == 0L) -1L else now - link.lastIncidentAtMs,
             link?.lastIncidentDurationMs ?: 0L,
-            smartRecoveryInProgress, adapterRecoveryPerformed
+            smartRecoveryInProgress, adapterRecoveryPerformed,
+            synchronized(incidentHistoryLines) { incidentHistoryLines.joinToString("\n") }
         )
     }
 
@@ -323,6 +328,11 @@ object DualSenseBridge {
         synchronized(devicesByAddress) { devicesByAddress.values.toList() }
 
     @JvmStatic fun getLog(): String = synchronized(logLines) { logLines.joinToString("\n") }
+
+    @JvmStatic fun clearIncidentHistory() {
+        synchronized(incidentHistoryLines) { incidentHistoryLines.clear() }
+        notifyState()
+    }
 
     @JvmStatic fun sendRumble(lowFrequency: Short, highFrequency: Short): Boolean {
         val left = (lowFrequency.toInt() ushr 8) and 0xFF
@@ -604,6 +614,44 @@ object DualSenseBridge {
             logLines.addLast(value)
             while (logLines.size > 160) logLines.removeFirst()
         }
+        if (isDiagnosticIncident(value)) recordIncident(value)
+    }
+
+    private fun isDiagnosticIncident(value: String): Boolean =
+        value.contains("Disconnection Complete", ignoreCase = true) ||
+            value.contains("HID radio/USB input gap", ignoreCase = true) ||
+            value.contains("App input dispatch stall", ignoreCase = true) ||
+            value.contains("Input queue overrun", ignoreCase = true) ||
+            value.contains("DualSense output USB stall", ignoreCase = true) ||
+            value.contains("DualSense output write failed", ignoreCase = true) ||
+            value.contains("L2CAP signaling error", ignoreCase = true) ||
+            value.contains("ACL carry buffer full", ignoreCase = true) ||
+            value.contains("USB stream", ignoreCase = true) ||
+            value.startsWith("HIBA:", ignoreCase = true)
+
+    private fun recordIncident(value: String) {
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val timestamp = DateFormat.format("HH:mm:ss", System.currentTimeMillis()).toString()
+        val link = controller?.getDiagnostics()
+        val hidAge = if (link == null || link.lastHidInputAtMs == 0L) -1L
+            else (nowElapsed - link.lastHidInputAtMs).coerceAtLeast(0L)
+        val relayAge = if (lastStreamRelayAtMs == 0L) -1L
+            else (nowElapsed - lastStreamRelayAtMs).coerceAtLeast(0L)
+        val details = if (link == null) {
+            "link unavailable"
+        } else {
+            "link ${link.linkQualityPercent}% · HID ${if (hidAge < 0) "n/a" else "${hidAge}ms"}" +
+                " · gap ${link.lastHidGapMs}ms · dropped ${link.droppedInputPackets}" +
+                " · dispatch ${link.lastInputDispatchDurationMs}ms" +
+                " · relay ${if (relayAge < 0) "n/a" else "${relayAge}ms"}" +
+                " · output ${link.lastOutputStallMs}ms"
+        }
+        synchronized(incidentHistoryLines) {
+            val line = "$timestamp  $value\n   $details"
+            if (incidentHistoryLines.lastOrNull() == line) return
+            incidentHistoryLines.addLast(line)
+            while (incidentHistoryLines.size > 4) incidentHistoryLines.removeFirst()
+        }
     }
 
     private fun notifyState() = stateListeners.forEach { it.onStateChanged() }
@@ -641,7 +689,8 @@ object DualSenseBridge {
         val lastIncidentAgeMs: Long,
         val lastIncidentDurationMs: Long,
         val recoveryInProgress: Boolean,
-        val adapterRecoveryPerformed: Boolean
+        val adapterRecoveryPerformed: Boolean,
+        val recentIncidentLog: String
     )
 
     private const val DISCOVERED_DEVICE_EXPIRY_MS = 30_000L

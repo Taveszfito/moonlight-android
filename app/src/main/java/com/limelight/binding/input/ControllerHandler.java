@@ -1612,6 +1612,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             }
         }
         sendControllerInputPacket(context);
+        sendDualSenseBridgeBatteryIfNeeded(context, input);
         kotlin.Triple<Integer, Integer, Integer> accel = input.getAccel();
         if (accel != null && context.playStationHostMode && shouldSendBridgeMotion(
                 context.accelReportRateHz, context.bridgeLastAccelHostReportNs)) {
@@ -1626,6 +1627,57 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             sendDualSenseBridgeTouchEvents(context, input.getTouches());
         }
         DualSenseBridge.markStreamInputForwarded();
+    }
+
+    private void sendDualSenseBridgeBatteryIfNeeded(BridgeControllerContext context,
+                                                     DualSenseInput input) {
+        if (!prefConfig.enableBatteryReport || !context.assignedControllerNumber) {
+            return;
+        }
+
+        int percent = input.getBatteryPercent();
+        byte state;
+        switch (input.getBatteryStatus()) {
+            case "Charging":
+                state = MoonBridge.LI_BATTERY_STATE_CHARGING;
+                break;
+            case "Discharging":
+                state = MoonBridge.LI_BATTERY_STATE_DISCHARGING;
+                break;
+            case "Not charging":
+                state = MoonBridge.LI_BATTERY_STATE_NOT_CHARGING;
+                break;
+            case "Full":
+                state = MoonBridge.LI_BATTERY_STATE_FULL;
+                break;
+            default:
+                state = MoonBridge.LI_BATTERY_STATE_UNKNOWN;
+                break;
+        }
+
+        byte reportedPercent = percent < 0 ? MoonBridge.LI_BATTERY_PERCENTAGE_UNKNOWN :
+                (byte) Math.max(0, Math.min(100, percent));
+        int comparablePercent = reportedPercent & 0xFF;
+        if (context.bridgeLastBatteryState == state &&
+                context.bridgeLastBatteryPercent == comparablePercent) {
+            return;
+        }
+
+        // Apollo's Windows DS4 backend doesn't refresh the coarse battery-level nibble
+        // while switching from a special charging state to wireless discharging. It
+        // leaves the virtual pad stuck at its 50% fallback even though the separate
+        // 0-255 battery field contains the right value. Normalize that nibble first,
+        // then immediately report the real wireless state. Battery updates are rare,
+        // and both packets use the reliable per-controller channel in this order.
+        if (state == MoonBridge.LI_BATTERY_STATE_DISCHARGING) {
+            conn.sendControllerBatteryEvent((byte) context.controllerNumber,
+                    MoonBridge.LI_BATTERY_STATE_CHARGING, reportedPercent);
+        }
+        conn.sendControllerBatteryEvent((byte) context.controllerNumber, state, reportedPercent);
+        context.bridgeLastBatteryState = state;
+        context.bridgeLastBatteryPercent = comparablePercent;
+        LimeLog.info("DualSense Bridge battery reported to host: state=" + state +
+                ", percent=" + comparablePercent);
     }
 
     private void sendDualSenseBridgeTouchEvents(BridgeControllerContext context,
@@ -4468,6 +4520,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         boolean playStationHostMode;
         long bridgeLastGyroHostReportNs;
         long bridgeLastAccelHostReportNs;
+        int bridgeLastBatteryPercent = -2;
+        byte bridgeLastBatteryState = (byte) -1;
         final SparseArray<DualSenseTouchPoint> bridgeTouches = new SparseArray<>();
 
         BridgeControllerContext() {
@@ -4491,6 +4545,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                     DualSenseBridge.getHostControllerMode());
             playStationHostMode = playStationMode;
             short capabilities = MoonBridge.LI_CCAP_ANALOG_TRIGGERS | MoonBridge.LI_CCAP_RUMBLE;
+            if (prefConfig.enableBatteryReport) {
+                capabilities |= MoonBridge.LI_CCAP_BATTERY_STATE;
+            }
             if (playStationMode) {
                 capabilities |= MoonBridge.LI_CCAP_GYRO | MoonBridge.LI_CCAP_ACCEL |
                         MoonBridge.LI_CCAP_RGB_LED | MoonBridge.LI_CCAP_TOUCHPAD;
@@ -4516,6 +4573,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             int result = conn.sendControllerArrivalEvent((byte) controllerNumber, getActiveControllerMask(),
                     reportedType,
                     supportedButtons, capabilities);
+            bridgeLastBatteryPercent = -2;
+            bridgeLastBatteryState = (byte) -1;
             LimeLog.info("DualSense Bridge controller arrival: mode=" +
                     (playStationMode ? "PlayStation" : "Xbox") + ", result=" + result +
                     ", controller=" + controllerNumber);

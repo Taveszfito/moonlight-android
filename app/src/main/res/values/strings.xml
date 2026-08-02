@@ -911,6 +911,9 @@
     <string name="dualsense_diag_radio_usb_path">Input stopped before the app: controller, radio, adapter or USB path</string>
     <string name="dualsense_diag_app_relay_path">HID input is arriving, but the app/stream relay is delayed</string>
     <string name="dualsense_diag_radio_usb_gap">Radio/adapter/USB input gap: %1$d ms</string>
+    <string name="dualsense_diag_recent_events">Recent connection events</string>
+    <string name="dualsense_diag_clear_events">Clear connection event history</string>
+    <string name="dualsense_diag_input_timeout_history">HID input timeout: no report for %1$d ms</string>
     <string name="dualsense_diag_app_stall">App input processing stall: %1$d ms</string>
     <string name="dualsense_diag_queue_overrun">App input queue overrun</string>
     <string name="dualsense_diag_output_path">Controller output/USB write problem: %1$d ms</string>

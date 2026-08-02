@@ -50,24 +50,43 @@
         android:preferKeepClear="true"
         android:visibility="gone" />
 
-    <TextView
-        android:id="@+id/controllerConnectionOverlay"
+    <FrameLayout
+        android:id="@+id/controllerConnectionOverlayContainer"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="top|end"
         android:layout_marginTop="12dp"
         android:layout_marginEnd="12dp"
         android:background="@drawable/controller_connection_overlay_background"
-        android:paddingStart="11dp"
-        android:paddingTop="8dp"
-        android:paddingEnd="11dp"
-        android:paddingBottom="8dp"
-        android:textColor="#E8FFF0"
-        android:textSize="11sp"
-        android:fontFamily="monospace"
         android:elevation="21dp"
         android:preferKeepClear="true"
-        android:visibility="gone" />
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/controllerConnectionOverlay"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingStart="11dp"
+            android:paddingTop="8dp"
+            android:paddingEnd="38dp"
+            android:paddingBottom="31dp"
+            android:textColor="#E8FFF0"
+            android:textSize="11sp"
+            android:fontFamily="monospace" />
+
+        <ImageButton
+            android:id="@+id/controllerConnectionLogClear"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:layout_gravity="bottom|end"
+            android:layout_marginEnd="4dp"
+            android:layout_marginBottom="3dp"
+            android:padding="6dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/ic_qm_delete"
+            android:contentDescription="@string/dualsense_diag_clear_events"
+            android:visibility="gone" />
+    </FrameLayout>
 
     <TextView
         android:id="@+id/controllerLowBatteryOverlay"
