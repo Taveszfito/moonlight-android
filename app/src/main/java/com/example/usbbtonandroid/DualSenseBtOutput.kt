@@ -8,7 +8,9 @@ data class DualSenseOutputConfig(
     val leftRumble: Int = 0, val rightRumble: Int = 0,
     val leftTriggerMode: TriggerMode = TriggerMode.OFF,
     val rightTriggerMode: TriggerMode = TriggerMode.OFF,
-    val triggerStrength: Int = 100
+    val triggerStrength: Int = 100,
+    val leftTriggerEffect: ByteArray? = null,
+    val rightTriggerEffect: ByteArray? = null
 )
 
 enum class TriggerMode { OFF, RESISTANCE, VIBRATION }
@@ -24,8 +26,10 @@ object DualSenseBtOutputBuilder {
         report[5] = config.rightRumble.coerceIn(0, 255).toByte()
         report[6] = config.leftRumble.coerceIn(0, 255).toByte()
         report[11] = if (config.micLed) 1 else 0
-        writeTrigger(report, 13, config.rightTriggerMode, config.triggerStrength)
-        writeTrigger(report, 24, config.leftTriggerMode, config.triggerStrength)
+        writeTrigger(report, 13, config.rightTriggerMode, config.triggerStrength,
+            config.rightTriggerEffect)
+        writeTrigger(report, 24, config.leftTriggerMode, config.triggerStrength,
+            config.leftTriggerEffect)
         report[41] = 0x03
         report[44] = 0x02
         report[45] = 0
@@ -45,8 +49,13 @@ object DualSenseBtOutputBuilder {
         return report
     }
 
-    private fun writeTrigger(report: ByteArray, offset: Int, mode: TriggerMode, percent: Int) {
+    private fun writeTrigger(report: ByteArray, offset: Int, mode: TriggerMode, percent: Int,
+                             rawEffect: ByteArray?) {
         repeat(11) { report[offset + it] = 0 }
+        if (rawEffect != null && rawEffect.size >= 11) {
+            rawEffect.copyInto(report, offset, 0, 11)
+            return
+        }
         val strength = percent.coerceIn(0, 100) * 255 / 100
         when (mode) {
             TriggerMode.OFF -> Unit

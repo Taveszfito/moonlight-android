@@ -343,8 +343,24 @@ object DualSenseBridge {
     @JvmStatic fun setAdaptiveTriggers(leftMode: Int, rightMode: Int, strength: Int): Boolean =
         updateOutput {
             it.copy(leftTriggerMode = triggerMode(leftMode),
-                rightTriggerMode = triggerMode(rightMode), triggerStrength = strength.coerceIn(0, 100))
+                rightTriggerMode = triggerMode(rightMode), triggerStrength = strength.coerceIn(0, 100),
+                leftTriggerEffect = null, rightTriggerEffect = null)
         }
+
+    @JvmStatic fun setAdaptiveTriggerEffects(eventFlags: Byte, leftType: Byte, rightType: Byte,
+                                              left: ByteArray?, right: ByteArray?): Boolean = updateOutput {
+        val leftEffect = ByteArray(11)
+        val rightEffect = ByteArray(11)
+        if ((eventFlags.toInt() and 0x08) != 0) {
+            leftEffect[0] = leftType
+            left?.copyInto(leftEffect, 1, 0, minOf(10, left.size))
+        }
+        if ((eventFlags.toInt() and 0x04) != 0) {
+            rightEffect[0] = rightType
+            right?.copyInto(rightEffect, 1, 0, minOf(10, right.size))
+        }
+        it.copy(leftTriggerEffect = leftEffect, rightTriggerEffect = rightEffect)
+    }
 
     @JvmStatic fun setPlayerLeds(mask: Int, micLed: Boolean): Boolean = updateOutput {
         it.copy(playerLeds = mask and 0x1F, micLed = micLed)

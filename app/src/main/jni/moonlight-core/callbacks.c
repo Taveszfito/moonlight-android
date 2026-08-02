@@ -38,8 +38,13 @@ static jmethodID BridgeClSetHdrModeMethod;
 static jmethodID BridgeClRumbleTriggersMethod;
 static jmethodID BridgeClSetMotionEventStateMethod;
 static jmethodID BridgeClSetControllerLEDMethod;
+static jmethodID BridgeClSetAdaptiveTriggersMethod;
 static jbyteArray DecodedFrameBuffer;
 static jshortArray DecodedAudioBuffer;
+
+void BridgeClSetAdaptiveTriggers(uint16_t controllerNumber, uint8_t eventFlags,
+                                 uint8_t typeLeft, uint8_t typeRight,
+                                 uint8_t *left, uint8_t *right);
 
 void DetachThread(void* context) {
     (*JVM)->DetachCurrentThread(JVM);
@@ -102,6 +107,7 @@ Java_com_limelight_nvstream_jni_MoonBridge_init(JNIEnv *env, jclass clazz) {
     BridgeClRumbleTriggersMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClRumbleTriggers", "(SSS)V");
     BridgeClSetMotionEventStateMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClSetMotionEventState", "(SBS)V");
     BridgeClSetControllerLEDMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClSetControllerLED", "(SBBB)V");
+    BridgeClSetAdaptiveTriggersMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClSetAdaptiveTriggers", "(SBBB[B[B)V");
 }
 
 int BridgeDrSetup(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) {
@@ -426,6 +432,7 @@ static CONNECTION_LISTENER_CALLBACKS BridgeConnListenerCallbacks = {
         .rumbleTriggers = BridgeClRumbleTriggers,
         .setMotionEventState = BridgeClSetMotionEventState,
         .setControllerLED = BridgeClSetControllerLED,
+        .setAdaptiveTriggers = BridgeClSetAdaptiveTriggers,
 };
 
 static bool
@@ -517,4 +524,22 @@ Java_com_limelight_nvstream_jni_MoonBridge_startConnection(JNIEnv *env, jclass c
     }
 
     return ret;
+}
+
+void BridgeClSetAdaptiveTriggers(uint16_t controllerNumber, uint8_t eventFlags,
+                                 uint8_t typeLeft, uint8_t typeRight,
+                                 uint8_t *left, uint8_t *right) {
+    JNIEnv* env = GetThreadEnv();
+    jbyteArray leftArray = (*env)->NewByteArray(env, 10);
+    jbyteArray rightArray = (*env)->NewByteArray(env, 10);
+    (*env)->SetByteArrayRegion(env, leftArray, 0, 10, (jbyte*)left);
+    (*env)->SetByteArrayRegion(env, rightArray, 0, 10, (jbyte*)right);
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClSetAdaptiveTriggersMethod,
+                                controllerNumber, (jbyte)eventFlags, (jbyte)typeLeft,
+                                (jbyte)typeRight, leftArray, rightArray);
+    (*env)->DeleteLocalRef(env, leftArray);
+    (*env)->DeleteLocalRef(env, rightArray);
+    if ((*env)->ExceptionCheck(env)) {
+        (*JVM)->DetachCurrentThread(JVM);
+    }
 }

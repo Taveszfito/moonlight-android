@@ -1561,6 +1561,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         currentControllers |= 1;
         refreshControllerShortcutPreferences();
         BridgeControllerContext context = dualSenseBridgeContext;
+        if (!context.assignedControllerNumber) {
+            assignControllerNumberIfNeeded(context);
+        }
         int buttonFlags = dualSenseButtonFlags(input);
         float menuStickX = (input.getLeftX() - 128) / 127.0f;
         float menuStickY = (input.getLeftY() - 128) / 127.0f;
@@ -3667,6 +3670,22 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     public boolean handleButtonUp(KeyEvent event) {
         InputDeviceContext context = getContextForEvent(event);
         return handleButtonUp(context, event);
+    }
+
+    public void handleAdaptiveTriggers(short controllerNumber, byte eventFlags,
+                                       byte typeLeft, byte typeRight,
+                                       byte[] left, byte[] right) {
+        if (stopped || controllerNumber != dualSenseBridgeContext.controllerNumber ||
+                !DualSenseBridge.getControllerConnected()) {
+            return;
+        }
+
+        if ((eventFlags & 0x80) != 0 && left != null && left.length > 0) {
+            DualSenseBridge.setPlayerLeds(left[0] & 0x1F, false);
+        }
+        if ((eventFlags & 0x0C) != 0) {
+            DualSenseBridge.setAdaptiveTriggerEffects(eventFlags, typeLeft, typeRight, left, right);
+        }
     }
 
     private boolean handleButtonUp(InputDeviceContext context, KeyEvent event) {
