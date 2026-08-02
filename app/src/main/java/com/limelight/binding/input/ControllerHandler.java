@@ -68,13 +68,39 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
     private static final String CONTROLLER_EMULATION_MODE_PREF = "controller_emulation_mode";
 
+    // High capability bits reserved for the Apollo Extended / Artemis Extended
+    // emulation handshake. Legacy hosts ignore them and still receive a valid
+    // standard Moonlight controller type.
+    private static final short EXTENDED_EMULATION_MAGIC = (short) 0xEC00;
+    private static final short EXTENDED_EMULATION_XBOX = 0x0100;
+    private static final short EXTENDED_EMULATION_DS4 = 0x0200;
+    private static final short EXTENDED_EMULATION_DS5 = 0x0300;
+
     private byte applyControllerEmulationPreference(byte detectedType) {
         String mode = PreferenceManager.getDefaultSharedPreferences(activityContext)
                 .getString(CONTROLLER_EMULATION_MODE_PREF, "auto");
         if ("xbox".equals(mode)) return MoonBridge.LI_CTYPE_XBOX;
-        if ("ds4".equals(mode)) return MoonBridge.LI_CTYPE_PS4;
-        if ("ds5".equals(mode)) return MoonBridge.LI_CTYPE_PS5;
+        if ("ds4".equals(mode) || "ds5".equals(mode)) return MoonBridge.LI_CTYPE_PS;
+        // Keep the wire type standards-compliant for fallback hosts. Extended
+        // hosts recover the exact Sony generation from the capability marker.
+        if (detectedType == MoonBridge.LI_CTYPE_PS4 || detectedType == MoonBridge.LI_CTYPE_PS5) {
+            return MoonBridge.LI_CTYPE_PS;
+        }
         return detectedType;
+    }
+
+    private short applyExtendedEmulationPreference(short capabilities, byte detectedType) {
+        String mode = PreferenceManager.getDefaultSharedPreferences(activityContext)
+                .getString(CONTROLLER_EMULATION_MODE_PREF, "auto");
+        short requestedMode;
+        if ("xbox".equals(mode)) requestedMode = EXTENDED_EMULATION_XBOX;
+        else if ("ds4".equals(mode)) requestedMode = EXTENDED_EMULATION_DS4;
+        else if ("ds5".equals(mode)) requestedMode = EXTENDED_EMULATION_DS5;
+        else if (detectedType == MoonBridge.LI_CTYPE_XBOX) requestedMode = EXTENDED_EMULATION_XBOX;
+        else if (detectedType == MoonBridge.LI_CTYPE_PS5) requestedMode = EXTENDED_EMULATION_DS5;
+        else if (detectedType == MoonBridge.LI_CTYPE_PS || detectedType == MoonBridge.LI_CTYPE_PS4) requestedMode = EXTENDED_EMULATION_DS4;
+        else requestedMode = 0;
+        return (short) (capabilities | EXTENDED_EMULATION_MAGIC | requestedMode);
     }
 
     private static boolean isDualSenseProduct(int vendorId, int productId) {
@@ -4590,6 +4616,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             else {
                 capabilities |= MoonBridge.LI_CCAP_TRIGGER_RUMBLE;
             }
+            capabilities = applyExtendedEmulationPreference(capabilities, MoonBridge.LI_CTYPE_PS5);
             // Apollo ignores controller-arrival metadata when this player slot was
             // already allocated by an earlier legacy multi-controller packet. This
             // can happen with OSC or another early player-0 event. Explicitly remove
@@ -5012,6 +5039,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 reportedType = type;
             }
             reportedType = applyControllerEmulationPreference(reportedType);
+
+            capabilities = applyExtendedEmulationPreference(capabilities, type);
 
             // We can perform basic rumble with any vibrator
             if (vibrator != null) {
