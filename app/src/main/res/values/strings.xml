@@ -6,6 +6,13 @@
     <string name="controller_emulation_xbox">Xbox 360</string>
     <string name="controller_emulation_ds4">DualShock 4</string>
     <string name="controller_emulation_ds5">DualSense</string>
+    <string name="title_dualsense_audio_mode">DualSense audio and HD haptics (Extended)</string>
+    <string name="summary_dualsense_audio_mode">Controls native four-channel DualSense audio received from Apollo Extended. Full speaker and HD haptics require a direct USB controller connection.</string>
+    <string name="dualsense_audio_auto">Automatic (USB native, Bluetooth fallback)</string>
+    <string name="dualsense_audio_usb_speaker">USB: built-in speaker + HD haptics</string>
+    <string name="dualsense_audio_usb_headset">USB: headset jack + HD haptics</string>
+    <string name="dualsense_audio_haptics_only">HD haptics only</string>
+    <string name="dualsense_audio_off">Disabled</string>
     <!-- Shortcut strings -->
     <string name="scut_deleted_pc">PC deleted</string>
     <string name="scut_not_paired">PC not paired</string>

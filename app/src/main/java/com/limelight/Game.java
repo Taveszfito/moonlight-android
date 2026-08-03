@@ -30,6 +30,7 @@ import com.limelight.binding.video.MediaCodecDecoderRenderer;
 import com.limelight.binding.video.MediaCodecHelper;
 import com.limelight.binding.video.PerfOverlayListener;
 import com.limelight.dualsense.DualSenseBridge;
+import com.limelight.dualsense.DualSenseAudioBridge;
 import com.example.usbbtonandroid.DualSenseInput;
 import com.example.usbbtonandroid.hci.HciUsbController;
 import com.limelight.nvstream.NvConnection;
@@ -400,6 +401,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
         // Read the stream preferences
         prefConfig = PreferenceConfiguration.readPreferences(this);
+        DualSenseAudioBridge.configure(prefConfig.dualSenseAudioMode);
         tombstonePrefs = Game.this.getSharedPreferences("DecoderTombstone", 0);
 
         if (prefConfig.fullScreen) {
@@ -1900,6 +1902,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             overlayText += "\n\n" + getString(R.string.dualsense_diag_recent_events) +
                     "\n" + snapshot.getRecentIncidentLog();
         }
+        overlayText += "\n\nAudio / HD haptics: " + DualSenseAudioBridge.diagnostics();
         controllerConnectionLogClearView.setVisibility(
                 snapshot.getRecentIncidentLog().isEmpty() ? View.GONE : View.VISIBLE);
         controllerConnectionOverlayView.setText(overlayText);
@@ -3865,6 +3868,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
     @Override
     public void connectionTerminated(final int errorCode) {
+        DualSenseAudioBridge.stop();
         // Perform a connection test if the failure could be due to a blocked port
         // This does network I/O, so don't do it on the main thread.
         final int portFlags = MoonBridge.getPortFlagsFromTerminationErrorCode(errorCode);
@@ -4121,6 +4125,13 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         }
         controllerHandler.handleAdaptiveTriggers(controllerNumber, eventFlags,
                 typeLeft, typeRight, left, right);
+    }
+
+    @Override
+    public void dualSenseAudio(short controllerNumber, short sequence, short frameCount,
+                               byte channels, byte flags, byte[] pcm) {
+        DualSenseAudioBridge.receive(controllerNumber & 0xFFFF, sequence & 0xFFFF,
+                frameCount & 0xFFFF, channels & 0xFF, flags & 0xFF, pcm);
     }
 
     @Override

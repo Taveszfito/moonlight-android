@@ -58,6 +58,7 @@ add_library(moonlight-core SHARED
     moonlight-core/moonlight-common-c/enet/win32.c
     moonlight-core/simplejni.c
     moonlight-core/callbacks.c
+    moonlight-core/dualsense_iso.cpp
     moonlight-core/minisdl.c
 )
 

@@ -24,6 +24,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import com.example.usbbtonandroid.DualSenseInput;
 import com.example.usbbtonandroid.hci.HciUsbController;
 import com.limelight.dualsense.DualSenseBridge;
+import com.limelight.dualsense.DualSenseAudioBridge;
 import com.limelight.utils.UiHelper;
 
 import java.util.List;
@@ -100,7 +101,9 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
                 getString(R.string.dualsense_bridge_diagnostics), v -> {
                     togglePanel(diagnosticsPanel);
                     if (diagnosticsPanel.getVisibility() == View.VISIBLE) {
-                        logView.setText(DualSenseBridge.getLog());
+                        logView.setText("DualSense audio / HD haptics\n" +
+                                DualSenseAudioBridge.diagnostics() + "\n\n" +
+                                DualSenseBridge.getLog());
                     }
                 }));
         root.addView(header, match(dp(8)));
@@ -262,7 +265,8 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
                 "\nSticks: " + input.getLeftX() + ", " + input.getLeftY() + "  |  " +
                 input.getRightX() + ", " + input.getRightY() +
                 "\nTriggers: " + input.getLeftTrigger() + " / " + input.getRightTrigger() +
-                "\nButtons: " + input.getPressed());
+                "\nButtons: " + input.getPressed() +
+                "\nAudio/HD haptics: " + DualSenseAudioBridge.diagnostics());
         List<HciUsbController.HciDevice> devices = DualSenseBridge.getDevices();
         StringBuilder signature = new StringBuilder();
         signature.append("connected=").append(connected).append(';');

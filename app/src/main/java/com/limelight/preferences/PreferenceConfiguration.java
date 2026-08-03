@@ -36,6 +36,8 @@ public class PreferenceConfiguration {
     public static final String VOLUME_BUTTON_MODE_PREF_STRING = "list_volume_button_mode";
     public static final String VOLUME_BUTTON_MODE_ANDROID = "android";
     public static final String VOLUME_BUTTON_MODE_WINDOWS = "windows";
+    public static final String DUALSENSE_AUDIO_MODE_PREF_STRING = "dualsense_audio_mode";
+    public static final String DEFAULT_DUALSENSE_AUDIO_MODE = "auto";
 
     private static final String LEGACY_RES_FPS_PREF_STRING = "list_resolution_fps";
     private static final String LEGACY_ENABLE_51_SURROUND_PREF_STRING = "checkbox_51_surround";
@@ -418,6 +420,7 @@ public class PreferenceConfiguration {
     public boolean gamepadMotionSensorsFallbackToDevice;
     public boolean forceMotionSensorsFallbackToDevice;
     public boolean enableRumble;
+    public String dualSenseAudioMode;
     public boolean preventPacketLoss;
 
     public boolean rememberZoomPan;
@@ -1080,6 +1083,8 @@ private static int getFramePacingValue(Context context) {
         config.gamepadMotionSensorsFallbackToDevice = prefs.getBoolean(GAMEPAD_MOTION_FALLBACK_PREF_STRING, DEFAULT_GAMEPAD_MOTION_FALLBACK);
         config.forceMotionSensorsFallbackToDevice = prefs.getBoolean(FORCE_MOTION_SENSORS_FALLBACK_PREF_STRING, DEFAULT_FORCE_MOTION_SENSORS_FALLBACK);
         config.enableRumble = prefs.getBoolean(ENABLE_RUMBLE_PREF_STRING, DEFAULT_ENABLE_RUMBLE);
+        config.dualSenseAudioMode = prefs.getString(DUALSENSE_AUDIO_MODE_PREF_STRING,
+                DEFAULT_DUALSENSE_AUDIO_MODE);
         config.preventPacketLoss = prefs.getBoolean(PREVENT_PACKET_LOSS_PREF_STRING, DEFAULT_PREVENT_PACKET_LOSS);
 
         // Read custom values

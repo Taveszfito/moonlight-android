@@ -12,6 +12,20 @@
         <item>ds4</item>
         <item>ds5</item>
     </string-array>
+    <string-array name="dualsense_audio_mode_names">
+        <item>@string/dualsense_audio_auto</item>
+        <item>@string/dualsense_audio_usb_speaker</item>
+        <item>@string/dualsense_audio_usb_headset</item>
+        <item>@string/dualsense_audio_haptics_only</item>
+        <item>@string/dualsense_audio_off</item>
+    </string-array>
+    <string-array name="dualsense_audio_mode_values" translatable="false">
+        <item>auto</item>
+        <item>usb_speaker</item>
+        <item>usb_headset</item>
+        <item>haptics_only</item>
+        <item>off</item>
+    </string-array>
     <string-array name="resolution_names">
         <item>@string/resolution_360p</item>
         <item>@string/resolution_480p</item>

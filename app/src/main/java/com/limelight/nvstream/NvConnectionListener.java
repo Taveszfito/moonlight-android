@@ -22,4 +22,6 @@ public interface NvConnectionListener {
     void setControllerLED(short controllerNumber, byte r, byte g, byte b);
     void setAdaptiveTriggers(short controllerNumber, byte eventFlags, byte typeLeft,
                              byte typeRight, byte[] left, byte[] right);
+    void dualSenseAudio(short controllerNumber, short sequence, short frameCount,
+                        byte channels, byte flags, byte[] pcm);
 }

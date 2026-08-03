@@ -341,6 +341,15 @@ public class MoonBridge {
         }
     }
 
+    public static void bridgeClDualSenseAudio(short controllerNumber, short sequence,
+                                               short frameCount, byte channels,
+                                               byte flags, byte[] pcm) {
+        if (connectionListener != null) {
+            connectionListener.dualSenseAudio(controllerNumber, sequence, frameCount,
+                    channels, flags, pcm);
+        }
+    }
+
     public static void setupBridge(VideoDecoderRenderer videoRenderer, AudioRenderer audioRenderer, NvConnectionListener connectionListener) {
         MoonBridge.videoRenderer = videoRenderer;
         MoonBridge.audioRenderer = audioRenderer;

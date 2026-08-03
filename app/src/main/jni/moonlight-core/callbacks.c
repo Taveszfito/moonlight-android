@@ -39,12 +39,16 @@ static jmethodID BridgeClRumbleTriggersMethod;
 static jmethodID BridgeClSetMotionEventStateMethod;
 static jmethodID BridgeClSetControllerLEDMethod;
 static jmethodID BridgeClSetAdaptiveTriggersMethod;
+static jmethodID BridgeClDualSenseAudioMethod;
 static jbyteArray DecodedFrameBuffer;
 static jshortArray DecodedAudioBuffer;
 
 void BridgeClSetAdaptiveTriggers(uint16_t controllerNumber, uint8_t eventFlags,
                                  uint8_t typeLeft, uint8_t typeRight,
                                  uint8_t *left, uint8_t *right);
+void BridgeClDualSenseAudio(uint16_t controllerNumber, uint16_t sequence,
+                            uint16_t frameCount, uint8_t channels, uint8_t flags,
+                            uint8_t *pcm, uint16_t pcmLength);
 
 void DetachThread(void* context) {
     (*JVM)->DetachCurrentThread(JVM);
@@ -108,6 +112,7 @@ Java_com_limelight_nvstream_jni_MoonBridge_init(JNIEnv *env, jclass clazz) {
     BridgeClSetMotionEventStateMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClSetMotionEventState", "(SBS)V");
     BridgeClSetControllerLEDMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClSetControllerLED", "(SBBB)V");
     BridgeClSetAdaptiveTriggersMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClSetAdaptiveTriggers", "(SBBB[B[B)V");
+    BridgeClDualSenseAudioMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClDualSenseAudio", "(SSSBB[B)V");
 }
 
 int BridgeDrSetup(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) {
@@ -433,6 +438,7 @@ static CONNECTION_LISTENER_CALLBACKS BridgeConnListenerCallbacks = {
         .setMotionEventState = BridgeClSetMotionEventState,
         .setControllerLED = BridgeClSetControllerLED,
         .setAdaptiveTriggers = BridgeClSetAdaptiveTriggers,
+        .dualSenseAudio = BridgeClDualSenseAudio,
 };
 
 static bool
@@ -539,6 +545,23 @@ void BridgeClSetAdaptiveTriggers(uint16_t controllerNumber, uint8_t eventFlags,
                                 (jbyte)typeRight, leftArray, rightArray);
     (*env)->DeleteLocalRef(env, leftArray);
     (*env)->DeleteLocalRef(env, rightArray);
+    if ((*env)->ExceptionCheck(env)) {
+        (*JVM)->DetachCurrentThread(JVM);
+    }
+}
+
+void BridgeClDualSenseAudio(uint16_t controllerNumber, uint16_t sequence,
+                            uint16_t frameCount, uint8_t channels, uint8_t flags,
+                            uint8_t *pcm, uint16_t pcmLength) {
+    JNIEnv* env = GetThreadEnv();
+    jbyteArray pcmArray = (*env)->NewByteArray(env, pcmLength);
+    if (pcmArray == NULL) return;
+    (*env)->SetByteArrayRegion(env, pcmArray, 0, pcmLength, (const jbyte*)pcm);
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClDualSenseAudioMethod,
+                                (jshort)controllerNumber, (jshort)sequence,
+                                (jshort)frameCount, (jbyte)channels, (jbyte)flags,
+                                pcmArray);
+    (*env)->DeleteLocalRef(env, pcmArray);
     if ((*env)->ExceptionCheck(env)) {
         (*JVM)->DetachCurrentThread(JVM);
     }
