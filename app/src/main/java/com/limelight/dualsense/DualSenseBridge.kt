@@ -332,8 +332,11 @@ object DualSenseBridge {
         return updateOutput { it.copy(leftRumble = left, rightRumble = right) }
     }
 
-    @JvmStatic fun sendNativeBluetoothHaptics(haptics: ByteArray): Boolean =
-        runCatching { controller?.sendNativeBluetoothHaptics(haptics) == true }.getOrDefault(false)
+    @JvmStatic fun sendNativeBluetoothHaptics(haptics: ByteArray,
+                                               speakerOpus: ByteArray?): Boolean =
+        runCatching {
+            controller?.sendNativeBluetoothHaptics(haptics, speakerOpus) == true
+        }.getOrDefault(false)
 
     @JvmStatic fun stopNativeBluetoothHaptics() {
         runCatching { controller?.stopNativeBluetoothHaptics() }

@@ -6,8 +6,10 @@ import java.util.zip.CRC32
 object DualSenseBtAudioBuilder {
     const val HAPTICS_BYTES_PER_REPORT = 128
 
-    fun build(haptics: ByteArray, sequence: Int, packetCounter: Int): ByteArray {
+    fun build(haptics: ByteArray, sequence: Int, packetCounter: Int,
+              speakerOpus: ByteArray? = null): ByteArray {
         require(haptics.size == HAPTICS_BYTES_PER_REPORT)
+        require(speakerOpus == null || speakerOpus.size == SPEAKER_BYTES_PER_REPORT)
 
         // This layout is the controller's native wireless transport: two
         // consecutive 64-byte, signed 8-bit, 3 kHz stereo haptic blocks.
@@ -25,6 +27,11 @@ object DualSenseBtAudioBuilder {
         report[10] = 0xd2.toByte()
         report[11] = 64
         haptics.copyInto(report, 12)
+        if (speakerOpus != null) {
+            report[140] = 0xd3.toByte() // Native built-in speaker stream selector
+            report[141] = 200.toByte()
+            speakerOpus.copyInto(report, 142)
+        }
 
         // The final four bytes are the standard DualSense Bluetooth output CRC.
         val crc = CRC32()
@@ -45,7 +52,15 @@ object DualSenseBtAudioBuilder {
         report[1] = ((sequence and 0x0f) shl 4).toByte()
         report[2] = 0x90.toByte()
         report[3] = 0x3f
-        report[4] = 0x80.toByte() // SetStateData.AllowAudioControl
+        // PS5CTBRO's proven loud internal-speaker route, translated to the
+        // Bluetooth SetStateData layout, plus the controller's maximum
+        // SpeakerCompPreGain mode.
+        report[4] = 0xf0.toByte() // volumes + AudioControl, no rumble mode
+        report[5] = 0x80.toByte() // AllowAudioControl2
+        report[8] = 0x7f.toByte() // headphone volume field
+        report[9] = 0xff.toByte() // internal speaker volume max
+        report[11] = 0xff.toByte() // loud internal-speaker route
+        report[41] = 0x07.toByte() // SpeakerCompPreGain max
 
         val crc = CRC32()
         crc.update(0xa2)
@@ -57,4 +72,6 @@ object DualSenseBtAudioBuilder {
         report[report.size - 1] = (value ushr 24).toByte()
         return report
     }
+
+    private const val SPEAKER_BYTES_PER_REPORT = 400
 }

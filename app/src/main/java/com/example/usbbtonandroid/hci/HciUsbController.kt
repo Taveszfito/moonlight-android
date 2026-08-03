@@ -38,7 +38,7 @@ class HciUsbController(
     private var audioWorker: Thread? = null
     private val inputQueue = ArrayBlockingQueue<AclPacket>(INPUT_QUEUE_CAPACITY)
     private val outputSignal = ArrayBlockingQueue<Unit>(1)
-    private val audioQueue = ArrayBlockingQueue<ByteArray>(AUDIO_QUEUE_CAPACITY)
+    private val audioQueue = ArrayBlockingQueue<NativeAudioPayload>(AUDIO_QUEUE_CAPACITY)
     @Volatile private var latestOutputConfig: com.example.usbbtonandroid.DualSenseOutputConfig? = null
     @Volatile private var outputConnectionEpoch = 0L
     private val discoveredDevices = linkedMapOf<String, InquiryDevice>()
@@ -187,17 +187,19 @@ class HciUsbController(
     }
 
     /** Queues one native 0x39 Bluetooth haptics report worth of 3 kHz stereo PCM. */
-    fun sendNativeBluetoothHaptics(haptics: ByteArray): Boolean {
+    fun sendNativeBluetoothHaptics(haptics: ByteArray, speakerOpus: ByteArray?): Boolean {
         if (haptics.size != com.example.usbbtonandroid.DualSenseBtAudioBuilder.HAPTICS_BYTES_PER_REPORT ||
+            (speakerOpus != null && speakerOpus.size != 400) ||
             activeHandle == null || hidInterruptRemoteCid == null || lastHidInputMs == 0L) {
             return false
         }
         nativeBluetoothHapticsRequested = true
-        if (audioQueue.offer(haptics.copyOf())) return true
+        val payload = NativeAudioPayload(haptics.copyOf(), speakerOpus?.copyOf())
+        if (audioQueue.offer(payload)) return true
         // Real-time audio must remain current. Drop the oldest queued waveform,
         // never block the Moonlight receive thread and never collapse it to rumble.
         audioQueue.poll()
-        return audioQueue.offer(haptics.copyOf())
+        return audioQueue.offer(payload)
     }
 
     fun stopNativeBluetoothHaptics() {
@@ -526,7 +528,7 @@ class HciUsbController(
     private fun audioDispatchLoop() {
         while (running.get()) {
             try {
-                val haptics = audioQueue.take()
+                val audio = audioQueue.take()
                 val handle = activeHandle ?: continue
                 val cid = hidInterruptRemoteCid ?: continue
                 val epoch = outputConnectionEpoch
@@ -542,7 +544,7 @@ class HciUsbController(
                 }
                 audioPacketCounter = (audioPacketCounter + 2) and 0xff
                 val report = com.example.usbbtonandroid.DualSenseBtAudioBuilder.build(
-                    haptics, nextOutputSequence(), audioPacketCounter
+                    audio.haptics, nextOutputSequence(), audioPacketCounter, audio.speakerOpus
                 )
                 runCatching {
                     sendAcl(handle, cid, byteArrayOf(0xa2.toByte()) + report,
@@ -1449,6 +1451,10 @@ class HciUsbController(
     }
 
     private data class HciEvent(val code: Int, val parameters: ByteArray)
+    private data class NativeAudioPayload(
+        val haptics: ByteArray,
+        val speakerOpus: ByteArray?
+    )
     private data class L2capChannel(
         val psm: Int,
         val localCid: Int,

@@ -39,9 +39,16 @@ object DualSenseAudioBridge {
     private var packetsLost = 0L
     private var btNativeReports = 0L
     private var btNativeDrops = 0L
+    private var btSpeakerReports = 0L
+    private var btSpeakerEncodeFailures = 0L
     private var lastBtDiagnosticAtMs = 0L
-    private val btNativeResampler = NativeBluetoothHapticsResampler {
-        if (DualSenseBridge.sendNativeBluetoothHaptics(it)) btNativeReports++ else btNativeDrops++
+    private val btNativeResampler = NativeBluetoothHapticsResampler { haptics, speaker ->
+        if (speaker != null) btSpeakerReports++ else btSpeakerEncodeFailures++
+        if (DualSenseBridge.sendNativeBluetoothHaptics(haptics, speaker)) {
+            btNativeReports++
+        } else {
+            btNativeDrops++
+        }
     }
 
     private val permissionReceiver = object : BroadcastReceiver() {
@@ -111,12 +118,15 @@ object DualSenseAudioBridge {
         // native 3 kHz stereo Bluetooth audio reports. Do not derive rumble
         // amplitudes, envelopes, bass boosts, or any other synthetic feedback.
         if (mode == "auto" || mode == "haptics_only") {
-            btNativeResampler.pushFourChannelPcm(pcm, frameCount)
+            btNativeResampler.pushFourChannelPcm(pcm, frameCount,
+                includeSpeaker = mode != "haptics_only")
             val now = SystemClock.elapsedRealtime()
             if (now - lastBtDiagnosticAtMs >= 2_000) {
                 lastBtDiagnosticAtMs = now
-                LimeLog.info("DualSense native BT haptics: reports=$btNativeReports " +
-                    "drops=$btNativeDrops packets=$packetsReceived lost=$packetsLost")
+                LimeLog.info("DualSense native BT audio: reports=$btNativeReports " +
+                    "drops=$btNativeDrops speaker=$btSpeakerReports " +
+                    "speakerEncodeFailures=$btSpeakerEncodeFailures " +
+                    "packets=$packetsReceived lost=$packetsLost")
             }
         }
     }
@@ -260,7 +270,8 @@ object DualSenseAudioBridge {
         val age = if (lastPacketAtMs == 0L) -1 else SystemClock.elapsedRealtime() - lastPacketAtMs
         return "mode=$mode packets=$packetsReceived lost=$packetsLost age=${age}ms " +
             "usb=${native[0]} queue=${native[1]} underruns=${native[2]} droppedBytes=${native[3]} " +
-            "btNative=$btNativeReports btDrops=$btNativeDrops"
+            "btNative=$btNativeReports btDrops=$btNativeDrops " +
+            "btSpeaker=$btSpeakerReports btSpeakerFailures=$btSpeakerEncodeFailures"
     }
 
     /**
@@ -272,19 +283,27 @@ object DualSenseAudioBridge {
      * reduced to motor strengths, dynamically compressed, or otherwise shaped.
      */
     private class NativeBluetoothHapticsResampler(
-        private val sendReport: (ByteArray) -> Unit
+        private val sendReport: (ByteArray, ByteArray?) -> Unit
     ) {
         private val left = DoubleArray(FIR_TAPS)
         private val right = DoubleArray(FIR_TAPS)
         private val report = ByteArray(BT_REPORT_HAPTICS_BYTES)
+        private val speakerPcm = ByteArray(BT_REPORT_SPEAKER_PCM_BYTES)
         private var ringPosition = 0
         private var decimationPhase = 0
         private var reportPosition = 0
+        private var speakerPosition = 0
 
-        fun pushFourChannelPcm(pcm: ByteArray, frameCount: Int) {
+        fun pushFourChannelPcm(pcm: ByteArray, frameCount: Int, includeSpeaker: Boolean) {
             var offset = 0
             repeat(frameCount) {
-                offset += 4 // speaker/headset channels 1 and 2 remain untouched
+                if (includeSpeaker) {
+                    pcm.copyInto(speakerPcm, speakerPosition, offset, offset + 4)
+                } else {
+                    speakerPcm.fill(0, speakerPosition, speakerPosition + 4)
+                }
+                speakerPosition += 4
+                offset += 4
                 left[ringPosition] = readS16(pcm, offset).toDouble()
                 offset += 2
                 right[ringPosition] = readS16(pcm, offset).toDouble()
@@ -297,21 +316,30 @@ object DualSenseAudioBridge {
                     report[reportPosition++] = quantize(filter(left))
                     report[reportPosition++] = quantize(filter(right))
                     if (reportPosition == report.size) {
-                        sendReport(report.copyOf())
+                        val speaker = if (includeSpeaker) {
+                            DualSenseBtAudioNative.encodeSpeaker(speakerPcm)
+                        } else {
+                            null
+                        }
+                        sendReport(report.copyOf(), speaker)
                         reportPosition = 0
+                        speakerPosition = 0
                     }
                 }
             }
         }
 
         fun stop() {
-            if (reportPosition != 0) sendReport(ByteArray(BT_REPORT_HAPTICS_BYTES))
+            if (reportPosition != 0) sendReport(ByteArray(BT_REPORT_HAPTICS_BYTES), null)
+            DualSenseBtAudioNative.resetSpeaker()
             left.fill(0.0)
             right.fill(0.0)
             report.fill(0)
+            speakerPcm.fill(0)
             ringPosition = 0
             decimationPhase = 0
             reportPosition = 0
+            speakerPosition = 0
         }
 
         private fun filter(channel: DoubleArray): Double {
@@ -337,6 +365,7 @@ object DualSenseAudioBridge {
             private const val DECIMATION = 16
             private const val FIR_TAPS = 127
             private const val BT_REPORT_HAPTICS_BYTES = 128
+            private const val BT_REPORT_SPEAKER_PCM_BYTES = 4_096
 
             // Unity-gain Blackman-windowed sinc. The 1.4 kHz cutoff prevents
             // aliasing at the DualSense wireless haptics Nyquist limit (1.5 kHz).
@@ -364,4 +393,9 @@ object DualSenseIsoNative {
     @JvmStatic external fun push(pcm: ByteArray): Int
     @JvmStatic external fun stop()
     @JvmStatic external fun diagnostics(): LongArray
+}
+
+object DualSenseBtAudioNative {
+    @JvmStatic external fun encodeSpeaker(pcm: ByteArray): ByteArray?
+    @JvmStatic external fun resetSpeaker()
 }

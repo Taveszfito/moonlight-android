@@ -22,10 +22,16 @@ object DualSenseBtOutputBuilder {
         report[0] = 0x31
         report[1] = ((sequence and 0x0F) shl 4).toByte()
         report[2] = 0x10
-        report[3] = if (nativeBluetoothHaptics) 0x8C.toByte() else 0x0F
-        report[4] = 0x15
+        report[3] = if (nativeBluetoothHaptics) 0xFC.toByte() else 0x0F
+        report[4] = if (nativeBluetoothHaptics) 0x95.toByte() else 0x15
         report[5] = config.rightRumble.coerceIn(0, 255).toByte()
         report[6] = config.leftRumble.coerceIn(0, 255).toByte()
+        if (nativeBluetoothHaptics) {
+            report[7] = 0x7f
+            report[8] = 0xff.toByte()
+            report[10] = 0xff.toByte()
+            report[40] = 0x07
+        }
         report[11] = if (config.micLed) 1 else 0
         writeTrigger(report, 13, config.rightTriggerMode, config.triggerStrength,
             config.rightTriggerEffect)

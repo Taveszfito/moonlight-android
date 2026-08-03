@@ -12,6 +12,8 @@
 #include <thread>
 #include <vector>
 
+#include "opus.h"
+
 #include <linux/usbdevice_fs.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -39,6 +41,42 @@ namespace {
   int endpoint_address = -1;
   std::atomic_uint64_t underruns {0};
   std::atomic_uint64_t dropped_bytes {0};
+
+  std::mutex bt_speaker_mutex;
+  OpusEncoder *bt_speaker_encoder = nullptr;
+
+  bool ensure_bt_speaker_encoder() {
+    if (bt_speaker_encoder) return true;
+    int error = OPUS_OK;
+    bt_speaker_encoder = opus_encoder_create(48000, 2, OPUS_APPLICATION_AUDIO, &error);
+    if (!bt_speaker_encoder || error != OPUS_OK) {
+      bt_speaker_encoder = nullptr;
+      return false;
+    }
+    opus_encoder_ctl(bt_speaker_encoder, OPUS_SET_BITRATE(160000));
+    opus_encoder_ctl(bt_speaker_encoder, OPUS_SET_VBR(0));
+    opus_encoder_ctl(bt_speaker_encoder, OPUS_SET_COMPLEXITY(0));
+    opus_encoder_ctl(bt_speaker_encoder, OPUS_SET_EXPERT_FRAME_DURATION(OPUS_FRAMESIZE_10_MS));
+    return true;
+  }
+
+  void resample_speaker_512_to_480(const std::int16_t *input, std::int16_t *output) {
+    // The native wireless report clock consumes 480 samples for every 512
+    // samples arriving on the four-channel USB-compatible stream. This exact
+    // 15/16 transport-rate conversion mirrors the controller bridge protocol.
+    for (int output_frame = 0; output_frame < 480; ++output_frame) {
+      const int numerator = output_frame * 16;
+      const int source_frame = numerator / 15;
+      const int fraction = numerator % 15;
+      const int next_frame = std::min(source_frame + 1, 511);
+      for (int channel = 0; channel < 2; ++channel) {
+        const auto first = static_cast<std::int32_t>(input[source_frame * 2 + channel]);
+        const auto second = static_cast<std::int32_t>(input[next_frame * 2 + channel]);
+        output[output_frame * 2 + channel] = static_cast<std::int16_t>(
+          (first * (15 - fraction) + second * fraction) / 15);
+      }
+    }
+  }
 
   void free_context(urb_context_t *context) {
     if (!context) return;
@@ -222,4 +260,56 @@ Java_com_limelight_dualsense_DualSenseIsoNative_diagnostics(JNIEnv *env, jclass)
   auto result = env->NewLongArray(4);
   env->SetLongArrayRegion(result, 0, 4, values);
   return result;
+}
+
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_com_limelight_dualsense_DualSenseBtAudioNative_encodeSpeaker(
+  JNIEnv *env, jclass, jbyteArray pcm
+) {
+  constexpr int input_frames_per_chunk = 512;
+  constexpr int output_frames_per_chunk = 480;
+  constexpr int chunks = 2;
+  constexpr int bytes_per_opus_chunk = 200;
+  constexpr int input_bytes = input_frames_per_chunk * 2 * sizeof(std::int16_t) * chunks;
+  if (!pcm || env->GetArrayLength(pcm) != input_bytes) return nullptr;
+
+  auto *bytes = env->GetByteArrayElements(pcm, nullptr);
+  if (!bytes) return nullptr;
+  std::uint8_t encoded[chunks * bytes_per_opus_chunk] {};
+  bool success = true;
+  {
+    auto lock = std::lock_guard {bt_speaker_mutex};
+    success = ensure_bt_speaker_encoder();
+    if (success) {
+      const auto *samples = reinterpret_cast<const std::int16_t *>(bytes);
+      std::int16_t resampled[output_frames_per_chunk * 2];
+      for (int chunk = 0; chunk < chunks; ++chunk) {
+        resample_speaker_512_to_480(
+          samples + chunk * input_frames_per_chunk * 2, resampled);
+        const auto written = opus_encode(bt_speaker_encoder, resampled,
+          output_frames_per_chunk, encoded + chunk * bytes_per_opus_chunk,
+          bytes_per_opus_chunk);
+        if (written <= 0) {
+          success = false;
+          break;
+        }
+        if (written < bytes_per_opus_chunk) {
+          std::memset(encoded + chunk * bytes_per_opus_chunk + written, 0,
+            bytes_per_opus_chunk - written);
+        }
+      }
+    }
+  }
+  env->ReleaseByteArrayElements(pcm, bytes, JNI_ABORT);
+  if (!success) return nullptr;
+  auto result = env->NewByteArray(sizeof(encoded));
+  env->SetByteArrayRegion(result, 0, sizeof(encoded),
+    reinterpret_cast<const jbyte *>(encoded));
+  return result;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_limelight_dualsense_DualSenseBtAudioNative_resetSpeaker(JNIEnv *, jclass) {
+  auto lock = std::lock_guard {bt_speaker_mutex};
+  if (bt_speaker_encoder) opus_encoder_ctl(bt_speaker_encoder, OPUS_RESET_STATE);
 }
