@@ -45,7 +45,7 @@ object DualSenseAudioBridge {
     private var btSpeakerEncodeFailures = 0L
     private var lastBtDiagnosticAtMs = 0L
     private val btNativeResampler = NativeBluetoothHapticsResampler { haptics, speaker ->
-        if (speaker != null) btSpeakerReports++ else btSpeakerEncodeFailures++
+        if (speaker != null) btSpeakerReports++
         if (DualSenseBridge.sendNativeBluetoothHaptics(haptics, speaker)) {
             btNativeReports++
         } else {
@@ -351,12 +351,23 @@ object DualSenseAudioBridge {
                     report[reportPosition++] = quantize(filter(left))
                     report[reportPosition++] = quantize(filter(right))
                     if (reportPosition == report.size) {
-                        val speaker = if (includeSpeaker) {
+                        val hasHaptics = report.any { it != 0.toByte() }
+                        val hasSpeaker = includeSpeaker && speakerPcm.any { it != 0.toByte() }
+                        val speaker = if (hasSpeaker) {
                             DualSenseBtAudioNative.encodeSpeaker(speakerPcm)
                         } else {
                             null
                         }
-                        sendReport(report.copyOf(), speaker)
+                        // USB isochronous endpoints require a continuous clock,
+                        // but the wireless DualSense audio transport is carried
+                        // in HID output reports. Do not consume radio airtime,
+                        // USB bandwidth, or encoder time for an entirely silent
+                        // 21.3 ms block. The next non-silent block resumes the
+                        // native stream immediately.
+                        if (hasHaptics || hasSpeaker) {
+                            if (hasSpeaker && speaker == null) btSpeakerEncodeFailures++
+                            sendReport(report.copyOf(), speaker)
+                        }
                         reportPosition = 0
                         speakerPosition = 0
                     }

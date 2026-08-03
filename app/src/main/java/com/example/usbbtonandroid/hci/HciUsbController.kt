@@ -64,6 +64,7 @@ class HciUsbController(
     private var outputSequence = 0
     private var audioPacketCounter = 0
     private var nativeAudioReportsSent = 0L
+    private var nativeAudioReportsSkippedForInput = 0L
     @Volatile private var nativeBluetoothHapticsRequested = false
     private var nativeAudioWakeEpoch = -1L
     @Volatile private var lastOutputErrorLogMs = 0L
@@ -531,6 +532,22 @@ class HciUsbController(
                 val audio = audioQueue.take()
                 val handle = activeHandle ?: continue
                 val cid = hidInterruptRemoteCid ?: continue
+                // The 547-byte native audio report is by far the largest packet
+                // on the controller link. Never keep feeding it into a congested
+                // dongle while the high-priority HID input stream is already
+                // late. Audio is real-time data, so dropping this now is better
+                // than delivering an obsolete waveform after it has starved
+                // buttons, sticks, or motion input.
+                val hidAgeMs = SystemClock.elapsedRealtime() - lastHidInputElapsedMs
+                if (lastHidInputElapsedMs != 0L && hidAgeMs >= AUDIO_HID_PRIORITY_AGE_MS) {
+                    nativeAudioReportsSkippedForInput++
+                    if (nativeAudioReportsSkippedForInput == 1L ||
+                        nativeAudioReportsSkippedForInput % 100L == 0L) {
+                        onLog("DualSense native Bluetooth audio yielded to HID input: " +
+                            "$nativeAudioReportsSkippedForInput reports, HID age ${hidAgeMs}ms")
+                    }
+                    continue
+                }
                 val epoch = outputConnectionEpoch
                 if (nativeAudioWakeEpoch != epoch) {
                     val wake = com.example.usbbtonandroid.DualSenseBtAudioBuilder.buildWake(
@@ -1507,6 +1524,7 @@ class HciUsbController(
         private const val COMMAND_TIMEOUT_MS = 5_000
         private const val OUTPUT_WRITE_TIMEOUT_MS = 80
         private const val AUDIO_WRITE_TIMEOUT_MS = 100
+        private const val AUDIO_HID_PRIORITY_AGE_MS = 40L
         private const val OUTPUT_MIN_INTERVAL_MS = 8L
         private const val OUTPUT_STALL_LOG_MS = 40L
         private const val OUTPUT_ERROR_LOG_INTERVAL_MS = 2_000L
