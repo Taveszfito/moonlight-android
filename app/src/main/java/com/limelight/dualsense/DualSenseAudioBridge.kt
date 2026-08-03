@@ -13,7 +13,10 @@ import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.SystemClock
 import com.limelight.LimeLog
-import kotlin.math.abs
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.roundToInt
+import kotlin.math.sin
 
 /** Receives Apollo Extended's native DualSense four-channel audio stream. */
 object DualSenseAudioBridge {
@@ -34,10 +37,12 @@ object DualSenseAudioBridge {
     private var lastPacketAtMs = 0L
     private var packetsReceived = 0L
     private var packetsLost = 0L
-    private var btAccumulatorLeft = 0L
-    private var btAccumulatorRight = 0L
-    private var btAccumulatorFrames = 0
-    private var lastBtRumbleAtMs = 0L
+    private var btNativeReports = 0L
+    private var btNativeDrops = 0L
+    private var lastBtDiagnosticAtMs = 0L
+    private val btNativeResampler = NativeBluetoothHapticsResampler {
+        if (DualSenseBridge.sendNativeBluetoothHaptics(it)) btNativeReports++ else btNativeDrops++
+    }
 
     private val permissionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -102,11 +107,17 @@ object DualSenseAudioBridge {
             closeUsbRoute()
         }
 
-        // Bluetooth DualSense exposes no USB isochronous audio function. Keep
-        // useful feedback by reducing native haptic channels 3/4 to the two
-        // compatible HID rumble actuators at a controlled update rate.
+        // A wireless DualSense carries the original haptic waveform through its
+        // native 3 kHz stereo Bluetooth audio reports. Do not derive rumble
+        // amplitudes, envelopes, bass boosts, or any other synthetic feedback.
         if (mode == "auto" || mode == "haptics_only") {
-            accumulateBluetoothHaptics(pcm, frameCount)
+            btNativeResampler.pushFourChannelPcm(pcm, frameCount)
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastBtDiagnosticAtMs >= 2_000) {
+                lastBtDiagnosticAtMs = now
+                LimeLog.info("DualSense native BT haptics: reports=$btNativeReports " +
+                    "drops=$btNativeDrops packets=$packetsReceived lost=$packetsLost")
+            }
         }
     }
 
@@ -121,31 +132,6 @@ object DualSenseAudioBridge {
                 offset += 8
             }
         }
-
-    private fun accumulateBluetoothHaptics(pcm: ByteArray, frameCount: Int) {
-        var offset = 0
-        repeat(frameCount) {
-            offset += 4 // speaker/jack channels 1 and 2
-            btAccumulatorLeft += abs(readS16(pcm, offset))
-            offset += 2
-            btAccumulatorRight += abs(readS16(pcm, offset))
-            offset += 2
-        }
-        btAccumulatorFrames += frameCount
-        val now = SystemClock.elapsedRealtime()
-        if (now - lastBtRumbleAtMs < 16 || btAccumulatorFrames == 0) return
-
-        val left = ((btAccumulatorLeft / btAccumulatorFrames) * 2).coerceIn(0, 65535).toInt()
-        val right = ((btAccumulatorRight / btAccumulatorFrames) * 2).coerceIn(0, 65535).toInt()
-        DualSenseBridge.sendRumble(left.toShort(), right.toShort())
-        btAccumulatorLeft = 0
-        btAccumulatorRight = 0
-        btAccumulatorFrames = 0
-        lastBtRumbleAtMs = now
-    }
-
-    private fun readS16(data: ByteArray, offset: Int): Int =
-        ((data[offset].toInt() and 0xff) or (data[offset + 1].toInt() shl 8)).toShort().toInt()
 
     private fun ensureUsbRoute() {
         if (mode == "off") return
@@ -255,11 +241,9 @@ object DualSenseAudioBridge {
     @JvmStatic @Synchronized fun stop() {
         streamActive = false
         closeUsbRoute()
-        DualSenseBridge.sendRumble(0.toShort(), 0.toShort())
+        btNativeResampler.stop()
+        DualSenseBridge.stopNativeBluetoothHaptics()
         lastSequence = -1
-        btAccumulatorLeft = 0
-        btAccumulatorRight = 0
-        btAccumulatorFrames = 0
     }
 
     @Synchronized private fun closeUsbRoute() {
@@ -274,7 +258,104 @@ object DualSenseAudioBridge {
     @JvmStatic fun diagnostics(): String {
         val native = if (usbRouteActive) DualSenseIsoNative.diagnostics() else longArrayOf(0, 0, 0, 0)
         val age = if (lastPacketAtMs == 0L) -1 else SystemClock.elapsedRealtime() - lastPacketAtMs
-        return "mode=$mode packets=$packetsReceived lost=$packetsLost age=${age}ms usb=${native[0]} queue=${native[1]} underruns=${native[2]} droppedBytes=${native[3]}"
+        return "mode=$mode packets=$packetsReceived lost=$packetsLost age=${age}ms " +
+            "usb=${native[0]} queue=${native[1]} underruns=${native[2]} droppedBytes=${native[3]} " +
+            "btNative=$btNativeReports btDrops=$btNativeDrops"
+    }
+
+    /**
+     * Band-limited conversion from the virtual controller's native USB format
+     * (48 kHz, signed 16-bit stereo haptics in channels 3/4) to the physical
+     * controller's native Bluetooth format (3 kHz, signed 8-bit stereo).
+     *
+     * This is transport conversion only. The waveform is never rectified,
+     * reduced to motor strengths, dynamically compressed, or otherwise shaped.
+     */
+    private class NativeBluetoothHapticsResampler(
+        private val sendReport: (ByteArray) -> Unit
+    ) {
+        private val left = DoubleArray(FIR_TAPS)
+        private val right = DoubleArray(FIR_TAPS)
+        private val report = ByteArray(BT_REPORT_HAPTICS_BYTES)
+        private var ringPosition = 0
+        private var decimationPhase = 0
+        private var reportPosition = 0
+
+        fun pushFourChannelPcm(pcm: ByteArray, frameCount: Int) {
+            var offset = 0
+            repeat(frameCount) {
+                offset += 4 // speaker/headset channels 1 and 2 remain untouched
+                left[ringPosition] = readS16(pcm, offset).toDouble()
+                offset += 2
+                right[ringPosition] = readS16(pcm, offset).toDouble()
+                offset += 2
+                ringPosition = (ringPosition + 1) % FIR_TAPS
+
+                decimationPhase++
+                if (decimationPhase == DECIMATION) {
+                    decimationPhase = 0
+                    report[reportPosition++] = quantize(filter(left))
+                    report[reportPosition++] = quantize(filter(right))
+                    if (reportPosition == report.size) {
+                        sendReport(report.copyOf())
+                        reportPosition = 0
+                    }
+                }
+            }
+        }
+
+        fun stop() {
+            if (reportPosition != 0) sendReport(ByteArray(BT_REPORT_HAPTICS_BYTES))
+            left.fill(0.0)
+            right.fill(0.0)
+            report.fill(0)
+            ringPosition = 0
+            decimationPhase = 0
+            reportPosition = 0
+        }
+
+        private fun filter(channel: DoubleArray): Double {
+            var sum = 0.0
+            var index = if (ringPosition == 0) FIR_TAPS - 1 else ringPosition - 1
+            for (tap in COEFFICIENTS.indices) {
+                sum += channel[index] * COEFFICIENTS[tap]
+                if (--index < 0) index = FIR_TAPS - 1
+            }
+            return sum
+        }
+
+        private fun quantize(sample: Double): Byte =
+            (sample * 127.0 / 32768.0).roundToInt().coerceIn(-128, 127).toByte()
+
+        private fun readS16(data: ByteArray, offset: Int): Int =
+            ((data[offset].toInt() and 0xff) or
+                (data[offset + 1].toInt() shl 8)).toShort().toInt()
+
+        companion object {
+            private const val INPUT_RATE = 48_000.0
+            private const val CUTOFF_HZ = 1_400.0
+            private const val DECIMATION = 16
+            private const val FIR_TAPS = 127
+            private const val BT_REPORT_HAPTICS_BYTES = 128
+
+            // Unity-gain Blackman-windowed sinc. The 1.4 kHz cutoff prevents
+            // aliasing at the DualSense wireless haptics Nyquist limit (1.5 kHz).
+            private val COEFFICIENTS: DoubleArray = DoubleArray(FIR_TAPS).also { taps ->
+                val middle = (FIR_TAPS - 1) / 2.0
+                val normalizedCutoff = CUTOFF_HZ / INPUT_RATE
+                var sum = 0.0
+                for (i in taps.indices) {
+                    val x = i - middle
+                    val sinc = if (x == 0.0) 2.0 * normalizedCutoff else
+                        sin(2.0 * PI * normalizedCutoff * x) / (PI * x)
+                    val window = 0.42 - 0.5 * cos(2.0 * PI * i / (FIR_TAPS - 1)) +
+                        0.08 * cos(4.0 * PI * i / (FIR_TAPS - 1))
+                    taps[i] = sinc * window
+                    sum += taps[i]
+                }
+                for (i in taps.indices) taps[i] /= sum
+            }
+        }
     }
 }
 

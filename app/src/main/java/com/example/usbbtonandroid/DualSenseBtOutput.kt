@@ -16,12 +16,13 @@ data class DualSenseOutputConfig(
 enum class TriggerMode { OFF, RESISTANCE, VIBRATION }
 
 object DualSenseBtOutputBuilder {
-    fun build(config: DualSenseOutputConfig, sequence: Int): ByteArray {
+    fun build(config: DualSenseOutputConfig, sequence: Int,
+              nativeBluetoothHaptics: Boolean = false): ByteArray {
         val report = ByteArray(78)
         report[0] = 0x31
         report[1] = ((sequence and 0x0F) shl 4).toByte()
         report[2] = 0x10
-        report[3] = 0x0F
+        report[3] = if (nativeBluetoothHaptics) 0x8C.toByte() else 0x0F
         report[4] = 0x15
         report[5] = config.rightRumble.coerceIn(0, 255).toByte()
         report[6] = config.leftRumble.coerceIn(0, 255).toByte()

@@ -35,8 +35,10 @@ class HciUsbController(
     private var aclWorker: Thread? = null
     private var inputWorker: Thread? = null
     private var outputWorker: Thread? = null
+    private var audioWorker: Thread? = null
     private val inputQueue = ArrayBlockingQueue<AclPacket>(INPUT_QUEUE_CAPACITY)
     private val outputSignal = ArrayBlockingQueue<Unit>(1)
+    private val audioQueue = ArrayBlockingQueue<ByteArray>(AUDIO_QUEUE_CAPACITY)
     @Volatile private var latestOutputConfig: com.example.usbbtonandroid.DualSenseOutputConfig? = null
     @Volatile private var outputConnectionEpoch = 0L
     private val discoveredDevices = linkedMapOf<String, InquiryDevice>()
@@ -60,6 +62,10 @@ class HciUsbController(
     private var nextLocalCid = 0x0040
     @Volatile private var hidInterruptRemoteCid: Int? = null
     private var outputSequence = 0
+    private var audioPacketCounter = 0
+    private var nativeAudioReportsSent = 0L
+    @Volatile private var nativeBluetoothHapticsRequested = false
+    private var nativeAudioWakeEpoch = -1L
     @Volatile private var lastOutputErrorLogMs = 0L
     private var droppedInputPackets = 0L
     @Volatile private var lastActiveDevicePublishMs = 0L
@@ -178,6 +184,27 @@ class HciUsbController(
         latestOutputConfig = config
         outputSignal.offer(Unit)
         return true
+    }
+
+    /** Queues one native 0x39 Bluetooth haptics report worth of 3 kHz stereo PCM. */
+    fun sendNativeBluetoothHaptics(haptics: ByteArray): Boolean {
+        if (haptics.size != com.example.usbbtonandroid.DualSenseBtAudioBuilder.HAPTICS_BYTES_PER_REPORT ||
+            activeHandle == null || hidInterruptRemoteCid == null || lastHidInputMs == 0L) {
+            return false
+        }
+        nativeBluetoothHapticsRequested = true
+        if (audioQueue.offer(haptics.copyOf())) return true
+        // Real-time audio must remain current. Drop the oldest queued waveform,
+        // never block the Moonlight receive thread and never collapse it to rumble.
+        audioQueue.poll()
+        return audioQueue.offer(haptics.copyOf())
+    }
+
+    fun stopNativeBluetoothHaptics() {
+        nativeBluetoothHapticsRequested = false
+        nativeAudioWakeEpoch = -1L
+        audioQueue.clear()
+        outputSignal.offer(Unit)
     }
 
     private fun enableIncomingConnections() {
@@ -357,6 +384,9 @@ class HciUsbController(
     private fun markDisconnected(reason: String) {
         val device = activeDevice
         activeHandle = null
+        nativeBluetoothHapticsRequested = false
+        nativeAudioWakeEpoch = -1L
+        audioQueue.clear()
         activeDevice = null
         hidInterruptRemoteCid = null
         encryptedAtMs = 0
@@ -428,6 +458,10 @@ class HciUsbController(
             priority = Thread.NORM_PRIORITY + 1
             start()
         }
+        audioWorker = Thread(::audioDispatchLoop, "dualsense-native-bt-audio").apply {
+            priority = Thread.NORM_PRIORITY + 2
+            start()
+        }
         aclWorker = Thread(::aclReadLoop, "usb-hci-acl-in").apply {
             // HCI/L2CAP reception is the real-time edge of the pipeline. It must
             // not lose time to UI rendering or Wi-Fi/HID relay work.
@@ -440,6 +474,7 @@ class HciUsbController(
         var lastWriteAtMs = 0L
         var lastSentConfig: com.example.usbbtonandroid.DualSenseOutputConfig? = null
         var lastSentEpoch = -1L
+        var lastSentNativeHaptics = false
         while (running.get()) {
             try {
                 outputSignal.take()
@@ -449,11 +484,13 @@ class HciUsbController(
                 outputSignal.clear()
                 val config = latestOutputConfig ?: continue
                 val epoch = outputConnectionEpoch
-                if (config == lastSentConfig && epoch == lastSentEpoch) continue
+                val nativeHaptics = nativeBluetoothHapticsRequested
+                if (config == lastSentConfig && epoch == lastSentEpoch &&
+                    nativeHaptics == lastSentNativeHaptics) continue
                 val handle = activeHandle ?: continue
                 val cid = hidInterruptRemoteCid ?: continue
                 val report = com.example.usbbtonandroid.DualSenseBtOutputBuilder.build(
-                    config, outputSequence++
+                    config, nextOutputSequence(), nativeHaptics
                 )
                 val startedAt = System.currentTimeMillis()
                 val sent = runCatching {
@@ -472,6 +509,7 @@ class HciUsbController(
                 if (sent) {
                     lastSentConfig = config
                     lastSentEpoch = epoch
+                    lastSentNativeHaptics = nativeHaptics
                 }
                 val duration = System.currentTimeMillis() - startedAt
                 if (duration >= OUTPUT_STALL_LOG_MS) {
@@ -484,6 +522,50 @@ class HciUsbController(
             }
         }
     }
+
+    private fun audioDispatchLoop() {
+        while (running.get()) {
+            try {
+                val haptics = audioQueue.take()
+                val handle = activeHandle ?: continue
+                val cid = hidInterruptRemoteCid ?: continue
+                val epoch = outputConnectionEpoch
+                if (nativeAudioWakeEpoch != epoch) {
+                    val wake = com.example.usbbtonandroid.DualSenseBtAudioBuilder.buildWake(
+                        nextOutputSequence()
+                    )
+                    sendAcl(handle, cid, byteArrayOf(0xa2.toByte()) + wake,
+                        AUDIO_WRITE_TIMEOUT_MS, false)
+                    nativeAudioWakeEpoch = epoch
+                    outputSignal.offer(Unit)
+                    onLog("DualSense native Bluetooth audio/haptics path enabled")
+                }
+                audioPacketCounter = (audioPacketCounter + 2) and 0xff
+                val report = com.example.usbbtonandroid.DualSenseBtAudioBuilder.build(
+                    haptics, nextOutputSequence(), audioPacketCounter
+                )
+                runCatching {
+                    sendAcl(handle, cid, byteArrayOf(0xa2.toByte()) + report,
+                        AUDIO_WRITE_TIMEOUT_MS, false)
+                    nativeAudioReportsSent++
+                    if (nativeAudioReportsSent == 1L || nativeAudioReportsSent % 100L == 0L) {
+                        onLog("DualSense native Bluetooth haptics sent: $nativeAudioReportsSent reports")
+                    }
+                }.onFailure { error ->
+                    val now = System.currentTimeMillis()
+                    if (now - lastOutputErrorLogMs >= OUTPUT_ERROR_LOG_INTERVAL_MS) {
+                        lastOutputErrorLogMs = now
+                        onLog("DualSense native Bluetooth haptics write failed: " +
+                            (error.message ?: error.javaClass.simpleName))
+                    }
+                }
+            } catch (_: InterruptedException) {
+                break
+            }
+        }
+    }
+
+    @Synchronized private fun nextOutputSequence(): Int = outputSequence++
 
     private fun inputDispatchLoop() {
         while (running.get()) {
@@ -1336,8 +1418,12 @@ class HciUsbController(
         aclWorker?.interrupt()
         inputWorker?.interrupt()
         outputWorker?.interrupt()
+        audioWorker?.interrupt()
         inputQueue.clear()
         outputSignal.clear()
+        audioQueue.clear()
+        nativeBluetoothHapticsRequested = false
+        nativeAudioWakeEpoch = -1L
         latestOutputConfig = null
     }
 
@@ -1414,6 +1500,7 @@ class HciUsbController(
     companion object {
         private const val COMMAND_TIMEOUT_MS = 5_000
         private const val OUTPUT_WRITE_TIMEOUT_MS = 80
+        private const val AUDIO_WRITE_TIMEOUT_MS = 100
         private const val OUTPUT_MIN_INTERVAL_MS = 8L
         private const val OUTPUT_STALL_LOG_MS = 40L
         private const val OUTPUT_ERROR_LOG_INTERVAL_MS = 2_000L
@@ -1440,6 +1527,7 @@ class HciUsbController(
         private const val HID_GAP_LOG_MS = 250L
         private const val INPUT_DISPATCH_STALL_LOG_MS = 100L
         private const val INPUT_QUEUE_CAPACITY = 32
+        private const val AUDIO_QUEUE_CAPACITY = 4
         private const val USB_RECIP_INTERFACE = 0x01
         const val INCIDENT_NONE = "none"
         const val INCIDENT_RADIO_USB_GAP = "radio_usb_gap"
