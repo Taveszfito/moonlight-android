@@ -60,7 +60,7 @@ object DualSenseBtAudioBuilder {
         report[8] = 0x7f.toByte() // headphone volume field
         report[9] = 0xff.toByte() // internal speaker volume max
         report[11] = 0xff.toByte() // loud internal-speaker route
-        report[41] = 0x07.toByte() // SpeakerCompPreGain max
+        report[41] = 0x03.toByte() // Normal SpeakerCompPreGain; avoids clipping
 
         val crc = CRC32()
         crc.update(0xa2)

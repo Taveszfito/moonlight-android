@@ -1697,6 +1697,19 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 dualSenseStick(input.getRightX(), false),
                 dualSenseStick(input.getRightY(), true));
 
+        // Send acceleration first. Apollo Extended caches it, then the gyro
+        // event below commits both values as one timestamped DualSense report.
+        kotlin.Triple<Integer, Integer, Integer> accel = input.getAccel();
+        if (accel != null && context.playStationHostMode && shouldSendBridgeMotion(
+                context.accelReportRateHz, context.bridgeLastAccelHostReportNs)) {
+            context.bridgeLastAccelHostReportNs = System.nanoTime();
+            conn.sendControllerMotionEvent((byte) context.controllerNumber,
+                    MoonBridge.LI_MOTION_TYPE_ACCEL,
+                    accel.getFirst() * SensorManager.GRAVITY_EARTH / 8192.0f,
+                    accel.getSecond() * SensorManager.GRAVITY_EARTH / 8192.0f,
+                    accel.getThird() * SensorManager.GRAVITY_EARTH / 8192.0f);
+        }
+
         kotlin.Triple<Integer, Integer, Integer> gyro = input.getGyro();
         if (gyro != null) {
             if (prefConfig.gyroToRightStick) {
@@ -1720,16 +1733,6 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         }
         sendControllerInputPacket(context);
         sendDualSenseBridgeBatteryIfNeeded(context, input);
-        kotlin.Triple<Integer, Integer, Integer> accel = input.getAccel();
-        if (accel != null && context.playStationHostMode && shouldSendBridgeMotion(
-                context.accelReportRateHz, context.bridgeLastAccelHostReportNs)) {
-            context.bridgeLastAccelHostReportNs = System.nanoTime();
-            conn.sendControllerMotionEvent((byte) context.controllerNumber,
-                    MoonBridge.LI_MOTION_TYPE_ACCEL,
-                    accel.getFirst() * SensorManager.GRAVITY_EARTH / 8192.0f,
-                    accel.getSecond() * SensorManager.GRAVITY_EARTH / 8192.0f,
-                    accel.getThird() * SensorManager.GRAVITY_EARTH / 8192.0f);
-        }
         if (context.playStationHostMode) {
             sendDualSenseBridgeTouchEvents(context, input.getTouches());
         }
@@ -3636,6 +3639,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             return;
         }
 
+        // The dedicated HCI bridge is not an Android SensorManager source and
+        // therefore isn't subject to Android's 200 Hz sensor permission cap.
+        final short bridgeReportRateHz = reportRateHz;
         // Report rate is restricted to <= 200 Hz without the HIGH_SAMPLING_RATE_SENSORS permission
         reportRateHz = (short) Math.min(200, reportRateHz);
 
@@ -3644,14 +3650,14 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 dualSenseBridgeContext.playStationHostMode) {
             switch (motionType) {
                 case MoonBridge.LI_MOTION_TYPE_ACCEL:
-                    dualSenseBridgeContext.accelReportRateHz = reportRateHz;
+                    dualSenseBridgeContext.accelReportRateHz = bridgeReportRateHz;
                     break;
                 case MoonBridge.LI_MOTION_TYPE_GYRO:
-                    dualSenseBridgeContext.gyroReportRateHz = reportRateHz;
+                    dualSenseBridgeContext.gyroReportRateHz = bridgeReportRateHz;
                     break;
             }
             LimeLog.info("DualSense Bridge motion state: type=" + motionType +
-                    ", rate=" + reportRateHz + " Hz");
+                    ", rate=" + bridgeReportRateHz + " Hz");
         }
 
         for (int i = 0; i < inputDeviceContexts.size() + usbDeviceContexts.size(); i++) {

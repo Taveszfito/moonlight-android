@@ -33,10 +33,12 @@ object DualSenseAudioBridge {
     @Volatile private var mode = "auto"
     private var audioConnection: UsbDeviceConnection? = null
     private var audioInterface: UsbInterface? = null
-    private var lastSequence = -1
+    private var expectedSequence = -1
+    private val pendingPackets = HashMap<Int, AudioPacket>()
     private var lastPacketAtMs = 0L
     private var packetsReceived = 0L
     private var packetsLost = 0L
+    private var packetsOutOfOrder = 0L
     private var btNativeReports = 0L
     private var btNativeDrops = 0L
     private var btSpeakerReports = 0L
@@ -92,19 +94,51 @@ object DualSenseAudioBridge {
         }
     }
 
-    @JvmStatic fun receive(controller: Int, sequence: Int, frameCount: Int,
-                           channels: Int, flags: Int, pcm: ByteArray?) {
+    @JvmStatic @Synchronized fun receive(controller: Int, sequence: Int, frameCount: Int,
+                                         channels: Int, flags: Int, pcm: ByteArray?) {
         if (!initialized || pcm == null || channels != 4 || frameCount <= 0 ||
             pcm.size != frameCount * channels * 2) return
 
         packetsReceived++
-        if (lastSequence >= 0) {
-            val expected = (lastSequence + 1) and 0xffff
-            if (sequence != expected) packetsLost += (sequence - expected) and 0xffff
-        }
-        lastSequence = sequence
         lastPacketAtMs = SystemClock.elapsedRealtime()
         streamActive = true
+        if (expectedSequence < 0) expectedSequence = sequence
+
+        var distance = (sequence - expectedSequence) and 0xffff
+        if (distance >= 0x8000) {
+            // Capture can restart its sequence without tearing down the stream.
+            if (sequence < 64 && expectedSequence > 1024) {
+                pendingPackets.clear()
+                expectedSequence = sequence
+                distance = 0
+            } else {
+                // Already played (duplicate or too late for the reorder window).
+                packetsOutOfOrder++
+                return
+            }
+        }
+        if (distance > 0) packetsOutOfOrder++
+        pendingPackets.putIfAbsent(sequence, AudioPacket(frameCount, pcm))
+
+        // Wait briefly for a missing 3 ms block. If it really was lost, skip
+        // only after enough newer packets prove that waiting would add latency.
+        if (!pendingPackets.containsKey(expectedSequence) &&
+            pendingPackets.size >= AUDIO_REORDER_WINDOW_PACKETS) {
+            val next = pendingPackets.keys.minByOrNull { (it - expectedSequence) and 0xffff }
+            if (next != null) {
+                packetsLost += (next - expectedSequence) and 0xffff
+                expectedSequence = next
+            }
+        }
+
+        while (true) {
+            val packet = pendingPackets.remove(expectedSequence) ?: break
+            processPacket(packet.pcm, packet.frameCount)
+            expectedSequence = (expectedSequence + 1) and 0xffff
+        }
+    }
+
+    private fun processPacket(pcm: ByteArray, frameCount: Int) {
         if (mode == "off") return
 
         if (!usbRouteActive) ensureUsbRoute()
@@ -253,7 +287,8 @@ object DualSenseAudioBridge {
         closeUsbRoute()
         btNativeResampler.stop()
         DualSenseBridge.stopNativeBluetoothHaptics()
-        lastSequence = -1
+        expectedSequence = -1
+        pendingPackets.clear()
     }
 
     @Synchronized private fun closeUsbRoute() {
@@ -268,7 +303,7 @@ object DualSenseAudioBridge {
     @JvmStatic fun diagnostics(): String {
         val native = if (usbRouteActive) DualSenseIsoNative.diagnostics() else longArrayOf(0, 0, 0, 0)
         val age = if (lastPacketAtMs == 0L) -1 else SystemClock.elapsedRealtime() - lastPacketAtMs
-        return "mode=$mode packets=$packetsReceived lost=$packetsLost age=${age}ms " +
+        return "mode=$mode packets=$packetsReceived lost=$packetsLost reordered=$packetsOutOfOrder age=${age}ms " +
             "usb=${native[0]} queue=${native[1]} underruns=${native[2]} droppedBytes=${native[3]} " +
             "btNative=$btNativeReports btDrops=$btNativeDrops " +
             "btSpeaker=$btSpeakerReports btSpeakerFailures=$btSpeakerEncodeFailures"
@@ -386,6 +421,10 @@ object DualSenseAudioBridge {
             }
         }
     }
+
+    private data class AudioPacket(val frameCount: Int, val pcm: ByteArray)
+
+    private const val AUDIO_REORDER_WINDOW_PACKETS = 4
 }
 
 object DualSenseIsoNative {
