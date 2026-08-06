@@ -338,7 +338,8 @@ object DualSenseAudioBridge {
     /**
      * Band-limited conversion from the virtual controller's native USB format
      * (48 kHz, signed 16-bit stereo haptics in channels 3/4) to the physical
-     * controller's native Bluetooth format (3 kHz, signed 8-bit stereo).
+     * controller's native Bluetooth report format. Speaker audio is encoded in
+     * 10 ms Opus frames and paired with each 64-byte haptics block.
      *
      * This is transport conversion only. The waveform is never rectified,
      * reduced to motor strengths, dynamically compressed, or otherwise shaped.
@@ -350,6 +351,7 @@ object DualSenseAudioBridge {
         private val right = DoubleArray(FIR_TAPS)
         private val report = ByteArray(BT_REPORT_HAPTICS_BYTES)
         private val speakerPcm = ByteArray(BT_REPORT_SPEAKER_PCM_BYTES)
+        private var latestSpeakerOpus: ByteArray? = null
         private var ringPosition = 0
         private var decimationPhase = 0
         private var reportPosition = 0
@@ -364,6 +366,16 @@ object DualSenseAudioBridge {
                     speakerPcm.fill(0, speakerPosition, speakerPosition + 4)
                 }
                 speakerPosition += 4
+                if (speakerPosition == speakerPcm.size) {
+                    latestSpeakerOpus = if (includeSpeaker) {
+                        DualSenseBtAudioNative.encodeSpeaker(speakerPcm).also {
+                            if (it == null) btSpeakerEncodeFailures++
+                        }
+                    } else {
+                        null
+                    }
+                    speakerPosition = 0
+                }
                 offset += 4
                 left[ringPosition] = readS16(pcm, offset).toDouble()
                 offset += 2
@@ -378,24 +390,17 @@ object DualSenseAudioBridge {
                     report[reportPosition++] = quantize(filter(right))
                     if (reportPosition == report.size) {
                         val hasHaptics = report.any { it != 0.toByte() }
-                        val hasSpeaker = includeSpeaker && speakerPcm.any { it != 0.toByte() }
-                        val speaker = if (hasSpeaker) {
-                            DualSenseBtAudioNative.encodeSpeaker(speakerPcm)
-                        } else {
-                            null
-                        }
+                        val speaker = if (includeSpeaker) latestSpeakerOpus else null
                         // USB isochronous endpoints require a continuous clock,
                         // but the wireless DualSense audio transport is carried
                         // in HID output reports. Do not consume radio airtime,
                         // USB bandwidth, or encoder time for an entirely silent
-                        // 21.3 ms block. The next non-silent block resumes the
+                        // real-time block. The next non-silent block resumes the
                         // native stream immediately.
-                        if (hasHaptics || hasSpeaker) {
-                            if (hasSpeaker && speaker == null) btSpeakerEncodeFailures++
+                        if (hasHaptics || speaker != null) {
                             sendReport(report.copyOf(), speaker)
                         }
                         reportPosition = 0
-                        speakerPosition = 0
                     }
                 }
             }
@@ -408,6 +413,7 @@ object DualSenseAudioBridge {
             right.fill(0.0)
             report.fill(0)
             speakerPcm.fill(0)
+            latestSpeakerOpus = null
             ringPosition = 0
             decimationPhase = 0
             reportPosition = 0
@@ -436,11 +442,14 @@ object DualSenseAudioBridge {
             private const val CUTOFF_HZ = 1_400.0
             private const val DECIMATION = 16
             private const val FIR_TAPS = 127
-            private const val BT_REPORT_HAPTICS_BYTES = 128
-            private const val BT_REPORT_SPEAKER_PCM_BYTES = 4_096
+            private const val BT_REPORT_HAPTICS_BYTES = 64
+            // One Bluetooth report spans 512 source frames (10.667 ms). The
+            // encoder converts these to one 480-frame Opus packet so playback
+            // speed and pitch remain correct on the controller's report clock.
+            private const val BT_REPORT_SPEAKER_PCM_BYTES = 2_048
 
             // Unity-gain Blackman-windowed sinc. The 1.4 kHz cutoff prevents
-            // aliasing at the DualSense wireless haptics Nyquist limit (1.5 kHz).
+            // aliasing near the DualSense wireless haptics Nyquist limit.
             private val COEFFICIENTS: DoubleArray = DoubleArray(FIR_TAPS).also { taps ->
                 val middle = (FIR_TAPS - 1) / 2.0
                 val normalizedCutoff = CUTOFF_HZ / INPUT_RATE

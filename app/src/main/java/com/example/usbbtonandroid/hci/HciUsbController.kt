@@ -7,11 +7,14 @@ import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.os.SystemClock
+import android.os.Process
 import com.limelight.R
 import java.io.Closeable
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.locks.LockSupport
 
 class HciUsbController(
     private val usbManager: UsbManager,
@@ -84,6 +87,12 @@ class HciUsbController(
     @Volatile private var postConnectTuningStage = 0
     @Volatile private var postConnectTuningAtMs = 0L
     @Volatile private var lastExitLowPowerModeAtMs = 0L
+    // Read from the adapter during startup. Native DualSense audio reports are
+    // larger than the ACL buffer exposed by a number of inexpensive dongles.
+    @Volatile private var aclDataPacketLength = DEFAULT_ACL_DATA_PACKET_LENGTH
+    @Volatile private var aclPacketCapacity = 0
+    private val aclPacketsSent = AtomicLong(0)
+    private val aclPacketsCompleted = AtomicLong(0)
     // Signaling is received on the ACL reader while fallback/recovery runs on
     // the HCI event worker. These maps must never be ordinary mutable maps.
     private val pendingChannels = ConcurrentHashMap<Int, L2capChannel>()
@@ -109,6 +118,19 @@ class HciUsbController(
 
             val address = requireCommandComplete(0x1009)
             if (address.size >= 7) onLog("Local Address → ${formatAddress(address, 1)}")
+
+            val bufferSize = requireCommandComplete(0x1005)
+            if (bufferSize.size >= 6) {
+                val reportedLength = bufferSize.le16(1)
+                if (reportedLength > 0) aclDataPacketLength = reportedLength
+                aclPacketCapacity = bufferSize.le16(4)
+                aclPacketsSent.set(0)
+                aclPacketsCompleted.set(0)
+                onLog(
+                    "HCI ACL buffer → ${aclDataPacketLength} byte, " +
+                        "${aclPacketCapacity} packet(s)"
+                )
+            }
 
             // Always use the proven standalone startup path. Skipping inquiry on
             // recovery leaves cheap HCI dongles with stale page/clock state and
@@ -187,10 +209,10 @@ class HciUsbController(
         return true
     }
 
-    /** Queues one native 0x39 Bluetooth haptics report worth of 3 kHz stereo PCM. */
+    /** Queues one native Bluetooth audio/haptics report worth of 3 kHz stereo PCM. */
     fun sendNativeBluetoothHaptics(haptics: ByteArray, speakerOpus: ByteArray?): Boolean {
         if (haptics.size != com.example.usbbtonandroid.DualSenseBtAudioBuilder.HAPTICS_BYTES_PER_REPORT ||
-            (speakerOpus != null && speakerOpus.size != 400) ||
+            (speakerOpus != null && speakerOpus.size != 200) ||
             activeHandle == null || hidInterruptRemoteCid == null || lastHidInputMs == 0L) {
             return false
         }
@@ -527,13 +549,29 @@ class HciUsbController(
     }
 
     private fun audioDispatchLoop() {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
+        var nextSendAtNs = 0L
         while (running.get()) {
             try {
-                val audio = audioQueue.take()
+                var audio = audioQueue.take()
+                // Moonlight packets may arrive in short bursts. Feeding that burst
+                // directly into the Bluetooth radio makes the controller speaker
+                // alternate between buffer overrun and underrun. Keep only the most
+                // recent waveform when we are behind and transmit on the controller's
+                // native 64-sample/3 kHz report clock.
+                while (audioQueue.size > 1) {
+                    audio = audioQueue.poll() ?: audio
+                }
+                val nowNs = System.nanoTime()
+                if (nextSendAtNs == 0L || nowNs - nextSendAtNs > AUDIO_CLOCK_RESET_NS) {
+                    nextSendAtNs = nowNs
+                } else if (nextSendAtNs > nowNs) {
+                    LockSupport.parkNanos(nextSendAtNs - nowNs)
+                }
                 val handle = activeHandle ?: continue
                 val cid = hidInterruptRemoteCid ?: continue
-                // The 547-byte native audio report is by far the largest packet
-                // on the controller link. Never keep feeding it into a congested
+                // Native audio reports are the largest sustained traffic on the
+                // controller link. Never keep feeding them into a congested
                 // dongle while the high-priority HID input stream is already
                 // late. Audio is real-time data, so dropping this now is better
                 // than delivering an obsolete waveform after it has starved
@@ -559,13 +597,14 @@ class HciUsbController(
                     outputSignal.offer(Unit)
                     onLog("DualSense native Bluetooth audio/haptics path enabled")
                 }
-                audioPacketCounter = (audioPacketCounter + 2) and 0xff
+                audioPacketCounter = (audioPacketCounter + 1) and 0xff
                 val report = com.example.usbbtonandroid.DualSenseBtAudioBuilder.build(
                     audio.haptics, nextOutputSequence(), audioPacketCounter, audio.speakerOpus
                 )
                 runCatching {
                     sendAcl(handle, cid, byteArrayOf(0xa2.toByte()) + report,
                         AUDIO_WRITE_TIMEOUT_MS, false)
+                    nextSendAtNs += AUDIO_REPORT_INTERVAL_NS
                     nativeAudioReportsSent++
                     if (nativeAudioReportsSent == 1L || nativeAudioReportsSent % 100L == 0L) {
                         onLog("DualSense native Bluetooth haptics sent: $nativeAudioReportsSent reports")
@@ -1111,17 +1150,33 @@ class HciUsbController(
         l2cap[2] = cid.toByte()
         l2cap[3] = (cid ushr 8).toByte()
         payload.copyInto(l2cap, 4)
-        val packet = ByteArray(4 + l2cap.size)
-        val handleAndFlags = handle or 0x2000
-        packet[0] = handleAndFlags.toByte()
-        packet[1] = (handleAndFlags ushr 8).toByte()
-        packet[2] = l2cap.size.toByte()
-        packet[3] = (l2cap.size ushr 8).toByte()
-        l2cap.copyInto(packet, 4)
-        val sent = connection?.bulkTransfer(aclOut, packet, packet.size, timeoutMs) ?: -1
-        check(sent == packet.size) { "ACL OUT write: $sent/${packet.size}" }
+        val fragmentLimit = aclDataPacketLength.coerceAtLeast(MIN_ACL_DATA_PACKET_LENGTH)
+        var offset = 0
+        var firstFragment = true
+        while (offset < l2cap.size) {
+            awaitAclCredit(timeoutMs)
+            val fragmentLength = minOf(fragmentLimit, l2cap.size - offset)
+            val packet = ByteArray(4 + fragmentLength)
+            // PB=10 starts an automatically flushable L2CAP packet. PB=01 marks
+            // each continuation fragment belonging to the same L2CAP packet.
+            val handleAndFlags = handle or if (firstFragment) 0x2000 else 0x1000
+            packet[0] = handleAndFlags.toByte()
+            packet[1] = (handleAndFlags ushr 8).toByte()
+            packet[2] = fragmentLength.toByte()
+            packet[3] = (fragmentLength ushr 8).toByte()
+            l2cap.copyInto(packet, 4, offset, offset + fragmentLength)
+            val sent = connection?.bulkTransfer(aclOut, packet, packet.size, timeoutMs) ?: -1
+            check(sent == packet.size) { "ACL OUT write: $sent/${packet.size}" }
+            aclPacketsSent.incrementAndGet()
+            offset += fragmentLength
+            firstFragment = false
+        }
         if (logPacket) {
-            onLog("TX ACL handle=0x${handle.hex4()} cid=0x${cid.hex4()} len=${payload.size}")
+            val fragmentCount = (l2cap.size + fragmentLimit - 1) / fragmentLimit
+            onLog(
+                "TX ACL handle=0x${handle.hex4()} cid=0x${cid.hex4()} " +
+                    "len=${payload.size} fragments=$fragmentCount"
+            )
         }
     }
 
@@ -1421,6 +1476,7 @@ class HciUsbController(
         val parameterLength = buffer[1].u8()
         check(size >= parameterLength + 2) { "Hiányos HCI event: $size/${parameterLength + 2}" }
         val event = HciEvent(buffer[0].u8(), buffer.copyOfRange(2, 2 + parameterLength))
+        if (event.code == 0x13) recordCompletedAclPackets(event.parameters)
         // Number Of Completed Packets can arrive at output report frequency.
         // Processing it is critical, logging every instance would create its own
         // allocation/lock pressure and undermine the flow-control improvement.
@@ -1428,6 +1484,31 @@ class HciUsbController(
             onLog("RX EVT 0x${event.code.hex2()} ($parameterLength byte)")
         }
         return event
+    }
+
+    private fun recordCompletedAclPackets(parameters: ByteArray) {
+        if (parameters.isEmpty()) return
+        var offset = 1
+        var completed = 0L
+        repeat(parameters[0].u8()) {
+            if (offset + 4 > parameters.size) return@repeat
+            completed += parameters.le16(offset + 2).toLong()
+            offset += 4
+        }
+        if (completed != 0L) aclPacketsCompleted.addAndGet(completed)
+    }
+
+    private fun awaitAclCredit(timeoutMs: Int) {
+        val capacity = aclPacketCapacity
+        // The event worker must never wait for an event that only it can read.
+        if (capacity <= 0 || Thread.currentThread() === worker) return
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (running.get() &&
+            aclPacketsSent.get() - aclPacketsCompleted.get() >= capacity &&
+            SystemClock.elapsedRealtime() < deadline
+        ) {
+            LockSupport.parkNanos(ACL_CREDIT_POLL_NS)
+        }
     }
 
     override fun close() {
@@ -1552,6 +1633,11 @@ class HciUsbController(
         private const val INPUT_DISPATCH_STALL_LOG_MS = 100L
         private const val INPUT_QUEUE_CAPACITY = 32
         private const val AUDIO_QUEUE_CAPACITY = 4
+        private const val AUDIO_REPORT_INTERVAL_NS = 10_666_667L
+        private const val AUDIO_CLOCK_RESET_NS = 100_000_000L
+        private const val ACL_CREDIT_POLL_NS = 500_000L
+        private const val DEFAULT_ACL_DATA_PACKET_LENGTH = 1021
+        private const val MIN_ACL_DATA_PACKET_LENGTH = 27
         private const val USB_RECIP_INTERFACE = 0x01
         const val INCIDENT_NONE = "none"
         const val INCIDENT_RADIO_USB_GAP = "radio_usb_gap"

@@ -268,7 +268,7 @@ Java_com_limelight_dualsense_DualSenseBtAudioNative_encodeSpeaker(
 ) {
   constexpr int input_frames_per_chunk = 512;
   constexpr int output_frames_per_chunk = 480;
-  constexpr int chunks = 2;
+  constexpr int chunks = 1;
   constexpr int bytes_per_opus_chunk = 200;
   constexpr int input_bytes = input_frames_per_chunk * 2 * sizeof(std::int16_t) * chunks;
   if (!pcm || env->GetArrayLength(pcm) != input_bytes) return nullptr;
@@ -284,8 +284,8 @@ Java_com_limelight_dualsense_DualSenseBtAudioNative_encodeSpeaker(
       const auto *samples = reinterpret_cast<const std::int16_t *>(bytes);
       std::int16_t resampled[output_frames_per_chunk * 2];
       for (int chunk = 0; chunk < chunks; ++chunk) {
-        resample_speaker_512_to_480(
-          samples + chunk * input_frames_per_chunk * 2, resampled);
+        const auto *chunk_samples = samples + chunk * input_frames_per_chunk * 2;
+        resample_speaker_512_to_480(chunk_samples, resampled);
         const auto written = opus_encode(bt_speaker_encoder, resampled,
           output_frames_per_chunk, encoded + chunk * bytes_per_opus_chunk,
           bytes_per_opus_chunk);
