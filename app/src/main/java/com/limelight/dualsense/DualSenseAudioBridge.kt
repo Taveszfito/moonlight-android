@@ -13,6 +13,7 @@ import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.SystemClock
 import com.limelight.LimeLog
+import com.limelight.binding.input.driver.DualSenseController
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.roundToInt
@@ -29,6 +30,7 @@ object DualSenseAudioBridge {
     private lateinit var usbManager: UsbManager
     @Volatile private var initialized = false
     @Volatile private var usbRouteActive = false
+    @Volatile private var wiredControllerActive = false
     @Volatile private var streamActive = false
     @Volatile private var mode = "auto"
     private var audioConnection: UsbDeviceConnection? = null
@@ -183,21 +185,43 @@ object DualSenseAudioBridge {
             it.vendorId == SONY_VENDOR_ID && it.productId in DUALSENSE_PRODUCT_IDS
         } ?: return
         if (!usbManager.hasPermission(device)) {
-            val permission = PendingIntent.getBroadcast(
-                appContext, 0, Intent(ACTION_USB_PERMISSION).setPackage(appContext.packageName),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
-            )
-            usbManager.requestPermission(device, permission)
+            DualSenseWiredOutput.requestUsbPermissionIfNeeded()
             return
         }
         openUsbRoute(device)
+    }
+
+    /**
+     * Keep the DualSense's four-channel USB audio clock alive for the complete
+     * lifetime of the exclusive wired controller session. The native streamer
+     * supplies silence when Apollo has no PCM queued, just like PS5CTBRO with
+     * both native haptics and speaker playback enabled.
+     */
+    @JvmStatic fun onWiredControllerConnected() {
+        wiredControllerActive = true
+        Thread({
+            repeat(20) {
+                if (!wiredControllerActive || usbRouteActive || mode == "off") return@Thread
+                ensureUsbRoute()
+                if (usbRouteActive) return@Thread
+                SystemClock.sleep(100)
+            }
+            if (wiredControllerActive && !usbRouteActive && mode != "off") {
+                LimeLog.warning("DualSense USB ISO route did not become active after controller attach")
+            }
+        }, "DualSenseIsoStartup").apply { isDaemon = true }.start()
+    }
+
+    @JvmStatic @Synchronized fun onWiredControllerDisconnected() {
+        wiredControllerActive = false
+        closeUsbRoute()
     }
 
     @Synchronized private fun openUsbRoute(device: UsbDevice): Boolean {
         if (usbRouteActive) return true
         closeUsbRoute()
         val target = findAudioTarget(device) ?: return false
-        sendAudioWakeReport(device, mode)
+        DualSenseWiredOutput.reactivateNativeAudioRoute()
         val connection = usbManager.openDevice(device) ?: return false
         if (!connection.claimInterface(target, true)) {
             connection.close()
@@ -223,6 +247,10 @@ object DualSenseAudioBridge {
         audioConnection = connection
         audioInterface = target
         usbRouteActive = true
+        // SETINTERFACE can reset the controller-side USB audio engine. Repeat
+        // the proven wake sequence after the isochronous alternate setting is
+        // live so channels 1/2 and the haptic actuators on 3/4 stay enabled.
+        DualSenseWiredOutput.reactivateNativeAudioRoute()
         LimeLog.info("DualSense USB audio route active: IF=${target.id} ALT=${target.alternateSetting} EP=${endpoint.address}")
         return true
     }
@@ -240,6 +268,23 @@ object DualSenseAudioBridge {
             .maxByOrNull { intf -> (0 until intf.endpointCount).maxOf { intf.getEndpoint(it).maxPacketSize } }
 
     private fun sendAudioWakeReport(device: UsbDevice, selectedMode: String) {
+        val report = ByteArray(63)
+        report[0] = 0x02.toByte()
+        report[2] = 0x15.toByte()
+        if (selectedMode == "haptics_only") {
+            report[1] = 0x00.toByte()
+        } else {
+            report[1] = 0xf3.toByte()
+            report[5] = 0xff.toByte()
+            report[7] = 0x40.toByte()
+            if (selectedMode == "usb_headset") {
+                report[6] = 0x00.toByte(); report[8] = 0x00.toByte()
+            } else {
+                report[6] = 0xff.toByte(); report[8] = 0x30.toByte()
+            }
+        }
+        report[39] = 0x03.toByte(); report[42] = 0x02.toByte(); report[44] = 0x24.toByte()
+        if (DualSenseController.sendActiveReport(report)) return
         val connection = usbManager.openDevice(device) ?: return
         val hid = (0 until device.interfaceCount).map { device.getInterface(it) }.firstOrNull { intf ->
             intf.interfaceClass == UsbConstants.USB_CLASS_HID &&
@@ -249,33 +294,12 @@ object DualSenseAudioBridge {
                     }
         } ?: run { connection.close(); return }
         try {
-            if (!connection.claimInterface(hid, true)) return
-            val endpoint = (0 until hid.endpointCount).map { hid.getEndpoint(it) }.first {
-                it.direction == UsbConstants.USB_DIR_OUT && it.type == UsbConstants.USB_ENDPOINT_XFER_INT
-            }
-            val report = ByteArray(63)
-            report[0] = 0x02.toByte()
-            report[2] = 0x15.toByte()
-            if (selectedMode == "haptics_only") {
-                // Proven PS5CTBRO music-rumble wake path without routing audible PCM.
-                report[1] = 0x00.toByte()
-            } else {
-                report[1] = 0xf3.toByte()
-                report[5] = 0xff.toByte()
-                report[7] = 0x40.toByte()
-                if (selectedMode == "usb_headset") {
-                    report[6] = 0x00.toByte()
-                    report[8] = 0x00.toByte()
-                } else {
-                    report[6] = 0xff.toByte()
-                    report[8] = 0xff.toByte()
-                }
-            }
-            report[39] = 0x03.toByte()
-            report[42] = 0x02.toByte()
-            report[44] = 0x24.toByte()
-            connection.bulkTransfer(endpoint, report, report.size, 500)
-            connection.releaseInterface(hid)
+            // Keep Android's HID input driver attached while waking the independent
+            // USB audio interface used by native four-channel haptics.
+            connection.controlTransfer(
+                UsbConstants.USB_DIR_OUT or UsbConstants.USB_TYPE_CLASS or 0x01,
+                0x09, (0x02 shl 8) or 0x02, hid.id,
+                report, report.size, 500)
         } catch (_: Throwable) {
         } finally {
             connection.close()
@@ -284,7 +308,9 @@ object DualSenseAudioBridge {
 
     @JvmStatic @Synchronized fun stop() {
         streamActive = false
-        closeUsbRoute()
+        // The physical wired controller needs a continuous four-channel ISO
+        // clock even between host audio packets and between stream sessions.
+        if (!wiredControllerActive) closeUsbRoute()
         btNativeResampler.stop()
         DualSenseBridge.stopNativeBluetoothHaptics()
         expectedSequence = -1

@@ -44,11 +44,13 @@ import com.limelight.R;
 import com.limelight.binding.input.driver.AbstractController;
 import com.limelight.binding.input.driver.UsbDriverListener;
 import com.limelight.binding.input.driver.UsbDriverService;
+import com.limelight.binding.input.driver.DualSenseController;
 import com.limelight.nvstream.NvConnection;
 import com.limelight.nvstream.input.ControllerPacket;
 import com.example.usbbtonandroid.DualSenseInput;
 import com.example.usbbtonandroid.DualSenseTouchPoint;
 import com.limelight.dualsense.DualSenseBridge;
+import com.limelight.dualsense.DualSenseWiredOutput;
 import com.limelight.nvstream.input.MouseButtonPacket;
 import com.limelight.nvstream.jni.MoonBridge;
 import com.limelight.preferences.PreferenceConfiguration;
@@ -100,6 +102,11 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
     private static boolean isDualSenseProduct(int vendorId, int productId) {
         return vendorId == 0x054c && (productId == 0x0ce6 || productId == 0x0df2);
+    }
+
+    private static boolean isDirectWiredDualSense(InputDeviceContext context) {
+        return context != null && context.inputDevice != null &&
+                isDualSenseProduct(context.inputDevice.getVendorId(), context.inputDevice.getProductId());
     }
 
     private static final int MAXIMUM_BUMPER_UP_DELAY_MS = 100;
@@ -1236,6 +1243,13 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             return null;
         }
 
+        else if (isDualSenseProduct(event.getDevice().getVendorId(), event.getDevice().getProductId()) &&
+                DualSenseController.hasActiveController()) {
+            // The exclusive raw USB driver owns this physical controller. Ignore
+            // transient Android InputDevice instances created while interfaces settle.
+            return null;
+        }
+
         // HACK for https://issuetracker.google.com/issues/163120692
         if (Build.VERSION.SDK_INT == Build.VERSION_CODES.R) {
             if (event.getDeviceId() == -1) {
@@ -1822,7 +1836,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                                           DualSenseTouchPoint touch) {
         conn.sendControllerTouchEvent((byte) context.controllerNumber, eventType, touch.getId(),
                 Math.max(0f, Math.min(1f, touch.getX() / 1920.0f)),
-                Math.max(0f, Math.min(1f, touch.getY() / 1080.0f)), 1.0f);
+                Math.max(0f, Math.min(1f, touch.getY() / 1080.0f)),
+                eventType == MoonBridge.LI_TOUCH_EVENT_UP ? 0.0f : 1.0f);
     }
 
     private void releaseDualSenseBridgeTouches(BridgeControllerContext context) {
@@ -3529,6 +3544,26 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 InputDeviceContext deviceContext = inputDeviceContexts.valueAt(i);
 
                 if (deviceContext.controllerNumber == controllerNumber) {
+                    if (isDirectWiredDualSense(deviceContext)) {
+                        int left = ((leftTrigger & 0xFFFF) * 100) / 65535;
+                        int right = ((rightTrigger & 0xFFFF) * 100) / 65535;
+                        byte[] leftEffect = new byte[10];
+                        byte[] rightEffect = new byte[10];
+                        if (left > 0) {
+                            leftEffect[0] = (byte) 0xFF;
+                            leftEffect[1] = 0x03;
+                            leftEffect[2] = (byte) Math.max(1, Math.min(0x3F, left * 0x3F / 100));
+                        }
+                        if (right > 0) {
+                            rightEffect[0] = (byte) 0xFF;
+                            rightEffect[1] = 0x03;
+                            rightEffect[2] = (byte) Math.max(1, Math.min(0x3F, right * 0x3F / 100));
+                        }
+                        DualSenseWiredOutput.setAdaptiveTriggerEffects((byte) 0x0C,
+                                left > 0 ? (byte) 0x27 : 0,
+                                right > 0 ? (byte) 0x27 : 0,
+                                leftEffect, rightEffect);
+                    }
                     deviceContext.leftTriggerMotor = leftTrigger;
                     deviceContext.rightTriggerMotor = rightTrigger;
 
@@ -3732,6 +3767,22 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             DualSenseBridge.sendHostLed(r, g, b);
         }
 
+        for (int i = 0; i < inputDeviceContexts.size(); i++) {
+            InputDeviceContext deviceContext = inputDeviceContexts.valueAt(i);
+            if (deviceContext.controllerNumber == controllerNumber &&
+                    isDirectWiredDualSense(deviceContext)) {
+                DualSenseWiredOutput.sendLed(r, g, b);
+            }
+        }
+
+        for (int i = 0; i < usbDeviceContexts.size(); i++) {
+            UsbDeviceContext context = usbDeviceContexts.valueAt(i);
+            if (context.controllerNumber == controllerNumber &&
+                    context.device.getType() == MoonBridge.LI_CTYPE_PS5) {
+                DualSenseWiredOutput.sendLed(r, g, b);
+            }
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             for (int i = 0; i < inputDeviceContexts.size(); i++) {
                 InputDeviceContext deviceContext = inputDeviceContexts.valueAt(i);
@@ -3770,16 +3821,41 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     public void handleAdaptiveTriggers(short controllerNumber, byte eventFlags,
                                        byte typeLeft, byte typeRight,
                                        byte[] left, byte[] right) {
-        if (stopped || controllerNumber != dualSenseBridgeContext.controllerNumber ||
-                !DualSenseBridge.getControllerConnected()) {
+        if (stopped) {
             return;
         }
 
-        if ((eventFlags & 0x80) != 0 && left != null && left.length > 0) {
-            DualSenseBridge.setPlayerLeds(left[0] & 0x1F, false);
+        if (controllerNumber == dualSenseBridgeContext.controllerNumber &&
+                DualSenseBridge.getControllerConnected()) {
+            if ((eventFlags & 0x80) != 0 && left != null && left.length > 0) {
+                DualSenseBridge.setPlayerLeds(left[0] & 0x1F, false);
+            }
+            if ((eventFlags & 0x0C) != 0) {
+                DualSenseBridge.setAdaptiveTriggerEffects(eventFlags, typeLeft, typeRight, left, right);
+            }
         }
-        if ((eventFlags & 0x0C) != 0) {
-            DualSenseBridge.setAdaptiveTriggerEffects(eventFlags, typeLeft, typeRight, left, right);
+
+        for (int i = 0; i < inputDeviceContexts.size(); i++) {
+            InputDeviceContext context = inputDeviceContexts.valueAt(i);
+            if (context.controllerNumber != controllerNumber || !isDirectWiredDualSense(context)) continue;
+            if ((eventFlags & 0x80) != 0 && left != null && left.length > 0) {
+                DualSenseWiredOutput.setPlayerLeds(left[0] & 0x1F, false);
+            }
+            if ((eventFlags & 0x0C) != 0) {
+                DualSenseWiredOutput.setAdaptiveTriggerEffects(eventFlags, typeLeft, typeRight, left, right);
+            }
+        }
+
+        for (int i = 0; i < usbDeviceContexts.size(); i++) {
+            UsbDeviceContext context = usbDeviceContexts.valueAt(i);
+            if (context.controllerNumber != controllerNumber ||
+                    context.device.getType() != MoonBridge.LI_CTYPE_PS5) continue;
+            if ((eventFlags & 0x80) != 0 && left != null && left.length > 0) {
+                DualSenseWiredOutput.setPlayerLeds(left[0] & 0x1F, false);
+            }
+            if ((eventFlags & 0x0C) != 0) {
+                DualSenseWiredOutput.setAdaptiveTriggerEffects(eventFlags, typeLeft, typeRight, left, right);
+            }
         }
     }
 
@@ -4361,6 +4437,10 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             return;
         }
 
+        if (context instanceof UsbDeviceContext) {
+            ((UsbDeviceContext) context).maybeRenegotiateWiredDualSense();
+        }
+
         if (prefConfig.controllerKbmMode) {
             ensureControllerKbmGyro(context);
             ensureControllerKbmPolling(context);
@@ -4625,6 +4705,21 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     }
 
     @Override
+    public void reportControllerTouch(int controllerId, int pointerId, boolean active, float x, float y) {
+        UsbDeviceContext context = usbDeviceContexts.get(controllerId);
+        if (context == null) return;
+        boolean wasActive = context.rawTouchActive.get(pointerId, false);
+        byte eventType;
+        if (active && !wasActive) eventType = MoonBridge.LI_TOUCH_EVENT_DOWN;
+        else if (active) eventType = MoonBridge.LI_TOUCH_EVENT_MOVE;
+        else if (wasActive) eventType = MoonBridge.LI_TOUCH_EVENT_UP;
+        else return;
+        context.rawTouchActive.put(pointerId, active);
+        conn.sendControllerTouchEvent((byte) context.controllerNumber, eventType, pointerId,
+                x / 1919f, y / 1079f, active ? 1f : 0f);
+    }
+
+    @Override
     public void deviceRemoved(AbstractController controller) {
         UsbDeviceContext context = usbDeviceContexts.get(controller.getControllerId());
         if (context != null) {
@@ -4756,11 +4851,25 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     }
 
     public void handleExtendedEmulationAck(short controllerNumber, byte requested, byte accepted, byte status) {
-        if (controllerNumber != dualSenseBridgeContext.controllerNumber) return;
-        dualSenseBridgeContext.lastExtendedAcceptedMode = status == 0 ? accepted : -1;
-        dualSenseBridgeContext.playStationHostMode = status == 0 &&
-                (accepted == EXTENDED_EMULATION_DS4 || accepted == EXTENDED_EMULATION_DS5);
-        if (status == 0) dualSenseBridgeContext.extendedRequestAttempts = 3;
+        if (controllerNumber == dualSenseBridgeContext.controllerNumber &&
+                DualSenseBridge.getControllerConnected()) {
+            dualSenseBridgeContext.lastExtendedAcceptedMode = status == 0 ? accepted : -1;
+            dualSenseBridgeContext.playStationHostMode = status == 0 &&
+                    (accepted == EXTENDED_EMULATION_DS4 || accepted == EXTENDED_EMULATION_DS5);
+            if (status == 0) dualSenseBridgeContext.extendedRequestAttempts = 3;
+            return;
+        }
+
+        for (int index = 0; index < usbDeviceContexts.size(); index++) {
+            UsbDeviceContext context = usbDeviceContexts.valueAt(index);
+            if (context.controllerNumber == controllerNumber && context.isWiredDualSense()) {
+                context.lastExtendedAcceptedMode = status == 0 ? accepted : -1;
+                LimeLog.info("Wired DualSense Extended ACK: requested=" + requested +
+                        ", accepted=" + accepted + ", status=" + status +
+                        ", confirmation=" + context.extendedRequestAttempts);
+                return;
+            }
+        }
     }
 
     class GenericControllerContext implements GameInputDevice{
@@ -5141,6 +5250,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 capabilities |= MoonBridge.LI_CCAP_ANALOG_TRIGGERS;
             }
 
+            // Direct USB access supplies these native DualSense output paths even
+            // when Android doesn't expose corresponding Vibrator/Light objects.
+            if (isDualSenseProduct(inputDevice.getVendorId(), inputDevice.getProductId())) {
+                capabilities |= MoonBridge.LI_CCAP_RUMBLE | MoonBridge.LI_CCAP_RGB_LED;
+            }
+
             // Report sensors if the input device has them or we're using built-in sensors for a built-in controller
             if (sensorManager != null && sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) != null) {
                 capabilities |= MoonBridge.LI_CCAP_ACCEL;
@@ -5261,6 +5376,35 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
     class UsbDeviceContext extends InputDeviceContext {
         public AbstractController device;
+        final SparseArray<Boolean> rawTouchActive = new SparseArray<>();
+        byte lastExtendedAcceptedMode = -1;
+        int extendedRequestAttempts;
+        long lastExtendedRequestAtMs;
+
+        boolean isWiredDualSense() {
+            return device != null && device.getType() == MoonBridge.LI_CTYPE_PS5 &&
+                    isDualSenseProduct(device.getVendorId(), device.getProductId());
+        }
+
+        void maybeRenegotiateWiredDualSense() {
+            if (!isWiredDualSense() || !assignedControllerNumber ||
+                    prefConfig.controllerKbmMode || extendedRequestAttempts >= 5) {
+                return;
+            }
+            long now = SystemClock.uptimeMillis();
+            if (now - lastExtendedRequestAtMs < 1200) return;
+
+            short capabilities = extendedEmulationCapabilities(device.getCapabilities(),
+                    MoonBridge.LI_CTYPE_PS5);
+            int result = conn.sendControllerArrivalEvent((byte) controllerNumber,
+                    getActiveControllerMask(), MoonBridge.LI_CTYPE_PS,
+                    device.getSupportedButtonFlags(), capabilities);
+            extendedRequestAttempts++;
+            lastExtendedRequestAtMs = now;
+            LimeLog.info("Wired DualSense pipeline wake negotiation " +
+                    extendedRequestAttempts + "/5: result=" + result +
+                    ", previousAck=" + lastExtendedAcceptedMode);
+        }
 
 //        @Override
 //        public void destroy() {
@@ -5271,7 +5415,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
         @Override
         public void sendControllerArrival() {
-            byte type = device.getType();
+            byte detectedType = device.getType();
+            byte type = detectedType;
             short capabilities = device.getCapabilities();
 
             // Report sensors if the input device has them or we're using built-in sensors for a built-in controller
@@ -5292,8 +5437,37 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 });
             }
 
-            conn.sendControllerArrivalEvent((byte)controllerNumber, getActiveControllerMask(),
-                    type, device.getSupportedButtonFlags(), capabilities);
+            if (detectedType == MoonBridge.LI_CTYPE_PS5 &&
+                    isDualSenseProduct(device.getVendorId(), device.getProductId())) {
+                // Apollo's native DS5 audio endpoint is negotiated through the
+                // same Artemis Extended arrival used by the Bluetooth Bridge.
+                // A bare LI_CTYPE_PS5 arrival creates a controller, but does not
+                // request the four-channel DualSense audio/HD-haptics endpoint.
+                type = applyControllerEmulationPreference(MoonBridge.LI_CTYPE_PS5);
+                capabilities = extendedEmulationCapabilities(capabilities,
+                        MoonBridge.LI_CTYPE_PS5);
+
+                // Match the proven Bridge ordering. Remove any legacy player
+                // slot first so Apollo cannot retain stale X360/DS4 metadata.
+                short activeMask = getActiveControllerMask();
+                short maskWithoutController = (short) (activeMask & ~(1 << controllerNumber));
+                conn.sendControllerInput(controllerNumber, maskWithoutController,
+                        0, (byte) 0, (byte) 0,
+                        (short) 0, (short) 0, (short) 0, (short) 0);
+                extendedRequestAttempts = 1;
+                lastExtendedRequestAtMs = SystemClock.uptimeMillis();
+                lastExtendedAcceptedMode = -1;
+            }
+
+            int result = conn.sendControllerArrivalEvent((byte)controllerNumber,
+                    getActiveControllerMask(), type,
+                    device.getSupportedButtonFlags(), capabilities);
+            if (detectedType == MoonBridge.LI_CTYPE_PS5) {
+                LimeLog.info("Wired DualSense Extended controller arrival: mode=" +
+                        type + ", requested=" +
+                        requestedExtendedEmulationMode(MoonBridge.LI_CTYPE_PS5) +
+                        ", result=" + result + ", controller=" + controllerNumber);
+            }
         }
     }
 }

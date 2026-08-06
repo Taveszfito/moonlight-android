@@ -6,6 +6,7 @@ import android.widget.Toast;
 import com.limelight.profiles.ProfilesManager;
 import com.limelight.dualsense.DualSenseBridge;
 import com.limelight.dualsense.DualSenseAudioBridge;
+import com.limelight.dualsense.DualSenseWiredOutput;
 
 public class ArtemisApplication extends Application {
     @Override
@@ -13,6 +14,7 @@ public class ArtemisApplication extends Application {
         super.onCreate();
         DualSenseBridge.initialize(this);
         DualSenseAudioBridge.initialize(this);
+        DualSenseWiredOutput.initialize(this);
         ProfilesManager profilesManager = ProfilesManager.getInstance();
         if (!profilesManager.load(this)) {
             Toast.makeText(this, R.string.profile_manager_failed_to_load, Toast.LENGTH_LONG).show();

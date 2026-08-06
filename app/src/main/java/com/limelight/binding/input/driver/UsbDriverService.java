@@ -20,6 +20,7 @@ import android.widget.Toast;
 import com.limelight.LimeLog;
 import com.limelight.R;
 import com.limelight.preferences.PreferenceConfiguration;
+import com.limelight.dualsense.DualSenseWiredOutput;
 
 import java.io.File;
 import java.util.ArrayList;
@@ -57,6 +58,11 @@ public class UsbDriverService extends Service implements UsbDriverListener {
         if (listener != null) {
             listener.reportControllerMotion(controllerId, motionType, motionX, motionY, motionZ);
         }
+    }
+
+    @Override
+    public void reportControllerTouch(int controllerId, int pointerId, boolean active, float x, float y) {
+        if (listener != null) listener.reportControllerTouch(controllerId, pointerId, active, x, y);
     }
 
     @Override
@@ -145,6 +151,15 @@ public class UsbDriverService extends Service implements UsbDriverListener {
     }
 
     private void handleUsbDeviceState(UsbDevice device) {
+        if (DualSenseController.canClaimDevice(device) && DualSenseController.hasActiveController()) {
+            LimeLog.info("Ignoring duplicate DualSense USB attach while raw driver is active");
+            return;
+        }
+        if (DualSenseController.canClaimDevice(device) &&
+                DualSenseWiredOutput.isPermissionRequestPending()) {
+            new Handler().postDelayed(() -> handleUsbDeviceState(device), 1000);
+            return;
+        }
         // Are we able to operate it?
         if (shouldClaimDevice(device, prefConfig.bindAllUsb)) {
             // Do we have permission yet?
@@ -204,6 +219,9 @@ public class UsbDriverService extends Service implements UsbDriverListener {
             }
             else if (ProConController.canClaimDevice(device)) {
                 controller = new ProConController(device, connection, nextDeviceId++, this);
+            }
+            else if (DualSenseController.canClaimDevice(device)) {
+                controller = new DualSenseController(device, connection, nextDeviceId++, this);
             }
             else {
                 // Unreachable
@@ -291,7 +309,8 @@ public class UsbDriverService extends Service implements UsbDriverListener {
                 ((!isRecognizedInputDevice(device) || claimAllAvailable) && Xbox360Controller.canClaimDevice(device)) ||
                 // We must not call isRecognizedInputDevice() because wireless controllers don't share the same product ID as the dongle
                 ((!kernelSupportsXbox360W() || claimAllAvailable) && Xbox360WirelessDongle.canClaimDevice(device)) ||
-                ((!isRecognizedInputDevice(device) || claimAllAvailable) && ProConController.canClaimDevice(device));
+                ((!isRecognizedInputDevice(device) || claimAllAvailable) && ProConController.canClaimDevice(device)) ||
+                DualSenseController.canClaimDevice(device);
     }
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")

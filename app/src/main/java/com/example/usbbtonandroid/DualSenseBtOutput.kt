@@ -22,7 +22,15 @@ object DualSenseBtOutputBuilder {
         report[0] = 0x31
         report[1] = ((sequence and 0x0F) shl 4).toByte()
         report[2] = 0x10
-        report[3] = if (nativeBluetoothHaptics) 0xFC.toByte() else 0x0F
+        val compatibleRumbleActive = config.leftRumble != 0 || config.rightRumble != 0
+        // Native Bluetooth audio normally owns the haptics path. If the host
+        // sends ordinary rumble, temporarily select compatible vibration too;
+        // the next zero-motor report automatically returns to native HD haptics.
+        report[3] = if (nativeBluetoothHaptics) {
+            (if (compatibleRumbleActive) 0xFF else 0xFC).toByte()
+        } else {
+            0x0F
+        }
         report[4] = if (nativeBluetoothHaptics) 0x95.toByte() else 0x15
         report[5] = config.rightRumble.coerceIn(0, 255).toByte()
         report[6] = config.leftRumble.coerceIn(0, 255).toByte()

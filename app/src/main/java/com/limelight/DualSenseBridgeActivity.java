@@ -25,6 +25,7 @@ import com.example.usbbtonandroid.DualSenseInput;
 import com.example.usbbtonandroid.hci.HciUsbController;
 import com.limelight.dualsense.DualSenseBridge;
 import com.limelight.dualsense.DualSenseAudioBridge;
+import com.limelight.binding.input.driver.DualSenseController;
 import com.limelight.utils.UiHelper;
 
 import java.util.List;
@@ -247,26 +248,49 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
 
     private void refresh() {
         if (statusTitle == null) return;
+        if (DualSenseController.hasActiveController()) {
+            long age = DualSenseController.getActiveInputAgeMs();
+            int percent = DualSenseController.getActiveBatteryPercent();
+            statusTitle.setText("DualSense connected via USB");
+            statusTitle.setTextColor(CONNECTED);
+            statusDetails.setText("Raw HID active · " +
+                    (DualSenseController.getActiveHeadphonesConnected() ?
+                            "headset jack" : "controller speaker") +
+                    " · input age " + Math.max(0, age) + " ms");
+            if (percent >= 0) {
+                batteryView.setVisibility(View.VISIBLE);
+                batteryView.setText(percent + "%");
+            } else {
+                batteryView.setVisibility(View.GONE);
+            }
+            inputView.setText("Transport: direct wired USB\nInput packets: " +
+                    DualSenseController.getActiveInputPacketCount() +
+                    "\nHID age: " + Math.max(0, age) + " ms" +
+                    "\nRead errors: " + DualSenseController.getActiveInputReadErrors() +
+                    "\nAudio/HD haptics: " + DualSenseAudioBridge.diagnostics());
+        }
         boolean connected = DualSenseBridge.getControllerConnected();
         DualSenseInput input = DualSenseBridge.getLatestInput();
-        statusTitle.setText(connected ? R.string.dualsense_bridge_connected :
-                R.string.dualsense_bridge_not_connected);
-        statusTitle.setTextColor(connected ? CONNECTED : Color.WHITE);
-        statusDetails.setText(DualSenseBridge.getStatus());
-        if (connected && input.getBatteryPercent() >= 0) {
-            batteryView.setVisibility(View.VISIBLE);
-            batteryView.setText(input.getBatteryPercent() + "%  " + input.getBatteryStatus());
-        }
-        else {
-            batteryView.setVisibility(View.GONE);
-        }
+        if (!DualSenseController.hasActiveController()) {
+            statusTitle.setText(connected ? R.string.dualsense_bridge_connected :
+                    R.string.dualsense_bridge_not_connected);
+            statusTitle.setTextColor(connected ? CONNECTED : Color.WHITE);
+            statusDetails.setText(DualSenseBridge.getStatus());
+            if (connected && input.getBatteryPercent() >= 0) {
+                batteryView.setVisibility(View.VISIBLE);
+                batteryView.setText(input.getBatteryPercent() + "%  " + input.getBatteryStatus());
+            }
+            else {
+                batteryView.setVisibility(View.GONE);
+            }
 
-        inputView.setText("Input packets: " + DualSenseBridge.getInputPacketCount() +
+            inputView.setText("Input packets: " + DualSenseBridge.getInputPacketCount() +
                 "\nSticks: " + input.getLeftX() + ", " + input.getLeftY() + "  |  " +
                 input.getRightX() + ", " + input.getRightY() +
                 "\nTriggers: " + input.getLeftTrigger() + " / " + input.getRightTrigger() +
                 "\nButtons: " + input.getPressed() +
                 "\nAudio/HD haptics: " + DualSenseAudioBridge.diagnostics());
+        }
         List<HciUsbController.HciDevice> devices = DualSenseBridge.getDevices();
         StringBuilder signature = new StringBuilder();
         signature.append("connected=").append(connected).append(';');

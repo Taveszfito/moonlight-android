@@ -31,6 +31,7 @@ import com.limelight.binding.video.MediaCodecHelper;
 import com.limelight.binding.video.PerfOverlayListener;
 import com.limelight.dualsense.DualSenseBridge;
 import com.limelight.dualsense.DualSenseAudioBridge;
+import com.limelight.binding.input.driver.DualSenseController;
 import com.example.usbbtonandroid.DualSenseInput;
 import com.example.usbbtonandroid.hci.HciUsbController;
 import com.limelight.nvstream.NvConnection;
@@ -1848,6 +1849,29 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         if (controllerConnectionOverlayView == null || controllerConnectionOverlayContainer == null) return;
         if (!DualSenseBridge.isConnectionOverlayEnabled()) {
             controllerConnectionOverlayContainer.setVisibility(View.GONE);
+            return;
+        }
+
+        if (DualSenseController.hasActiveController()) {
+            long age = DualSenseController.getActiveInputAgeMs();
+            int batteryPercent = DualSenseController.getActiveBatteryPercent();
+            String battery = batteryPercent >= 0 ? "  ·  " + batteryPercent + "%" : "";
+            String state = age >= 0 && age <= 250 ?
+                    getString(R.string.dualsense_diag_active) :
+                    getString(R.string.dualsense_diag_interrupted);
+            String route = DualSenseController.getActiveHeadphonesConnected() ?
+                    "headset jack" : "controller speaker";
+            String overlayText = "DualSense USB " + state + battery +
+                    "\nRaw HID age " + Math.max(0, age) + " ms  ·  packets " +
+                    DualSenseController.getActiveInputPacketCount() +
+                    "  ·  read errors " + DualSenseController.getActiveInputReadErrors() +
+                    "\nAudio route: " + route +
+                    "\n\nAudio / HD haptics: " + DualSenseAudioBridge.diagnostics();
+            controllerConnectionLogClearView.setVisibility(View.GONE);
+            controllerConnectionOverlayView.setText(overlayText);
+            controllerConnectionOverlayView.setTextColor(age >= 0 && age <= 250 ?
+                    0xFFE8FFF0 : 0xFFFFD6D6);
+            controllerConnectionOverlayContainer.setVisibility(View.VISIBLE);
             return;
         }
 

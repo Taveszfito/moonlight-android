@@ -55,6 +55,8 @@ import android.util.TypedValue;
 
 import androidx.preference.PreferenceManager;
 import com.limelight.dualsense.DualSenseBridge;
+import com.limelight.dualsense.DualSenseAudioBridge;
+import com.limelight.binding.input.driver.DualSenseController;
 import com.example.usbbtonandroid.DualSenseInput;
 import androidx.appcompat.view.WindowCallbackWrapper;
 
@@ -770,14 +772,19 @@ public class GameMenu implements Game.GameMenuCallbacks {
         if (getString(R.string.quick_menu_title).equals(title)) {
             TextView bridgeStatus = new TextView(getThemedContext());
             DualSenseInput bridgeInput = DualSenseBridge.getLatestInput();
-            String bridgeLabel = DualSenseBridge.getControllerConnected() ?
-                    "DualSense connected" : "DualSense disconnected";
-            if (DualSenseBridge.getControllerConnected() &&
+            boolean wiredConnected = DualSenseController.hasActiveController();
+            boolean bridgeConnected = DualSenseBridge.getControllerConnected();
+            String bridgeLabel = wiredConnected ? "DualSense USB connected" :
+                    bridgeConnected ? "DualSense Bridge connected" : "DualSense disconnected";
+            if (wiredConnected && DualSenseController.getActiveBatteryPercent() >= 0) {
+                bridgeLabel += "  -  " + DualSenseController.getActiveBatteryPercent() + "%";
+            }
+            else if (bridgeConnected &&
                     bridgeInput.getBatteryPercent() >= 0) {
                 bridgeLabel += "  -  " + bridgeInput.getBatteryPercent() + "%";
             }
             bridgeStatus.setText(bridgeLabel);
-            bridgeStatus.setTextColor(DualSenseBridge.getControllerConnected() ?
+            bridgeStatus.setTextColor(wiredConnected || bridgeConnected ?
                     0xFF62D995 : 0x99FFFFFF);
             bridgeStatus.setTextSize(13);
             bridgeStatus.setMaxLines(1);
@@ -3836,7 +3843,8 @@ public class GameMenu implements Game.GameMenuCallbacks {
                     game::rotateScreen));
         }
         options.add(new MenuOption(MENU_DUALSENSE_BRIDGE,
-                "DualSense Bridge • ALPHA",
+                DualSenseController.hasActiveController() ?
+                        "DualSense USB / HD audio • ALPHA" : "DualSense Bridge • ALPHA",
                 () -> showDualSenseBridgeMenu(device)));
         options.add(new MenuOption(MENU_ADVANCED, getString(R.string.game_menu_advanced), true,
                 () -> showAdvancedMenu(device)));
@@ -3848,16 +3856,35 @@ public class GameMenu implements Game.GameMenuCallbacks {
     private void showDualSenseBridgeMenu(GameInputDevice device) {
         Handler handler = new Handler(Looper.getMainLooper());
         List<MenuOption> options = new ArrayList<>();
-        String state = DualSenseBridge.getControllerConnected() ?
-                "Connected — input packets: " + DualSenseBridge.getInputPacketCount() :
-                "Not connected";
-        DualSenseInput bridgeInput = DualSenseBridge.getLatestInput();
-        if (DualSenseBridge.getControllerConnected() && bridgeInput.getBatteryPercent() >= 0) {
-            state += "\nBattery: " + bridgeInput.getBatteryPercent() + "% - " +
-                    bridgeInput.getBatteryStatus();
+        boolean wiredConnected = DualSenseController.hasActiveController();
+        String state;
+        String connectionDetails;
+        if (wiredConnected) {
+            state = "Connected through USB — input packets: " +
+                    DualSenseController.getActiveInputPacketCount();
+            int batteryPercent = DualSenseController.getActiveBatteryPercent();
+            if (batteryPercent >= 0) {
+                state += "\nBattery: " + batteryPercent + "%";
+            }
+            state += "\nRaw HID age: " + DualSenseController.getActiveInputAgeMs() + " ms" +
+                    "\nRead errors: " + DualSenseController.getActiveInputReadErrors() +
+                    "\nAudio route: " +
+                    (DualSenseController.getActiveHeadphonesConnected() ? "headset jack" : "speaker");
+            connectionDetails = "Audio / HD haptics: " + DualSenseAudioBridge.diagnostics();
+        }
+        else {
+            state = DualSenseBridge.getControllerConnected() ?
+                    "Connected — input packets: " + DualSenseBridge.getInputPacketCount() :
+                    "Not connected";
+            DualSenseInput bridgeInput = DualSenseBridge.getLatestInput();
+            if (DualSenseBridge.getControllerConnected() && bridgeInput.getBatteryPercent() >= 0) {
+                state += "\nBattery: " + bridgeInput.getBatteryPercent() + "% - " +
+                        bridgeInput.getBatteryStatus();
+            }
+            connectionDetails = DualSenseBridge.getStatus();
         }
         options.add(new MenuOption("dualsense_status",
-                state + "\n" + DualSenseBridge.getStatus(), () ->
+                state + "\n" + connectionDetails, () ->
                 showDualSenseBridgeMenu(device)));
         options.add(new MenuOption("dualsense_scan", "Find / rescan USB adapter", () -> {
             DualSenseBridge.scan(game);
@@ -3891,7 +3918,8 @@ public class GameMenu implements Game.GameMenuCallbacks {
             }
         }
         options.add(new MenuOption(MENU_CANCEL, getString(R.string.game_menu_cancel), null));
-        showMenuDialog("DualSense Bridge • ALPHA",
+        showMenuDialog(wiredConnected ? "DualSense USB / HD audio • ALPHA" :
+                        "DualSense Bridge • ALPHA",
                 options.toArray(new MenuOption[0]), () -> showMenu(device));
     }
 
