@@ -33,6 +33,7 @@ object DualSenseAudioBridge {
     @Volatile private var wiredControllerActive = false
     @Volatile private var streamActive = false
     @Volatile private var mode = "auto"
+    @Volatile private var controllerVolume = 100
     private var audioConnection: UsbDeviceConnection? = null
     private var audioInterface: UsbInterface? = null
     private var expectedSequence = -1
@@ -70,14 +71,19 @@ object DualSenseAudioBridge {
         }
     }
 
-    @JvmStatic @Synchronized fun configure(selectedMode: String?) {
+    @JvmStatic @Synchronized fun configure(selectedMode: String?, selectedVolume: Int) {
         val normalized = when (selectedMode) {
             "usb_speaker", "usb_headset", "haptics_only", "off" -> selectedMode
             else -> "auto"
         }
         if (mode != normalized) closeUsbRoute()
         mode = normalized
-        LimeLog.info("DualSense audio mode: $mode")
+        controllerVolume = selectedVolume.coerceIn(0, 100)
+        LimeLog.info("DualSense audio mode: $mode, controller volume: $controllerVolume%")
+    }
+
+    @JvmStatic fun setControllerVolume(selectedVolume: Int) {
+        controllerVolume = selectedVolume.coerceIn(0, 100)
     }
 
     @JvmStatic fun initialize(context: Context) {
@@ -143,9 +149,14 @@ object DualSenseAudioBridge {
     private fun processPacket(pcm: ByteArray, frameCount: Int) {
         if (mode == "off") return
 
+        // Scale only speaker/jack channels 1/2. Native haptics on channels 3/4
+        // must remain bit-identical. This avoids the controller's stateful
+        // volume-control output bytes and works for both USB ISO and BT Bridge.
+        val volumeAdjustedPcm = applySpeakerGain(pcm, frameCount)
+
         if (!usbRouteActive) ensureUsbRoute()
         if (usbRouteActive) {
-            val usbPcm = if (mode == "haptics_only") withoutSpeakerChannels(pcm, frameCount) else pcm
+            val usbPcm = if (mode == "haptics_only") withoutSpeakerChannels(volumeAdjustedPcm, frameCount) else volumeAdjustedPcm
             if (DualSenseIsoNative.push(usbPcm) == 0) return
             closeUsbRoute()
         }
@@ -154,7 +165,7 @@ object DualSenseAudioBridge {
         // native 3 kHz stereo Bluetooth audio reports. Do not derive rumble
         // amplitudes, envelopes, bass boosts, or any other synthetic feedback.
         if (mode == "auto" || mode == "haptics_only") {
-            btNativeResampler.pushFourChannelPcm(pcm, frameCount,
+            btNativeResampler.pushFourChannelPcm(volumeAdjustedPcm, frameCount,
                 includeSpeaker = mode != "haptics_only")
             val now = SystemClock.elapsedRealtime()
             if (now - lastBtDiagnosticAtMs >= 2_000) {
@@ -189,6 +200,27 @@ object DualSenseAudioBridge {
             return
         }
         openUsbRoute(device)
+    }
+
+    private fun applySpeakerGain(pcm: ByteArray, frameCount: Int): ByteArray {
+        val volume = controllerVolume
+        if (volume >= 100) return pcm
+        return pcm.copyOf().also { output ->
+            var offset = 0
+            repeat(frameCount) {
+                writeScaledS16(output, offset, volume)
+                writeScaledS16(output, offset + 2, volume)
+                offset += 8
+            }
+        }
+    }
+
+    private fun writeScaledS16(data: ByteArray, offset: Int, volume: Int) {
+        val sample = ((data[offset].toInt() and 0xff) or
+            (data[offset + 1].toInt() shl 8)).toShort().toInt()
+        val scaled = (sample * volume + if (sample >= 0) 50 else -50) / 100
+        data[offset] = scaled.toByte()
+        data[offset + 1] = (scaled shr 8).toByte()
     }
 
     /**

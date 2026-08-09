@@ -1738,11 +1738,13 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             if (context.playStationHostMode && shouldSendBridgeMotion(
                     context.gyroReportRateHz, context.bridgeLastGyroHostReportNs)) {
                 context.bridgeLastGyroHostReportNs = System.nanoTime();
-                conn.sendControllerMotionEvent((byte) context.controllerNumber,
-                        MoonBridge.LI_MOTION_TYPE_GYRO,
+                float[] mapped = mapGyroAxes(
                         gyro.getFirst() / DUALSENSE_GYRO_UNITS_PER_DPS,
                         gyro.getSecond() / DUALSENSE_GYRO_UNITS_PER_DPS,
                         gyro.getThird() / DUALSENSE_GYRO_UNITS_PER_DPS);
+                conn.sendControllerMotionEvent((byte) context.controllerNumber,
+                        MoonBridge.LI_MOTION_TYPE_GYRO,
+                        mapped[0], mapped[1], mapped[2]);
             }
         }
         sendControllerInputPacket(context);
@@ -3648,11 +3650,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
                 if (motionType == MoonBridge.LI_MOTION_TYPE_GYRO) {
                     // Convert from rad/s to deg/s
-                    conn.sendControllerMotionEvent((byte) controllerNumber,
-                            motionType,
+                    float[] mapped = mapGyroAxes(
                             sensorEvent.values[x] * xFactor * 57.2957795f,
                             sensorEvent.values[y] * yFactor * 57.2957795f,
                             sensorEvent.values[z] * zFactor * 57.2957795f);
+                    conn.sendControllerMotionEvent((byte) controllerNumber,
+                            motionType, mapped[0], mapped[1], mapped[2]);
                 }
                 else {
                     // Pass m/s^2 directly without conversion
@@ -4701,7 +4704,40 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             }
         }
 
+        if (motionType == MoonBridge.LI_MOTION_TYPE_GYRO) {
+            float[] mapped = mapGyroAxes(motionX, motionY, motionZ);
+            motionX = mapped[0]; motionY = mapped[1]; motionZ = mapped[2];
+        }
         conn.sendControllerMotionEvent((byte)context.controllerNumber, motionType, motionX, motionY, motionZ);
+    }
+
+    private float[] mapGyroAxes(float x, float y, float z) {
+        String xKey = PreferenceConfiguration.GYRO_AXIS_X_PREF_STRING;
+        String yKey = PreferenceConfiguration.GYRO_AXIS_Y_PREF_STRING;
+        String zKey = PreferenceConfiguration.GYRO_AXIS_Z_PREF_STRING;
+        float[] values = {x, y, z};
+        float[] mapped = new float[] {
+                values[axisIndex(gyroAimPreferences.getString(xKey, "x"))],
+                values[axisIndex(gyroAimPreferences.getString(yKey, "y"))],
+                values[axisIndex(gyroAimPreferences.getString(zKey, "z"))]
+        };
+        if (gyroAimPreferences.getBoolean(
+                PreferenceConfiguration.GYRO_AXIS_INVERT_X_PREF_STRING, false)) mapped[0] = -mapped[0];
+        if (gyroAimPreferences.getBoolean(
+                PreferenceConfiguration.GYRO_AXIS_INVERT_Y_PREF_STRING, false)) mapped[1] = -mapped[1];
+        if (gyroAimPreferences.getBoolean(
+                PreferenceConfiguration.GYRO_AXIS_INVERT_Z_PREF_STRING, false)) mapped[2] = -mapped[2];
+        if (gyroAimPreferences.getBoolean(
+                PreferenceConfiguration.GYRO_AXIS_DISABLE_X_PREF_STRING, false)) mapped[0] = 0.0f;
+        if (gyroAimPreferences.getBoolean(
+                PreferenceConfiguration.GYRO_AXIS_DISABLE_Y_PREF_STRING, false)) mapped[1] = 0.0f;
+        if (gyroAimPreferences.getBoolean(
+                PreferenceConfiguration.GYRO_AXIS_DISABLE_Z_PREF_STRING, false)) mapped[2] = 0.0f;
+        return mapped;
+    }
+
+    private static int axisIndex(String axis) {
+        return "y".equals(axis) ? 1 : "z".equals(axis) ? 2 : 0;
     }
 
     @Override

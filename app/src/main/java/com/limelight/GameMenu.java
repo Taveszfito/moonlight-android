@@ -107,6 +107,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
     private static final String MENU_ROTATE_SCREEN = "rotate_screen";
     private static final String MENU_ADVANCED = "advanced";
     private static final String MENU_DUALSENSE_BRIDGE = "dualsense_bridge";
+    private static final String MENU_GYRO_AXIS_MAPPING = "gyro_axis_mapping";
     private static final String MENU_CANCEL = "cancel";
 
     private static final String ADV_MOUSE_MODE = "advanced_mouse_mode";
@@ -137,6 +138,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
             MENU_TOGGLE_KEYBOARD,
             MENU_ZOOM_MODE,
             MENU_ROTATE_SCREEN,
+            MENU_GYRO_AXIS_MAPPING,
             MENU_DUALSENSE_BRIDGE,
             MENU_ADVANCED,
             MENU_CANCEL
@@ -396,6 +398,9 @@ public class GameMenu implements Game.GameMenuCallbacks {
         }
         if (MENU_ROTATE_SCREEN.equals(id)) {
             return R.drawable.ic_qm_rotate;
+        }
+        if (MENU_GYRO_AXIS_MAPPING.equals(id)) {
+            return R.drawable.ic_qm_gyro;
         }
         if (MENU_ADVANCED.equals(id)) {
             return R.drawable.ic_qm_tune;
@@ -738,6 +743,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
                                                    Runnable backAction,
                                                    View headerActions) {
         controllerBackAction = backAction;
+        boolean isQuickMenu = getString(R.string.quick_menu_title).equals(title);
         LinearLayout shell = new LinearLayout(getThemedContext());
         shell.setOrientation(LinearLayout.VERTICAL);
         shell.setPadding(dp(14), dp(8), dp(14), dp(12));
@@ -769,7 +775,8 @@ public class GameMenu implements Game.GameMenuCallbacks {
         header.addView(titleView, new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
-        if (getString(R.string.quick_menu_title).equals(title)) {
+        LinearLayout controllerVolumePanel = null;
+        if (isQuickMenu) {
             TextView bridgeStatus = new TextView(getThemedContext());
             DualSenseInput bridgeInput = DualSenseBridge.getLatestInput();
             boolean wiredConnected = DualSenseController.hasActiveController();
@@ -805,6 +812,19 @@ public class GameMenu implements Game.GameMenuCallbacks {
                     ViewGroup.LayoutParams.WRAP_CONTENT);
             hintParams.setMargins(dp(8), 0, dp(8), 0);
             header.addView(controllerNavigationHint, hintParams);
+
+            controllerVolumePanel = createControllerVolumePanel();
+            LinearLayout finalControllerVolumePanel = controllerVolumePanel;
+            ImageButton controllerVolumeButton = new ImageButton(getThemedContext());
+            controllerVolumeButton.setImageResource(R.drawable.ic_qm_volume);
+            controllerVolumeButton.setColorFilter(Color.WHITE);
+            controllerVolumeButton.setBackgroundColor(Color.TRANSPARENT);
+            controllerVolumeButton.setContentDescription(
+                    getString(R.string.title_dualsense_controller_volume));
+            controllerVolumeButton.setOnClickListener(view -> finalControllerVolumePanel.setVisibility(
+                    finalControllerVolumePanel.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE));
+            applyControllerFocusStyle(controllerVolumeButton);
+            header.addView(controllerVolumeButton, new LinearLayout.LayoutParams(dp(44), dp(44)));
         }
         else {
             controllerNavigationHint = null;
@@ -836,9 +856,66 @@ public class GameMenu implements Game.GameMenuCallbacks {
         header.addView(close, new LinearLayout.LayoutParams(dp(44), dp(44)));
 
         shell.addView(header);
+        if (controllerVolumePanel != null) {
+            shell.addView(controllerVolumePanel, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        }
         shell.addView(content, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         return shell;
+    }
+
+    private LinearLayout createControllerVolumePanel() {
+        SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(game);
+        int initialVolume = Math.max(0, Math.min(100, preferences.getInt(
+                PreferenceConfiguration.DUALSENSE_CONTROLLER_VOLUME_PREF_STRING,
+                PreferenceConfiguration.DEFAULT_DUALSENSE_CONTROLLER_VOLUME)));
+
+        LinearLayout panel = new LinearLayout(getThemedContext());
+        panel.setVisibility(View.GONE);
+        panel.setGravity(Gravity.CENTER_VERTICAL);
+        panel.setPadding(dp(12), dp(4), dp(12), dp(10));
+        panel.setBackground(roundedBackground(0xFF202A36, 12));
+
+        TextView label = new TextView(getThemedContext());
+        label.setText(R.string.title_dualsense_controller_volume);
+        label.setTextColor(Color.WHITE);
+        label.setTextSize(14);
+        panel.addView(label, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        SeekBar slider = new SeekBar(getThemedContext());
+        slider.setMax(100);
+        slider.setProgress(initialVolume);
+        slider.setKeyProgressIncrement(5);
+        LinearLayout.LayoutParams sliderParams = new LinearLayout.LayoutParams(0, dp(44), 1);
+        sliderParams.setMargins(dp(12), 0, dp(8), 0);
+        panel.addView(slider, sliderParams);
+
+        TextView value = new TextView(getThemedContext());
+        value.setText(initialVolume + "%");
+        value.setTextColor(Color.WHITE);
+        value.setTextSize(14);
+        value.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        panel.addView(value, new LinearLayout.LayoutParams(dp(52), dp(44)));
+
+        slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                value.setText(progress + "%");
+                if (fromUser) {
+                    DualSenseAudioBridge.setControllerVolume(progress);
+                    preferences.edit().putInt(
+                            PreferenceConfiguration.DUALSENSE_CONTROLLER_VOLUME_PREF_STRING,
+                            progress).apply();
+                }
+            }
+
+            @Override public void onStartTrackingTouch(SeekBar seekBar) { }
+            @Override public void onStopTrackingTouch(SeekBar seekBar) { }
+        });
+        applyControllerFocusStyle(slider);
+        return panel;
     }
 
     private void applyControllerFocusStyle(View view) {
@@ -2102,6 +2179,79 @@ public class GameMenu implements Game.GameMenuCallbacks {
         showFullscreenSettings(R.string.game_menu_gyro_aim_settings,
                 scrollView, () -> showAdvancedMenu(device),
                 () -> showAdvancedMenu(device));
+    }
+
+    private void addGyroAxisMappingControls(LinearLayout layout, SharedPreferences prefs,
+                                            String xKey, String yKey, String zKey) {
+        TextView heading = new TextView(getThemedContext());
+        heading.setText(R.string.game_menu_gyro_axis_mapping);
+        heading.setTextSize(18);
+        layout.addView(heading);
+        addGyroAxisSpinner(layout, prefs, R.string.game_menu_gyro_axis_x, xKey, "x");
+        addGyroAxisSpinner(layout, prefs, R.string.game_menu_gyro_axis_y, yKey, "y");
+        addGyroAxisSpinner(layout, prefs, R.string.game_menu_gyro_axis_z, zKey, "z");
+    }
+
+    private void addGyroAxisSpinner(LinearLayout layout, SharedPreferences prefs,
+                                    int labelId, String key, String defaultValue) {
+        TextView label = new TextView(getThemedContext());
+        label.setText(labelId);
+        label.setTextSize(16);
+        layout.addView(label);
+        Spinner spinner = new Spinner(getThemedContext());
+        String[] axes = { "X", "Y", "Z" };
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(getThemedContext(),
+                android.R.layout.simple_spinner_item, axes);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinner.setAdapter(adapter);
+        String current = prefs.getString(key, defaultValue);
+        spinner.setSelection("y".equals(current) ? 1 : "z".equals(current) ? 2 : 0);
+        spinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                prefs.edit().putString(key, position == 1 ? "y" : position == 2 ? "z" : "x").apply();
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
+        });
+        layout.addView(spinner);
+    }
+
+    private void showGyroAxisMappingMenu(GameInputDevice device) {
+        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(game);
+        ScrollView scroll = new ScrollView(getThemedContext());
+        LinearLayout layout = new LinearLayout(getThemedContext());
+        layout.setOrientation(LinearLayout.VERTICAL);
+        int padding = (int) (18 * game.getResources().getDisplayMetrics().density);
+        layout.setPadding(padding, padding / 2, padding, 0);
+        addGyroAxisMappingControls(layout, prefs,
+                PreferenceConfiguration.GYRO_AXIS_X_PREF_STRING,
+                PreferenceConfiguration.GYRO_AXIS_Y_PREF_STRING,
+                PreferenceConfiguration.GYRO_AXIS_Z_PREF_STRING);
+        addGyroAxisInvertSwitch(layout, prefs, R.string.game_menu_gyro_axis_invert_x,
+                PreferenceConfiguration.GYRO_AXIS_INVERT_X_PREF_STRING);
+        addGyroAxisInvertSwitch(layout, prefs, R.string.game_menu_gyro_axis_invert_y,
+                PreferenceConfiguration.GYRO_AXIS_INVERT_Y_PREF_STRING);
+        addGyroAxisInvertSwitch(layout, prefs, R.string.game_menu_gyro_axis_invert_z,
+                PreferenceConfiguration.GYRO_AXIS_INVERT_Z_PREF_STRING);
+        addGyroAxisInvertSwitch(layout, prefs, R.string.game_menu_gyro_axis_disable_x,
+                PreferenceConfiguration.GYRO_AXIS_DISABLE_X_PREF_STRING);
+        addGyroAxisInvertSwitch(layout, prefs, R.string.game_menu_gyro_axis_disable_y,
+                PreferenceConfiguration.GYRO_AXIS_DISABLE_Y_PREF_STRING);
+        addGyroAxisInvertSwitch(layout, prefs, R.string.game_menu_gyro_axis_disable_z,
+                PreferenceConfiguration.GYRO_AXIS_DISABLE_Z_PREF_STRING);
+        cardifySettingsLayout(layout);
+        scroll.addView(layout);
+        showFullscreenSettings(R.string.game_menu_gyro_axis_mapping, scroll,
+                () -> showMenu(device), () -> showMenu(device));
+    }
+
+    private void addGyroAxisInvertSwitch(LinearLayout layout, SharedPreferences prefs,
+                                         int labelId, String key) {
+        Switch invert = new Switch(getThemedContext());
+        invert.setText(labelId);
+        invert.setChecked(prefs.getBoolean(key, false));
+        invert.setOnCheckedChangeListener((button, checked) ->
+                prefs.edit().putBoolean(key, checked).apply());
+        layout.addView(invert);
     }
 
     private boolean isPlayStationKbmIconLayout() {
@@ -3842,6 +3992,9 @@ public class GameMenu implements Game.GameMenuCallbacks {
             options.add(new MenuOption(MENU_ROTATE_SCREEN, getString(R.string.game_menu_rotate_screen), true,
                     game::rotateScreen));
         }
+        options.add(new MenuOption(MENU_GYRO_AXIS_MAPPING,
+                getString(R.string.game_menu_gyro_axis_mapping),
+                () -> showGyroAxisMappingMenu(device)));
         options.add(new MenuOption(MENU_DUALSENSE_BRIDGE,
                 DualSenseController.hasActiveController() ?
                         "DualSense USB / HD audio • ALPHA" : "DualSense Bridge • ALPHA",

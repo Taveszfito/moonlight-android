@@ -402,7 +402,8 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
         // Read the stream preferences
         prefConfig = PreferenceConfiguration.readPreferences(this);
-        DualSenseAudioBridge.configure(prefConfig.dualSenseAudioMode);
+        DualSenseAudioBridge.configure(prefConfig.dualSenseAudioMode,
+                prefConfig.dualSenseControllerVolume);
         tombstonePrefs = Game.this.getSharedPreferences("DecoderTombstone", 0);
 
         if (prefConfig.fullScreen) {

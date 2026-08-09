@@ -37,7 +37,9 @@ public class PreferenceConfiguration {
     public static final String VOLUME_BUTTON_MODE_ANDROID = "android";
     public static final String VOLUME_BUTTON_MODE_WINDOWS = "windows";
     public static final String DUALSENSE_AUDIO_MODE_PREF_STRING = "dualsense_audio_mode";
+    public static final String DUALSENSE_CONTROLLER_VOLUME_PREF_STRING = "dualsense_controller_volume";
     public static final String DEFAULT_DUALSENSE_AUDIO_MODE = "auto";
+    public static final int DEFAULT_DUALSENSE_CONTROLLER_VOLUME = 100;
 
     private static final String LEGACY_RES_FPS_PREF_STRING = "list_resolution_fps";
     private static final String LEGACY_ENABLE_51_SURROUND_PREF_STRING = "checkbox_51_surround";
@@ -119,6 +121,15 @@ public class PreferenceConfiguration {
     public static final String GYRO_AIM_ACTIVATION_SOURCE_PREF_STRING = "gyro_aim_activation_source";
     public static final String GYRO_AIM_ACTIVATION_MODE_PREF_STRING = "gyro_aim_activation_mode";
     public static final String GYRO_AIM_ACTIVATION_SOURCES_PREF_STRING = "gyro_aim_activation_sources";
+    public static final String GYRO_AXIS_X_PREF_STRING = "gyro_axis_x_source";
+    public static final String GYRO_AXIS_Y_PREF_STRING = "gyro_axis_y_source";
+    public static final String GYRO_AXIS_Z_PREF_STRING = "gyro_axis_z_source";
+    public static final String GYRO_AXIS_INVERT_X_PREF_STRING = "gyro_axis_invert_x";
+    public static final String GYRO_AXIS_INVERT_Y_PREF_STRING = "gyro_axis_invert_y";
+    public static final String GYRO_AXIS_INVERT_Z_PREF_STRING = "gyro_axis_invert_z";
+    public static final String GYRO_AXIS_DISABLE_X_PREF_STRING = "gyro_axis_disable_x";
+    public static final String GYRO_AXIS_DISABLE_Y_PREF_STRING = "gyro_axis_disable_y";
+    public static final String GYRO_AXIS_DISABLE_Z_PREF_STRING = "gyro_axis_disable_z";
     private static final String GAMEPAD_MOTION_FALLBACK_PREF_STRING = "checkbox_gamepad_motion_fallback";
     private static final String FORCE_MOTION_SENSORS_FALLBACK_PREF_STRING = "checkbox_force_device_motion";
     private static final String FULL_SCREEN_PREF_STRING = "checkbox_full_screen";
@@ -421,6 +432,7 @@ public class PreferenceConfiguration {
     public boolean forceMotionSensorsFallbackToDevice;
     public boolean enableRumble;
     public String dualSenseAudioMode;
+    public int dualSenseControllerVolume;
     public boolean preventPacketLoss;
 
     public boolean rememberZoomPan;
@@ -1085,6 +1097,9 @@ private static int getFramePacingValue(Context context) {
         config.enableRumble = prefs.getBoolean(ENABLE_RUMBLE_PREF_STRING, DEFAULT_ENABLE_RUMBLE);
         config.dualSenseAudioMode = prefs.getString(DUALSENSE_AUDIO_MODE_PREF_STRING,
                 DEFAULT_DUALSENSE_AUDIO_MODE);
+        config.dualSenseControllerVolume = Math.max(0, Math.min(100,
+                prefs.getInt(DUALSENSE_CONTROLLER_VOLUME_PREF_STRING,
+                        DEFAULT_DUALSENSE_CONTROLLER_VOLUME)));
         config.preventPacketLoss = prefs.getBoolean(PREVENT_PACKET_LOSS_PREF_STRING, DEFAULT_PREVENT_PACKET_LOSS);
 
         // Read custom values

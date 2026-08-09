@@ -13,6 +13,8 @@
     <string name="dualsense_audio_usb_headset">USB: headset jack + HD haptics</string>
     <string name="dualsense_audio_haptics_only">HD haptics only</string>
     <string name="dualsense_audio_off">Disabled</string>
+    <string name="title_dualsense_controller_volume">Controller volume</string>
+    <string name="summary_dualsense_controller_volume">Controls DualSense speaker and headset volume for wired USB and Bluetooth Bridge modes. 100% is the original native stream level; no controller volume commands are sent.</string>
     <!-- Shortcut strings -->
     <string name="scut_deleted_pc">PC deleted</string>
     <string name="scut_not_paired">PC not paired</string>
@@ -442,6 +444,16 @@
     <string name="game_menu_gyro_aim_deadzone_compensation">Deadzone compensation</string>
     <string name="game_menu_gyro_aim_link_side_axes">Link side-axis sensitivities</string>
     <string name="game_menu_gyro_smoothing">Gyro smoothing</string>
+    <string name="game_menu_gyro_axis_mapping">Gyro coordinate mapping</string>
+    <string name="game_menu_gyro_axis_x">X coordinate source</string>
+    <string name="game_menu_gyro_axis_y">Y coordinate source</string>
+    <string name="game_menu_gyro_axis_z">Z coordinate source</string>
+    <string name="game_menu_gyro_axis_invert_x">Invert X coordinate direction</string>
+    <string name="game_menu_gyro_axis_invert_y">Invert Y coordinate direction</string>
+    <string name="game_menu_gyro_axis_invert_z">Invert Z coordinate direction</string>
+    <string name="game_menu_gyro_axis_disable_x">Disable X coordinate</string>
+    <string name="game_menu_gyro_axis_disable_y">Disable Y coordinate</string>
+    <string name="game_menu_gyro_axis_disable_z">Disable Z coordinate</string>
     <string name="game_menu_gyro_status_overlay">Show gyro enabled/paused overlay</string>
     <string name="game_menu_gyro_only_while_button_held">Only active while button is held</string>
     <string name="game_menu_gyro_activation_button">Gyro activation button</string>
