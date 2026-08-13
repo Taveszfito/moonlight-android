@@ -49,3 +49,4 @@ Development can be followed in the [Apollo Extended repository](https://github.c
 ### Credits
 
 Based on [Artemis Android](https://github.com/ClassicOldSong/moonlight-android).
+(BTW, Windows client will come in the future, and its development is currently in progress.) 
