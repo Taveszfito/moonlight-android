@@ -36,13 +36,13 @@ Windows volume control requires a corresponding [PowerToys Keyboard Manager](htt
 
 ---
 
-## 🚧 Apollo Extended — Coming Soon
+## 🖥️ Apollo Extended Host
 
-[Apollo Extended](https://github.com/Taveszfito/Apollo-Extended) is an upcoming companion host for Artemis Extended, adding **Xbox 360, DualShock 4, and native DualSense host emulation**.
+[Apollo Extended](https://github.com/Taveszfito/Apollo-Extended) is now available. It provides **Xbox 360, DualShock 4, and native DualSense host emulation** for Artemis Extended.
 
-Together with the DualSense HCI Bridge, it enables native end-to-end DualSense streaming while preserving **full DualSense functionality wirelessly**.
+Together with the DualSense HCI Bridge, it enables native end-to-end DualSense streaming while preserving **HD haptics, adaptive triggers, controller-speaker audio, lighting, touchpad and motion input wirelessly**.
 
-Development can be followed in the [Apollo Extended repository](https://github.com/Taveszfito/Apollo-Extended).
+Download the host installer from the [Apollo Extended releases](https://github.com/Taveszfito/Apollo-Extended/releases) page. Standard Sunshine and Apollo hosts remain compatible, but native DualSense emulation and Extended controller selection require Apollo Extended.
 
 ---
 
