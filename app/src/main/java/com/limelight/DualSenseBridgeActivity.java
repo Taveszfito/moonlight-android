@@ -3,6 +3,8 @@ package com.limelight;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
+import android.content.res.ColorStateList;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -109,8 +111,8 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
                 }));
         root.addView(header, match(dp(8)));
 
-        TextView alpha = pill("ALPHA");
-        root.addView(alpha, wrapStart());
+        TextView beta = pill("BETA");
+        root.addView(beta, wrapStart());
 
         LinearLayout connection = card();
         LinearLayout stateRow = horizontal();
@@ -169,17 +171,19 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
         lowBatteryRow.setPadding(0, dp(12), 0, dp(2));
         connection.addView(lowBatteryRow);
 
-        Button scan = actionButton(getString(R.string.dualsense_bridge_scan), true,
-                v -> DualSenseBridge.scan(this));
+        Button scan = responsiveActionButton(getString(R.string.dualsense_bridge_scan), true,
+                () -> DualSenseBridge.scan(this));
         scan.setCompoundDrawablesWithIntrinsicBounds(android.R.drawable.ic_menu_search, 0, 0, 0);
         scan.setCompoundDrawablePadding(dp(9));
         connection.addView(scan, match(dp(14)));
 
         LinearLayout secondaryActions = horizontal();
-        secondaryActions.addView(actionButton(getString(R.string.dualsense_bridge_reset_adapter), false,
-                v -> DualSenseBridge.reset(this)), weightedWithMargin());
-        secondaryActions.addView(actionButton(getString(R.string.dualsense_bridge_disconnect), false,
-                v -> DualSenseBridge.disconnectBridge()), weightedWithMargin());
+        secondaryActions.addView(responsiveActionButton(
+                getString(R.string.dualsense_bridge_reset_adapter), false,
+                () -> DualSenseBridge.reset(this)), weightedWithMargin());
+        secondaryActions.addView(responsiveActionButton(
+                getString(R.string.dualsense_bridge_disconnect), false,
+                DualSenseBridge::disconnectBridge), weightedWithMargin());
         connection.addView(secondaryActions);
         root.addView(connection, match(dp(12)));
 
@@ -335,8 +339,9 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
             row.addView(deviceState);
             LinearLayout deviceActions = horizontal();
             deviceActions.setPadding(dp(42), dp(10), 0, 0);
-            deviceActions.addView(actionButton(getString(R.string.dualsense_bridge_connect), false,
-                    view -> DualSenseBridge.reconnect(device.getAddress(), device.getName())),
+            deviceActions.addView(responsiveActionButton(
+                    getString(R.string.dualsense_bridge_connect), false,
+                    () -> DualSenseBridge.reconnect(device.getAddress(), device.getName())),
                     weightedWithMargin());
             if (device.getPaired()) {
                 deviceActions.addView(actionButton(getString(R.string.dualsense_bridge_forget), false,
@@ -439,9 +444,29 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
         button.setTextColor(primary ? 0xFF06111D : Color.WHITE);
         button.setAllCaps(false);
         button.setMinHeight(dp(46));
-        button.setBackground(rounded(primary ? PRIMARY : 0xFF27313C,
-                primary ? PRIMARY : 0xFF465463, 13));
+        GradientDrawable content = rounded(primary ? PRIMARY : 0xFF27313C,
+                primary ? PRIMARY : 0xFF465463, 13);
+        GradientDrawable mask = rounded(Color.WHITE, Color.WHITE, 13);
+        button.setBackground(new RippleDrawable(
+                ColorStateList.valueOf(primary ? 0x5506111D : 0x66FFFFFF), content, mask));
         button.setOnClickListener(action);
+        return button;
+    }
+
+    private Button responsiveActionButton(String value, boolean primary, Runnable action) {
+        Button button = actionButton(value, primary, null);
+        button.setOnClickListener(view -> {
+            // Give immediate acknowledgement even when the USB/HCI operation
+            // takes several seconds before it can publish its next state.
+            button.setEnabled(false);
+            button.animate().scaleX(0.96f).scaleY(0.96f).alpha(0.65f)
+                    .setDuration(90L)
+                    .withEndAction(() -> button.animate().scaleX(1f).scaleY(1f)
+                            .alpha(1f).setDuration(140L).start())
+                    .start();
+            action.run();
+            mainHandler.postDelayed(() -> button.setEnabled(true), 700L);
+        });
         return button;
     }
 

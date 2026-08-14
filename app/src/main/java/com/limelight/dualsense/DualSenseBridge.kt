@@ -20,7 +20,9 @@ import com.example.usbbtonandroid.DualSenseOutputConfig
 import com.example.usbbtonandroid.TriggerMode
 import com.example.usbbtonandroid.hci.HciUsbController
 import com.limelight.R
+import com.limelight.LimeLog
 import java.util.concurrent.CopyOnWriteArraySet
+import java.util.concurrent.Executors
 
 /**
  * Process-wide owner of the external USB Bluetooth adapter and DualSense link.
@@ -50,6 +52,9 @@ object DualSenseBridge {
     private val logLines = ArrayDeque<String>()
     private val incidentHistoryLines = ArrayDeque<String>()
     private val outputLock = Any()
+    private val controlExecutor = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "DualSenseBridge-control").apply { isDaemon = true }
+    }
     private var outputConfig = DualSenseOutputConfig()
     @Volatile private var ledOverrideActive = false
     @Volatile private var batteryLedEnabled = true
@@ -69,12 +74,21 @@ object DualSenseBridge {
     // Preserve and rebuild the live Bluetooth link first. A complete adapter
     // restart is deliberately delayed as the final fallback.
     private const val ADAPTER_RECOVERY_DELAY_MS = 15_000L
+    private const val RECOVERY_DISCONNECT_GRACE_MS = 750L
     private val adapterRecovery = Runnable {
         if (!smartRecoveryInProgress || controllerConnected) return@Runnable
         val device = adapter ?: return@Runnable
         adapterRecoveryPerformed = true
         updateStatus(s(R.string.dualsense_bridge_status_adapter_recovery))
-        startController(device, true)
+        // Terminate the live radio link before resetting USB. Without this grace
+        // period the dongle restarts, but DualSense can remain powered in a
+        // ghost connection state because it never received HCI Disconnect.
+        activeControllerAddress?.let { controller?.disconnect(it) }
+        watchdogHandler.postDelayed({
+            if (smartRecoveryInProgress && !controllerConnected) {
+                startController(device, true)
+            }
+        }, RECOVERY_DISCONNECT_GRACE_MS)
     }
     private val connectionWatchdog = object : Runnable {
         override fun run() {
@@ -221,11 +235,25 @@ object DualSenseBridge {
     }
 
     @JvmStatic fun reset(activity: Activity?) {
-        closeController(s(R.string.dualsense_bridge_status_resetting))
-        scan(activity)
+        // Closing the USB workers can wait for an in-flight bulk transfer. Publish
+        // acknowledgement first and never make the UI thread wait for that join.
+        updateStatus(s(R.string.dualsense_bridge_status_resetting))
+        controlExecutor.execute {
+            closeController(null)
+            watchdogHandler.post { scan(activity) }
+        }
+    }
+    private val prepareAdapterForReconnect = Runnable {
+        val device = adapter ?: return@Runnable
+        if (controllerConnected) return@Runnable
+        appendLog("Controller disconnected; preparing clean adapter state for reconnect")
+        startController(device, true)
     }
 
-    @JvmStatic fun disconnectBridge() = closeController(s(R.string.dualsense_bridge_status_stopped))
+    @JvmStatic fun disconnectBridge() {
+        updateStatus(s(R.string.dualsense_bridge_status_stopped))
+        controlExecutor.execute { closeController(null) }
+    }
 
     @JvmStatic fun isBatteryLedEnabled(context: Context): Boolean = batteryLedEnabled
 
@@ -299,7 +327,7 @@ object DualSenseBridge {
             devicesByAddress.remove(normalized)
         }
         if (activeControllerAddress == normalized) activeControllerAddress = null
-        controller?.disconnect(normalized)
+        controller?.forget(normalized)
         keyPrefs().edit()
             .remove(normalized)
             .remove("name_$normalized")
@@ -442,8 +470,17 @@ object DualSenseBridge {
                     activeControllerAddress = item.address
                 }
                 else if (inactive && item.address == activeControllerAddress) {
-                    beginSmartRecovery()
                     markControllerDisconnected(item.state)
+                    // The dongle demonstrably reconnects reliably only after its
+                    // host/page/L2CAP state has been reinitialized. Do that while
+                    // the controller is off, before it can make the next incoming
+                    // connection attempt, rather than repairing a failed attempt.
+                    smartRecoveryInProgress = false
+                    adapterRecoveryPerformed = false
+                    watchdogHandler.removeCallbacks(adapterRecovery)
+                    watchdogHandler.removeCallbacks(prepareAdapterForReconnect)
+                    watchdogHandler.postDelayed(
+                        prepareAdapterForReconnect, RECONNECT_PREPARE_DELAY_MS)
                 }
                 notifyState()
             },
@@ -503,6 +540,7 @@ object DualSenseBridge {
     }
 
     private fun closeController(message: String?) {
+        watchdogHandler.removeCallbacks(prepareAdapterForReconnect)
         stopLowBatteryBlink(false)
         runCatching { controller?.close() }
         controller = null
@@ -628,6 +666,7 @@ object DualSenseBridge {
     }
 
     private fun appendLog(value: String) {
+        LimeLog.info("DualSenseBridge: $value")
         synchronized(logLines) {
             logLines.addLast(value)
             while (logLines.size > 160) logLines.removeFirst()
@@ -713,6 +752,7 @@ object DualSenseBridge {
 
     private const val DISCOVERED_DEVICE_EXPIRY_MS = 30_000L
     private const val FORGET_CALLBACK_GUARD_MS = 5_000L
+    private const val RECONNECT_PREPARE_DELAY_MS = 350L
 
     @Suppress("DEPRECATION")
     private fun Intent.usbDevice(): UsbDevice? = if (Build.VERSION.SDK_INT >= 33) {

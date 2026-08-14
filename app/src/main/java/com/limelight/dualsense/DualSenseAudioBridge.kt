@@ -25,6 +25,11 @@ object DualSenseAudioBridge {
     private const val SONY_VENDOR_ID = 0x054c
     private val DUALSENSE_PRODUCT_IDS = setOf(0x0ce6, 0x0df2)
     private const val USB_AUDIO_STREAMING_SUBCLASS = 0x02
+    // The DualSense output route is already configured at a high hardware level.
+    // PS5CTBro's proven clean default attenuates the speaker PCM to 0.3 before
+    // feeding that route. Treat the user-facing 100% as this calibrated maximum
+    // while leaving the native haptics channels completely untouched.
+    private const val CLEAN_SPEAKER_GAIN_PERCENT = 30
 
     private lateinit var appContext: Context
     private lateinit var usbManager: UsbManager
@@ -204,7 +209,6 @@ object DualSenseAudioBridge {
 
     private fun applySpeakerGain(pcm: ByteArray, frameCount: Int): ByteArray {
         val volume = controllerVolume
-        if (volume >= 100) return pcm
         return pcm.copyOf().also { output ->
             var offset = 0
             repeat(frameCount) {
@@ -218,7 +222,9 @@ object DualSenseAudioBridge {
     private fun writeScaledS16(data: ByteArray, offset: Int, volume: Int) {
         val sample = ((data[offset].toInt() and 0xff) or
             (data[offset + 1].toInt() shl 8)).toShort().toInt()
-        val scaled = (sample * volume + if (sample >= 0) 50 else -50) / 100
+        val divisor = 100 * 100
+        val numerator = sample * volume * CLEAN_SPEAKER_GAIN_PERCENT
+        val scaled = (numerator + if (sample >= 0) divisor / 2 else -divisor / 2) / divisor
         data[offset] = scaled.toByte()
         data[offset + 1] = (scaled shr 8).toByte()
     }

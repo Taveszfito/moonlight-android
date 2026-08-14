@@ -3997,7 +3997,7 @@ public class GameMenu implements Game.GameMenuCallbacks {
                 () -> showGyroAxisMappingMenu(device)));
         options.add(new MenuOption(MENU_DUALSENSE_BRIDGE,
                 DualSenseController.hasActiveController() ?
-                        "DualSense USB / HD audio • ALPHA" : "DualSense Bridge • ALPHA",
+                        "DualSense USB / HD audio • BETA" : "DualSense Bridge • BETA",
                 () -> showDualSenseBridgeMenu(device)));
         options.add(new MenuOption(MENU_ADVANCED, getString(R.string.game_menu_advanced), true,
                 () -> showAdvancedMenu(device)));
@@ -4071,8 +4071,8 @@ public class GameMenu implements Game.GameMenuCallbacks {
             }
         }
         options.add(new MenuOption(MENU_CANCEL, getString(R.string.game_menu_cancel), null));
-        showMenuDialog(wiredConnected ? "DualSense USB / HD audio • ALPHA" :
-                        "DualSense Bridge • ALPHA",
+        showMenuDialog(wiredConnected ? "DualSense USB / HD audio • BETA" :
+                        "DualSense Bridge • BETA",
                 options.toArray(new MenuOption[0]), () -> showMenu(device));
     }
 

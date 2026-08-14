@@ -174,8 +174,21 @@ public final class DualSenseController extends AbstractController {
         parseTouch(r, 0, 33); parseTouch(r, 1, 37);
 
         boolean jack = (r[54] & 0x01) != 0;
-        int capacity = (r[53] & 0x0f);
-        batteryPercent = Math.min(100, capacity * 100 / 8);
+        int battery = r[53] & 0xff;
+        int chargingState = (battery >>> 4) & 0x0f;
+        int capacity = battery & 0x0f;
+        // A fully charged DualSense may report status 0x2 with a zero capacity
+        // nibble (for example 0x20). Looking only at the lower nibble therefore
+        // incorrectly displayed 0% for a full wired controller.
+        if (chargingState == 0x2) {
+            batteryPercent = 100;
+        }
+        else if (chargingState == 0xA || chargingState == 0xB || chargingState == 0xF) {
+            batteryPercent = 0;
+        }
+        else {
+            batteryPercent = Math.min(100, capacity * 10);
+        }
         if (!audioRouteInitialized || jack != headphonesConnected) {
             audioRouteInitialized = true;
             headphonesConnected = jack;

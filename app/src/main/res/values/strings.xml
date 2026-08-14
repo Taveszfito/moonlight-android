@@ -14,7 +14,7 @@
     <string name="dualsense_audio_haptics_only">HD haptics only</string>
     <string name="dualsense_audio_off">Disabled</string>
     <string name="title_dualsense_controller_volume">Controller volume</string>
-    <string name="summary_dualsense_controller_volume">Controls DualSense speaker and headset volume for wired USB and Bluetooth Bridge modes. 100% is the original native stream level; no controller volume commands are sent.</string>
+    <string name="summary_dualsense_controller_volume">Controls DualSense speaker and headset volume for wired USB and Bluetooth Bridge modes. 100% is the calibrated clean maximum; native haptic channels are unaffected.</string>
     <!-- Shortcut strings -->
     <string name="scut_deleted_pc">PC deleted</string>
     <string name="scut_not_paired">PC not paired</string>
@@ -904,8 +904,8 @@
     <string name="title_checkbox_full_screen">Enable Full Screen</string>
     <string name="summary_checkbox_full_screen">Hide system bars with immersive mode</string>
     <string name="dualsense_bridge_title">DualSense USB Bluetooth Bridge</string>
-    <string name="dualsense_bridge_button">DualSense Bridge • ALPHA</string>
-    <string name="dualsense_bridge_alpha">ALPHA — experimental connection path</string>
+    <string name="dualsense_bridge_button">DualSense Bridge • BETA</string>
+    <string name="dualsense_bridge_alpha">BETA — stable connection path under active development</string>
     <string name="dualsense_bridge_scan">Find / rescan adapter</string>
     <string name="dualsense_bridge_reset">Reset connection</string>
     <string name="dualsense_bridge_stop">Stop bridge</string>

@@ -46,6 +46,7 @@ class HciUsbController(
     @Volatile private var outputConnectionEpoch = 0L
     private val discoveredDevices = linkedMapOf<String, InquiryDevice>()
     @Volatile private var pendingConnection: InquiryDevice? = null
+    @Volatile private var authorizedPairingAddress: String? = null
     @Volatile private var pendingDiscovery = false
     @Volatile private var pendingLinkRecovery = false
     @Volatile private var activeDevice: InquiryDevice? = null
@@ -61,6 +62,7 @@ class HciUsbController(
     @Volatile private var hidInterruptReopenAtMs = 0L
     private var hidOpenRetries = 0
     private var hidInterruptOpenRetries = 0
+    private var hidRecoveryCycles = 0
     private var nextSignalId = 0x40
     private var nextLocalCid = 0x0040
     @Volatile private var hidInterruptRemoteCid: Int? = null
@@ -152,6 +154,7 @@ class HciUsbController(
     }
 
     fun connect(address: String, name: String = text(R.string.dualsense_bridge_paired_device)) {
+        val normalizedAddress = address.uppercase()
         val current = activeDevice
         val handle = activeHandle
         if (handle != null && current?.address == address) {
@@ -161,13 +164,18 @@ class HciUsbController(
                 onStatus(text(R.string.dualsense_bridge_status_restoring_hid))
                 requestHidChannels(handle)
             } else {
-                onStatus(text(R.string.dualsense_bridge_status_connection_in_progress))
+                // A saved controller can reconnect at ACL level while leaving an
+                // old L2CAP negotiation behind. Treat an explicit Connect tap as
+                // a request to repair that half-open HID session immediately.
+                onStatus(text(R.string.dualsense_bridge_status_restoring_hid))
+                rebuildHidChannels(handle)
             }
             return
         }
-        pendingConnection = discoveredDevices[address] ?: InquiryDevice(
-            address = address,
-            addressLittleEndian = addressToLittleEndian(address),
+        if (loadLinkKey(normalizedAddress) == null) authorizedPairingAddress = normalizedAddress
+        pendingConnection = discoveredDevices[normalizedAddress] ?: InquiryDevice(
+            address = normalizedAddress,
+            addressLittleEndian = addressToLittleEndian(normalizedAddress),
             pageScanRepetitionMode = 0x01,
             clockOffsetLow = 0,
             clockOffsetHigh = 0,
@@ -182,6 +190,14 @@ class HciUsbController(
 
     fun disconnect(address: String) {
         pendingDisconnectAddress = address.uppercase()
+    }
+
+    fun forget(address: String) {
+        val normalized = address.uppercase()
+        discoveredDevices.remove(normalized)
+        if (authorizedPairingAddress == normalized) authorizedPairingAddress = null
+        if (pendingConnection?.address?.uppercase() == normalized) pendingConnection = null
+        disconnect(normalized)
     }
 
     fun requestLinkRecovery() {
@@ -341,6 +357,13 @@ class HciUsbController(
                 now - encryptedAtMs >= HID_START_TIMEOUT_MS
             ) {
                 onStatus(text(R.string.dualsense_bridge_status_no_hid_stream))
+                if (hidRecoveryCycles < HID_INITIAL_RECOVERY_CYCLES &&
+                    now - hidOpenAttemptAtMs >= HID_RETRY_INTERVAL_MS
+                ) {
+                    hidRecoveryCycles++
+                    onLog("Initial HID recovery cycle $hidRecoveryCycles/$HID_INITIAL_RECOVERY_CYCLES")
+                    rebuildHidChannels(active)
+                }
             }
             val event = readEvent(500) ?: continue
             when (event.code) {
@@ -355,7 +378,15 @@ class HciUsbController(
                         null, text(R.string.dualsense_bridge_paired_name)
                     )
                     onLog("Incoming Connection Request ← $address")
-                    connectAndPair(known, incomingAddress = addressBytes)
+                    val paired = loadLinkKey(address) != null
+                    val explicitlyAuthorized = authorizedPairingAddress == address
+                    if (paired || explicitlyAuthorized) {
+                        connectAndPair(known, incomingAddress = addressBytes)
+                    } else {
+                        onLog("Incoming connection rejected: $address (not paired/authorized)")
+                        // HCI Reject Connection Request: unacceptable address.
+                        sendCommand(0x040A, addressBytes + byteArrayOf(0x0F))
+                    }
                 }
                 0x05 -> handleDisconnection(event.parameters)
                 0x14 -> handleModeChange(event.parameters)
@@ -425,6 +456,7 @@ class HciUsbController(
         hidInterruptReopenAtMs = 0L
         hidOpenRetries = 0
         hidInterruptOpenRetries = 0
+        hidRecoveryCycles = 0
         postConnectTuningStage = 0
         postConnectTuningAtMs = 0L
         lastExitLowPowerModeAtMs = 0L
@@ -1012,6 +1044,7 @@ class HciUsbController(
                             hidInterruptOpenRetries = 0
                             onStatus(text(R.string.dualsense_bridge_status_encrypted))
                             publishDevice(device, "Titkosítva • HID-re vár", paired = true)
+                            authorizedPairingAddress = null
                             return
                         }
                     }
@@ -1193,7 +1226,7 @@ class HciUsbController(
                     val psm = data.le16(0)
                     val remoteCid = data.le16(2)
                     val localCid = nextLocalCid++
-                    val channel = L2capChannel(psm, localCid, remoteCid)
+                    val channel = L2capChannel(psm, localCid, remoteCid, remoteInitiated = true)
                     channelsByLocalCid[localCid] = channel
                     if (psm == 0x0011 || psm == 0x0013) {
                         // The DualSense normally initiates its HID channels on a
@@ -1263,6 +1296,10 @@ class HciUsbController(
                         destinationCid.toByte(), (destinationCid ushr 8).toByte(),
                         0x00, 0x00, 0x00, 0x00
                     ))
+                    channelsByLocalCid[destinationCid]?.let { channel ->
+                        channel.localConfigured = true
+                        finishHidChannelIfReady(handle, channel)
+                    }
                 }
                 0x05 -> if (data.size >= 6) {
                     val localCid = data.le16(0)
@@ -1274,12 +1311,22 @@ class HciUsbController(
                     )
                     if (result == 0 && channel != null) {
                         pendingConfigs.remove(id)
+                        channel.remoteConfigured = true
+                        finishHidChannelIfReady(handle, channel)
+                        /*
                         if (channel.psm == 0x0011) {
                             hidControlReady = true
                             hidOpenAttemptAtMs = System.currentTimeMillis()
                             onStatus(text(R.string.dualsense_bridge_status_hid_control_ready))
+                            // On a controller-initiated reconnect, DualSense owns
+                            // the HID channel sequence. Opening Interrupt from our
+                            // side here races its own request and commonly leaves
+                            // a valid ACL link with no input stream. Give it the
+                            // normal remote-initiated path; the host-loop timeout
+                            // remains the fallback if Interrupt never arrives.
                             if (pendingChannels.values.none { it.psm == 0x0013 } &&
-                                channelsByLocalCid.values.none { it.psm == 0x0013 }
+                                channelsByLocalCid.values.none { it.psm == 0x0013 } &&
+                                !channel.remoteInitiated
                             ) requestL2capChannel(handle, 0x0013)
                         } else if (channel.psm == 0x0013) {
                             hidInterruptRemoteCid = channel.remoteCid
@@ -1294,6 +1341,7 @@ class HciUsbController(
                                     onLog("HIDP Set Protocol → Report mode")
                                 }
                         }
+                        */
                     } else if (result == 0x0004) {
                         // Pending configuration; keep the request until the final response.
                         hidOpenAttemptAtMs = System.currentTimeMillis()
@@ -1321,6 +1369,31 @@ class HciUsbController(
                 else -> onLog("L2CAP signaling code=0x${code.hex2()} id=$id len=$length")
             }
             offset += 4 + length
+        }
+    }
+
+    private fun finishHidChannelIfReady(handle: Int, channel: L2capChannel) {
+        if (!channel.localConfigured || !channel.remoteConfigured || channel.readyPublished) return
+        channel.readyPublished = true
+        if (channel.psm == 0x0011) {
+            hidControlReady = true
+            hidOpenAttemptAtMs = System.currentTimeMillis()
+            onStatus(text(R.string.dualsense_bridge_status_hid_control_ready))
+            if (pendingChannels.values.none { it.psm == 0x0013 } &&
+                channelsByLocalCid.values.none { it.psm == 0x0013 }
+            ) requestL2capChannel(handle, 0x0013)
+        } else if (channel.psm == 0x0013) {
+            hidInterruptRemoteCid = channel.remoteCid
+            hidChannelsReady = true
+            hidInterruptOpenRetries = 0
+            outputConnectionEpoch++
+            hidReadyAtMs = System.currentTimeMillis()
+            onStatus(text(R.string.dualsense_bridge_status_hid_waiting))
+            channelsByLocalCid.values.firstOrNull { it.psm == 0x0011 && it.readyPublished }
+                ?.remoteCid?.let { controlCid ->
+                    sendAcl(handle, controlCid, byteArrayOf(0x71))
+                    onLog("HIDP Set Protocol -> Report mode (fully configured)")
+                }
         }
     }
 
@@ -1363,6 +1436,9 @@ class HciUsbController(
         // the old channel teardown, then negotiate a clean control/interrupt pair.
         hidOpenAttempted = true
         hidOpenAttemptAtMs = System.currentTimeMillis()
+        // Start a fresh startup window. Without this, the original encryption
+        // timestamp makes the recovery loop immediately time out again.
+        encryptedAtMs = hidOpenAttemptAtMs
         hidChannelReopenAtMs = hidOpenAttemptAtMs + HID_CHANNEL_REOPEN_DELAY_MS
         hidInterruptReopenAtMs = 0L
         onStatus(text(R.string.dualsense_bridge_status_recovery_waiting))
@@ -1377,7 +1453,7 @@ class HciUsbController(
         hidOpenAttemptAtMs = System.currentTimeMillis()
         val localCid = nextLocalCid++
         val id = nextSignalId++ and 0xFF
-        pendingChannels[id] = L2capChannel(psm, localCid, null)
+        pendingChannels[id] = L2capChannel(psm, localCid, null, remoteInitiated = false)
         onLog("L2CAP Connection Request → PSM=0x${psm.hex4()} SCID=0x${localCid.hex4()}")
         sendAcl(handle, 0x0001, byteArrayOf(
             0x02, id.toByte(), 0x04, 0x00,
@@ -1556,7 +1632,11 @@ class HciUsbController(
     private data class L2capChannel(
         val psm: Int,
         val localCid: Int,
-        var remoteCid: Int?
+        var remoteCid: Int?,
+        val remoteInitiated: Boolean,
+        var localConfigured: Boolean = false,
+        var remoteConfigured: Boolean = false,
+        var readyPublished: Boolean = false
     )
     private data class InquiryDevice(
         val address: String,
@@ -1625,6 +1705,7 @@ class HciUsbController(
         private const val HID_RETRY_INTERVAL_MS = 3_000L
         private const val HID_INTERRUPT_STAGE_TIMEOUT_MS = 3_000L
         private const val HID_MAX_RETRIES = 3
+        private const val HID_INITIAL_RECOVERY_CYCLES = 2
         private const val MAX_ACL_PAYLOAD = 4096
         private const val MAX_USB_CARRY_BYTES = 8192
         private const val ACL_LOG_INTERVAL_MS = 1_000L

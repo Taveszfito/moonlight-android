@@ -1,5 +1,7 @@
 package com.example.usbbtonandroid
 
+import com.limelight.LimeLog
+
 data class DualSenseInput(
     val reportMode: String,
     val leftX: Int,
@@ -24,6 +26,8 @@ data class DualSenseInput(
 data class DualSenseTouchPoint(val id: Int, val x: Int, val y: Int)
 
 object DualSenseInputParser {
+    private var lastBatteryRaw = -1
+
     fun parse(payload: ByteArray): DualSenseInput? {
         if (payload.size < 11 || payload[0].u8() != 0xA1) return null
         return when (payload[1].u8()) {
@@ -87,12 +91,20 @@ object DualSenseInputParser {
     private fun batteryPercent(p: ByteArray, base: Int): Int {
         if (p.size <= base + 52) return -1
         val raw = p[base + 52].u8()
+        if (raw != lastBatteryRaw) {
+            lastBatteryRaw = raw
+            LimeLog.info(
+                "DualSense Bridge battery raw=0x${raw.toString(16).padStart(2, '0')} " +
+                    "capacity=${raw and 0x0F} state=${(raw ushr 4) and 0x0F}"
+            )
+        }
         val charging = (raw ushr 4) and 0x0F
         if (charging == 0x2) return 100
-        if (charging == 0xA || charging == 0xB || charging == 0xF) return 0
-        // DualSense exposes a coarse 0-10 capacity level, not an exact percentage.
-        // Report its real 10% steps instead of presenting artificial 5% midpoints.
-        return ((raw and 0x0F) * 10).coerceAtMost(100)
+        // 0xA/0xB describe an abnormal/not-charging power state. They do not
+        // invalidate the capacity nibble, so forcing them to 0% made Bridge
+        // controllers appear permanently empty. DualSense reports a 0-10
+        // bucket; use the midpoint of each bucket, matching the HID driver.
+        return ((raw and 0x0F) * 10 + 5).coerceAtMost(100)
     }
 
     private fun batteryStatus(p: ByteArray, base: Int): String {
