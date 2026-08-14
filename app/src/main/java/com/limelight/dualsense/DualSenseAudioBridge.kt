@@ -25,11 +25,10 @@ object DualSenseAudioBridge {
     private const val SONY_VENDOR_ID = 0x054c
     private val DUALSENSE_PRODUCT_IDS = setOf(0x0ce6, 0x0df2)
     private const val USB_AUDIO_STREAMING_SUBCLASS = 0x02
-    // The DualSense output route is already configured at a high hardware level.
-    // PS5CTBro's proven clean default attenuates the speaker PCM to 0.3 before
-    // feeding that route. Treat the user-facing 100% as this calibrated maximum
-    // while leaving the native haptics channels completely untouched.
-    private const val CLEAN_SPEAKER_GAIN_PERCENT = 30
+    // The DualSense hardware route is already configured for maximum clean
+    // speaker output. Keep the PCM at unity when the UI volume is 100%; lower
+    // settings are implemented purely as client-side PCM attenuation.
+    private const val CLEAN_SPEAKER_GAIN_PERCENT = 100
 
     private lateinit var appContext: Context
     private lateinit var usbManager: UsbManager
@@ -469,7 +468,11 @@ object DualSenseAudioBridge {
         }
 
         private fun quantize(sample: Double): Byte =
-            (sample * 127.0 / 32768.0).roundToInt().coerceIn(-128, 127).toByte()
+            // Native Bluetooth haptics use twice the USB PCM normalization.
+            // This preserves the waveform and matches the reference transport;
+            // it does not synthesize compatible/legacy rumble.
+            (sample * 127.0 * BT_HAPTICS_TRANSPORT_GAIN / 32768.0)
+                .roundToInt().coerceIn(-128, 127).toByte()
 
         private fun readS16(data: ByteArray, offset: Int): Int =
             ((data[offset].toInt() and 0xff) or
@@ -480,6 +483,7 @@ object DualSenseAudioBridge {
             private const val CUTOFF_HZ = 1_400.0
             private const val DECIMATION = 16
             private const val FIR_TAPS = 127
+            private const val BT_HAPTICS_TRANSPORT_GAIN = 2.0
             private const val BT_REPORT_HAPTICS_BYTES = 64
             // One Bluetooth report spans 512 source frames (10.667 ms). The
             // encoder converts these to one 480-frame Opus packet so playback

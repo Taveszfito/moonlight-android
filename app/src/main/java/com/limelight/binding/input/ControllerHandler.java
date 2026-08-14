@@ -4444,6 +4444,37 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             ((UsbDeviceContext) context).maybeRenegotiateWiredDualSense();
         }
 
+        // Raw USB controllers bypass Android's normal dialog key dispatch.
+        // While the Quick Menu is open, route their complete state to the menu
+        // and explicitly neutralize the host once. No button, trigger, stick,
+        // or release event may leak into the stream until the menu closes.
+        if (!prefConfig.controllerKbmMode) {
+            buttonFlags = filterUsbShareGuideQuickMenu(context, buttonFlags);
+            if (gestures.isControllerMenuOpen()) {
+                float menuStickX = leftStickX;
+                float menuStickY = -leftStickY;
+                long now = android.os.SystemClock.uptimeMillis();
+                if (buttonFlags != context.bridgeLastMenuButtonFlags ||
+                        now - context.bridgeLastMenuDispatchTime >= 50) {
+                    gestures.handleControllerMenuInput(buttonFlags, menuStickX, menuStickY);
+                    context.bridgeLastMenuButtonFlags = buttonFlags;
+                    context.bridgeLastMenuDispatchTime = now;
+                }
+                if (!context.menuInputCaptured) {
+                    context.inputMap = 0;
+                    context.leftTrigger = 0;
+                    context.rightTrigger = 0;
+                    context.leftStickX = 0;
+                    context.leftStickY = 0;
+                    setBaseRightStick(context, (short) 0, (short) 0);
+                    sendControllerInputPacket(context);
+                    context.menuInputCaptured = true;
+                }
+                return;
+            }
+            context.menuInputCaptured = false;
+        }
+
         if (prefConfig.controllerKbmMode) {
             ensureControllerKbmGyro(context);
             ensureControllerKbmPolling(context);
@@ -4464,8 +4495,6 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             context.kbmRightTriggerPressed = rightPressed;
             return;
         }
-
-        buttonFlags = filterUsbShareGuideQuickMenu(context, buttonFlags);
 
         Vector2d leftStickVector = populateCachedVector(leftStickX, leftStickY);
 
