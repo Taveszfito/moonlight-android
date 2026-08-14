@@ -8,7 +8,7 @@ This fork is based on [Artemis Android](https://github.com/ClassicOldSong/moonli
 
 Connect a DualSense through a dedicated USB Bluetooth adapter, bypassing Android's standard Bluetooth limitations and unlocking full DualSense functionality wirelessly, like **HD haptics, the built-in speaker, and adaptive triggers**.
 
-> **⚠️ Alpha:** The Bridge is currently an Alpha feature and compatibility with all Bluetooth adapters is not guaranteed.
+> **⚠️ Beta:** The Bridge is currently a Beta feature and compatibility with all Bluetooth adapters is not guaranteed.
 
 ## 🎯 Gyro Aim
 
