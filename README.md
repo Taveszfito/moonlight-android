@@ -49,4 +49,5 @@ Download the host installer from the [Apollo Extended releases](https://github.c
 ### Credits
 
 Based on [Artemis Android](https://github.com/ClassicOldSong/moonlight-android).
-(BTW, Windows client will come in the future, and its development is currently in progress.) 
+(BTW, Windows client will come in the future, and its development is currently in progress.
+Update: The first Windows build has arrived!) 
