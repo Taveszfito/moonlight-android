@@ -48,7 +48,7 @@ Download the host installer from the [Apollo Extended releases](https://github.c
 
 ## Upcoming updates for Dualsense controller: (USB and BT mode)
 
-- when jack is connected, windows volume is directed to controller (done in commit, missing from the current release)
+- when jack is connected, windows volume is directed to controller
 - controller or client microphone forwarding to host
 - mute button actually works
 
