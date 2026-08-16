@@ -10,6 +10,27 @@ Connect a DualSense through a dedicated USB Bluetooth adapter, bypassing Android
 
 > **⚠️ Beta:** The Bridge is currently a Beta feature and compatibility with all Bluetooth adapters is not guaranteed.
 
+### DualSense features
+
+- Native DualSense, DualShock 4, or Xbox 360 host emulation through Apollo Extended
+- Adaptive triggers, HD haptics, conventional rumble, lightbar, player LEDs, touchpad and gyro
+- Built-in controller-speaker audio over USB and Bluetooth HCI Bridge
+- Automatic headset-jack detection and stream-audio routing to a headset connected to the controller
+- Automatic return to the built-in speaker after the headset is unplugged
+- Controller microphone support over both USB and Bluetooth HCI Bridge
+- The DualSense mute button acts as a global client microphone mute control, with in-stream status feedback
+
+## 🎙️ Microphone Forwarding
+
+Forward microphone audio from the Android client to the host as a Steam Streaming Microphone device.
+
+- Choose the **DualSense microphone** or the **Android device microphone** as the source
+- Enable or disable forwarding from Settings or the Controller-Friendly Quick Menu
+- When a headset is connected to the DualSense, its microphone is used by the controller automatically
+- The DualSense mute button mutes forwarding regardless of the selected microphone source
+
+Microphone forwarding requires **Apollo Extended** on the host. DualSense microphone capture requires either a wired USB controller or the DualSense USB Bluetooth HCI Bridge.
+
 ## 🎯 Gyro Aim
 
 Use controller gyro for aiming by blending it into **right-stick input**, or convert it directly into **mouse input** in KBM Mode. Gyro behavior and controls are fully customizable.
@@ -43,14 +64,6 @@ Windows volume control requires a corresponding [PowerToys Keyboard Manager](htt
 Together with the DualSense HCI Bridge, it enables native end-to-end DualSense streaming while preserving **HD haptics, adaptive triggers, controller-speaker audio, lighting, touchpad and motion input wirelessly**.
 
 Download the host installer from the [Apollo Extended releases](https://github.com/Taveszfito/Apollo-Extended/releases) page. Standard Sunshine and Apollo hosts remain compatible, but native DualSense emulation and Extended controller selection require Apollo Extended.
-
----
-
-## Upcoming updates for Dualsense controller: (USB and BT mode)
-
-- when jack is connected, windows volume is directed to controller
-- controller or client microphone forwarding to host
-- mute button actually works
 
 ---
 
