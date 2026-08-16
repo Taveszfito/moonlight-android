@@ -24,6 +24,7 @@ class HciUsbController(
     private val onStatus: (String) -> Unit,
     private val onDevice: (HciDevice) -> Unit,
     private val onAclPacket: (AclPacket) -> Unit,
+    private val onDualSenseMicrophoneFrame: (ByteArray) -> Unit,
     private val loadLinkKey: (String) -> String?,
     private val saveLinkKey: (String, String) -> Unit
 ) : Closeable {
@@ -71,6 +72,8 @@ class HciUsbController(
     private var nativeAudioReportsSent = 0L
     private var nativeAudioReportsSkippedForInput = 0L
     @Volatile private var nativeBluetoothHapticsRequested = false
+    @Volatile private var nativeBluetoothMicrophoneRequested = false
+    @Volatile private var nativeBluetoothHeadsetRoute = false
     private var nativeAudioWakeEpoch = -1L
     @Volatile private var lastOutputErrorLogMs = 0L
     private var droppedInputPackets = 0L
@@ -226,15 +229,20 @@ class HciUsbController(
     }
 
     /** Queues one native Bluetooth audio/haptics report worth of 3 kHz stereo PCM. */
-    fun sendNativeBluetoothHaptics(haptics: ByteArray, speakerOpus: ByteArray?): Boolean {
+    fun sendNativeBluetoothHaptics(haptics: ByteArray, speakerOpus: ByteArray?,
+                                   speakerOnly: Boolean = false): Boolean {
         if (haptics.size != com.example.usbbtonandroid.DualSenseBtAudioBuilder.HAPTICS_BYTES_PER_REPORT ||
             (speakerOpus != null && speakerOpus.size != 200) ||
             activeHandle == null || hidInterruptRemoteCid == null || lastHidInputMs == 0L) {
             return false
         }
         nativeBluetoothHapticsRequested = true
-        val payload = NativeAudioPayload(haptics.copyOf(), speakerOpus?.copyOf())
+        val payload = NativeAudioPayload(haptics.copyOf(), speakerOpus?.copyOf(),
+            speakerOnly = speakerOnly)
         if (audioQueue.offer(payload)) return true
+        // Controller speaker/headset audio is continuous and can always use the
+        // next interval. Never evict a native host haptics block for it.
+        if (speakerOnly) return false
         // Real-time audio must remain current. Drop the oldest queued waveform,
         // never block the Moonlight receive thread and never collapse it to rumble.
         audioQueue.poll()
@@ -246,6 +254,42 @@ class HciUsbController(
         nativeAudioWakeEpoch = -1L
         audioQueue.clear()
         outputSignal.offer(Unit)
+    }
+
+    fun setNativeBluetoothMicrophoneCapture(enabled: Boolean): Boolean {
+        nativeBluetoothMicrophoneRequested = enabled
+        // Keep the main 0x31 state report in the same audio-enabled shape as
+        // the duplex setup. This prevents an unrelated LED/battery update from
+        // clearing audio-control fields between microphone frames.
+        outputSignal.offer(Unit)
+        return queueNativeBluetoothSetup()
+    }
+
+    fun setNativeBluetoothHeadsetRoute(enabled: Boolean): Boolean {
+        nativeBluetoothHeadsetRoute = enabled
+        // The physical audio route is encoded in the normal 0x31 output
+        // report. Re-send the current complete controller state immediately;
+        // this preserves LEDs, rumble, and trigger effects while changing only
+        // the route fields.
+        outputSignal.offer(Unit)
+        // Re-assert the same audio/mic state for both jack transitions. This
+        // restores the full speaker route after unplugging and wakes a headset
+        // microphone after plugging in, without using a broad LED snapshot.
+        return if (nativeBluetoothMicrophoneRequested) {
+            queueNativeBluetoothSetup()
+        } else {
+            activeHandle != null && hidInterruptRemoteCid != null && lastHidInputMs != 0L
+        }
+    }
+
+    private fun queueNativeBluetoothSetup(): Boolean {
+        if (activeHandle == null || hidInterruptRemoteCid == null || lastHidInputMs == 0L) {
+            return false
+        }
+        val setup = NativeAudioPayload(ByteArray(64), null, configurationOnly = true)
+        if (audioQueue.offer(setup)) return true
+        audioQueue.poll()
+        return audioQueue.offer(setup)
     }
 
     private fun enableIncomingConnections() {
@@ -532,6 +576,8 @@ class HciUsbController(
         var lastSentConfig: com.example.usbbtonandroid.DualSenseOutputConfig? = null
         var lastSentEpoch = -1L
         var lastSentNativeHaptics = false
+        var lastSentHeadsetRoute = false
+        var lastSentAudioEngineActive = false
         while (running.get()) {
             try {
                 outputSignal.take()
@@ -542,12 +588,16 @@ class HciUsbController(
                 val config = latestOutputConfig ?: continue
                 val epoch = outputConnectionEpoch
                 val nativeHaptics = nativeBluetoothHapticsRequested
+                val audioEngineActive = nativeHaptics || nativeBluetoothMicrophoneRequested
+                val headsetRoute = nativeBluetoothHeadsetRoute
                 if (config == lastSentConfig && epoch == lastSentEpoch &&
-                    nativeHaptics == lastSentNativeHaptics) continue
+                    nativeHaptics == lastSentNativeHaptics &&
+                    headsetRoute == lastSentHeadsetRoute &&
+                    audioEngineActive == lastSentAudioEngineActive) continue
                 val handle = activeHandle ?: continue
                 val cid = hidInterruptRemoteCid ?: continue
                 val report = com.example.usbbtonandroid.DualSenseBtOutputBuilder.build(
-                    config, nextOutputSequence(), nativeHaptics
+                    config, nextOutputSequence(), audioEngineActive, headsetRoute
                 )
                 val startedAt = System.currentTimeMillis()
                 val sent = runCatching {
@@ -567,6 +617,8 @@ class HciUsbController(
                     lastSentConfig = config
                     lastSentEpoch = epoch
                     lastSentNativeHaptics = nativeHaptics
+                    lastSentHeadsetRoute = headsetRoute
+                    lastSentAudioEngineActive = audioEngineActive
                 }
                 val duration = System.currentTimeMillis() - startedAt
                 if (duration >= OUTPUT_STALL_LOG_MS) {
@@ -592,7 +644,19 @@ class HciUsbController(
                 // recent waveform when we are behind and transmit on the controller's
                 // native 64-sample/3 kHz report clock.
                 while (audioQueue.size > 1) {
-                    audio = audioQueue.poll() ?: audio
+                    val newer = audioQueue.poll() ?: break
+                    // A duplex setup is a state transition, not real-time
+                    // audio. It must reach the controller even when fresh
+                    // feedback blocks are arriving continuously.
+                    if (audio.configurationOnly && !newer.configurationOnly) {
+                        continue
+                    }
+                    // A normal game-audio/headset packet carries deliberately
+                    // silent haptics. Do not let it replace a real Apollo
+                    // haptics waveform merely because it arrived later.
+                    if (newer.configurationOnly || !newer.speakerOnly || audio.speakerOnly) {
+                        audio = newer
+                    }
                 }
                 val nowNs = System.nanoTime()
                 if (nextSendAtNs == 0L || nowNs - nextSendAtNs > AUDIO_CLOCK_RESET_NS) {
@@ -620,18 +684,35 @@ class HciUsbController(
                 }
                 val epoch = outputConnectionEpoch
                 if (nativeAudioWakeEpoch != epoch) {
-                    val wake = com.example.usbbtonandroid.DualSenseBtAudioBuilder.buildWake(
-                        nextOutputSequence()
-                    )
+                    // Use the same narrow audio-only configuration for initial
+                    // activation as for mic and headset transitions. The old
+                    // broad 0x32 wake snapshot carried independent LED and
+                    // low-volume audio values which could overwrite live host
+                    // feedback after a jack transition.
+                    val wake = com.example.usbbtonandroid.DualSenseBtAudioBuilder.buildDuplexSetup(
+                        nextOutputSequence(), nativeBluetoothMicrophoneRequested,
+                        nativeBluetoothHeadsetRoute)
                     sendAcl(handle, cid, byteArrayOf(0xa2.toByte()) + wake,
                         AUDIO_WRITE_TIMEOUT_MS, false)
+                    sendAmplifiedBluetoothSpeakerSetup(handle, cid)
                     nativeAudioWakeEpoch = epoch
                     outputSignal.offer(Unit)
                     onLog("DualSense native Bluetooth audio/haptics path enabled")
                 }
+                if (audio.configurationOnly) {
+                    val setup = com.example.usbbtonandroid.DualSenseBtAudioBuilder.buildDuplexSetup(
+                        nextOutputSequence(), nativeBluetoothMicrophoneRequested,
+                        nativeBluetoothHeadsetRoute)
+                    sendAcl(handle, cid, byteArrayOf(0xa2.toByte()) + setup,
+                        AUDIO_WRITE_TIMEOUT_MS, false)
+                    sendAmplifiedBluetoothSpeakerSetup(handle, cid)
+                    onLog("DualSense BT audio setup: mic=${nativeBluetoothMicrophoneRequested}")
+                    continue
+                }
                 audioPacketCounter = (audioPacketCounter + 1) and 0xff
                 val report = com.example.usbbtonandroid.DualSenseBtAudioBuilder.build(
-                    audio.haptics, nextOutputSequence(), audioPacketCounter, audio.speakerOpus
+                    audio.haptics, nextOutputSequence(), audioPacketCounter, audio.speakerOpus,
+                    nativeBluetoothHeadsetRoute, nativeBluetoothMicrophoneRequested
                 )
                 runCatching {
                     sendAcl(handle, cid, byteArrayOf(0xa2.toByte()) + report,
@@ -653,6 +734,15 @@ class HciUsbController(
                 break
             }
         }
+    }
+
+    /** Re-assert the dedicated amplified speaker profile without touching host-owned feedback. */
+    private fun sendAmplifiedBluetoothSpeakerSetup(handle: Int, cid: Int) {
+        if (nativeBluetoothHeadsetRoute) return
+        val speakerSetup = com.example.usbbtonandroid.DualSenseBtOutputBuilder
+            .buildAmplifiedSpeakerSetup(nextOutputSequence(), nativeBluetoothMicrophoneRequested)
+        sendAcl(handle, cid, byteArrayOf(0xa2.toByte()) + speakerSetup,
+            AUDIO_WRITE_TIMEOUT_MS, false)
     }
 
     @Synchronized private fun nextOutputSequence(): Int = outputSequence++
@@ -762,6 +852,18 @@ class HciUsbController(
                 }
                 val isHidInput = cid != null && cid != 0x0001 &&
                     payload.firstOrNull()?.u8() == 0xA1
+                // Bluetooth Duplex audio is sent by the DualSense on the same
+                // 0x31 input-report path as gamepad state. Its Opus TOC is D4
+                // at report offset 3 (payload offset 4 including the A1 HID
+                // input prefix). Never enqueue it as a controller report: it
+                // otherwise becomes phantom stick/button input at mic rate.
+                val isDualSenseMicrophoneFrame = isHidInput && payload.size > 8 &&
+                    payload[1].u8() == 0x31 && payload[4].u8() == 0xD4
+                if (isDualSenseMicrophoneFrame) {
+                    // Strip A1 and the trailing Bluetooth report CRC. The Opus
+                    // packet intentionally retains its D4 TOC byte.
+                    onDualSenseMicrophoneFrame(payload.copyOfRange(4, payload.size - 4))
+                }
                 if (isHidInput) {
                     val previousHidInputMs = lastHidInputMs
                     lastHidInputMs = now
@@ -797,7 +899,7 @@ class HciUsbController(
                             text(R.string.dualsense_bridge_state_connected_hid), paired = true) }
                     }
                 }
-                if (isHidInput) enqueueInput(packet)
+                if (isHidInput && !isDualSenseMicrophoneFrame) enqueueInput(packet)
                 offset = packetEnd
             }
             if (offset > 0) {
@@ -1599,6 +1701,8 @@ class HciUsbController(
         outputSignal.clear()
         audioQueue.clear()
         nativeBluetoothHapticsRequested = false
+        nativeBluetoothMicrophoneRequested = false
+        nativeBluetoothHeadsetRoute = false
         nativeAudioWakeEpoch = -1L
         latestOutputConfig = null
     }
@@ -1627,7 +1731,9 @@ class HciUsbController(
     private data class HciEvent(val code: Int, val parameters: ByteArray)
     private data class NativeAudioPayload(
         val haptics: ByteArray,
-        val speakerOpus: ByteArray?
+        val speakerOpus: ByteArray?,
+        val configurationOnly: Boolean = false,
+        val speakerOnly: Boolean = false
     )
     private data class L2capChannel(
         val psm: Int,

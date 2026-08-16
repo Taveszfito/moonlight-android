@@ -945,8 +945,10 @@ public class GameMenu implements Game.GameMenuCallbacks {
     }
 
     private int getDualSenseVolumeTitleRes() {
-        return DualSenseController.hasActiveController() &&
-                DualSenseController.getActiveHeadphonesConnected() ?
+        return (DualSenseController.hasActiveController() &&
+                DualSenseController.getActiveHeadphonesConnected()) ||
+                (DualSenseBridge.getControllerConnected() &&
+                        DualSenseBridge.getHeadphonesConnected()) ?
                 R.string.title_dualsense_headphone_volume :
                 R.string.title_dualsense_controller_volume;
     }

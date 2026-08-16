@@ -40,6 +40,7 @@ import androidx.preference.PreferenceManager;
 
 import com.limelight.GameMenu;
 import com.limelight.LimeLog;
+import com.limelight.Game;
 import com.limelight.R;
 import com.limelight.binding.input.driver.AbstractController;
 import com.limelight.binding.input.driver.UsbDriverListener;
@@ -190,6 +191,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     private volatile long dualSenseBridgeLastInputAtMs;
     private volatile boolean dualSenseBridgeFailsafeReleased = true;
     private volatile boolean dualSenseBridgeStreamConnected;
+    private boolean dualSenseBridgeMicrophoneMutePressed;
     private final Runnable dualSenseBridgeFailsafeRunnable = new Runnable() {
         @Override
         public void run() {
@@ -1667,6 +1669,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             assignControllerNumberIfNeeded(context);
         }
         context.maybeRenegotiateExtendedEmulation();
+        boolean mutePressed = input.getPressed().contains("Mute");
+        if (mutePressed && !dualSenseBridgeMicrophoneMutePressed) {
+            boolean muted = com.limelight.dualsense.DualSenseMicrophoneBridge.toggleMuted();
+            Game.notifyDualSenseMicrophoneMute(muted);
+        }
+        dualSenseBridgeMicrophoneMutePressed = mutePressed;
         int buttonFlags = dualSenseButtonFlags(input);
         float menuStickX = (input.getLeftX() - 128) / 127.0f;
         float menuStickY = (input.getLeftY() - 128) / 127.0f;

@@ -21,6 +21,7 @@ import com.example.usbbtonandroid.TriggerMode
 import com.example.usbbtonandroid.hci.HciUsbController
 import com.limelight.R
 import com.limelight.LimeLog
+import com.limelight.Game
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.Executors
 
@@ -60,6 +61,9 @@ object DualSenseBridge {
     @Volatile private var batteryLedEnabled = true
     @Volatile private var lowBatteryBlinkEnabled = true
     @Volatile private var connectionOverlayEnabled = false
+    // Owned by the client's microphone forwarding state. Host feedback may set
+    // its own mic LED bit, but it must not override this global mute indicator.
+    @Volatile private var microphoneMuted = false
     @Volatile private var lastStreamRelayAtMs = 0L
     private var lastBatteryLedPercent = -1
     @Volatile private var lowBatteryBlinkActive = false
@@ -143,6 +147,9 @@ object DualSenseBridge {
         private set
     @get:JvmStatic
     @Volatile var controllerConnected: Boolean = false
+        private set
+    @get:JvmStatic
+    @Volatile var headphonesConnected: Boolean = false
         private set
 
     private val receiver = object : BroadcastReceiver() {
@@ -361,14 +368,23 @@ object DualSenseBridge {
     }
 
     @JvmStatic fun sendNativeBluetoothHaptics(haptics: ByteArray,
-                                               speakerOpus: ByteArray?): Boolean =
+                                               speakerOpus: ByteArray?,
+                                               speakerOnly: Boolean = false): Boolean =
         runCatching {
-            controller?.sendNativeBluetoothHaptics(haptics, speakerOpus) == true
+            controller?.sendNativeBluetoothHaptics(haptics, speakerOpus, speakerOnly) == true
         }.getOrDefault(false)
 
     @JvmStatic fun stopNativeBluetoothHaptics() {
         runCatching { controller?.stopNativeBluetoothHaptics() }
     }
+
+    @JvmStatic fun setBluetoothMicrophoneCapture(enabled: Boolean): Boolean =
+        runCatching { controller?.setNativeBluetoothMicrophoneCapture(enabled) == true }
+            .getOrDefault(false)
+
+    @JvmStatic fun setBluetoothHeadsetRoute(enabled: Boolean): Boolean =
+        runCatching { controller?.setNativeBluetoothHeadsetRoute(enabled) == true }
+            .getOrDefault(false)
 
     @JvmStatic fun sendLed(red: Byte, green: Byte, blue: Byte): Boolean {
         ledOverrideActive = true
@@ -404,7 +420,13 @@ object DualSenseBridge {
     }
 
     @JvmStatic fun setPlayerLeds(mask: Int, micLed: Boolean): Boolean = updateOutput {
-        it.copy(playerLeds = mask and 0x1F, micLed = micLed)
+        it.copy(playerLeds = mask and 0x1F, micLed = microphoneMuted)
+    }
+
+    /** Updates the physical mute LED without changing host-owned LED state. */
+    @JvmStatic fun setMicrophoneMuted(muted: Boolean): Boolean {
+        microphoneMuted = muted
+        return updateOutput { it.copy(micLed = muted) }
     }
 
     private fun updateOutput(transform: (DualSenseOutputConfig) -> DualSenseOutputConfig): Boolean =
@@ -490,6 +512,15 @@ object DualSenseBridge {
                     latestInput = input
                     inputPacketCount++
                     controllerConnected = true
+                    if (headphonesConnected != input.headphonesConnected) {
+                        headphonesConnected = input.headphonesConnected
+                        setBluetoothHeadsetRoute(headphonesConnected)
+                        appendLog(if (headphonesConnected) {
+                            "DualSense BT headset connected"
+                        } else {
+                            "DualSense BT headset disconnected"
+                        })
+                    }
                     if (smartRecoveryInProgress) {
                         smartRecoveryInProgress = false
                         adapterRecoveryPerformed = false
@@ -514,12 +545,17 @@ object DualSenseBridge {
                             }
                         }
                         notifyState()
+                        // A bridge controller can connect after the stream has
+                        // already started. Re-evaluate the selected microphone
+                        // source then, rather than requiring a reconnect.
+                        Game.instance?.refreshDualSenseMicrophoneCapture()
                     }
                     updateBatteryLedIfNeeded(input.batteryPercent)
                     updateLowBatteryBlinkState(input.batteryPercent)
                     inputListeners.forEach { it.onInput(input) }
                 }
             },
+            { opus -> DualSenseMicrophoneBridge.onBluetoothOpusFrame(opus) },
             { address -> keyPrefs().getString(address, null) },
             { address, key -> keyPrefs().edit().putString(address, key).apply() }
         ).also { it.start() }
@@ -546,6 +582,7 @@ object DualSenseBridge {
         controller = null
         adapter = null
         controllerConnected = false
+        headphonesConnected = false
         latestInput = DualSenseInput.Empty
         lastInputAtMs = 0L
         activeControllerAddress = null
@@ -614,6 +651,7 @@ object DualSenseBridge {
     private fun markControllerDisconnected(reason: String) {
         if (!controllerConnected && lastInputAtMs == 0L) return
         controllerConnected = false
+        headphonesConnected = false
         lastInputAtMs = 0L
         latestInput = DualSenseInput.Empty
         activeControllerAddress?.let { address ->

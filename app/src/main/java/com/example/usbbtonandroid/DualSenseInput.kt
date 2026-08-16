@@ -16,7 +16,9 @@ data class DualSenseInput(
     val accel: Triple<Int, Int, Int>? = null,
     val touches: List<DualSenseTouchPoint> = emptyList(),
     val batteryPercent: Int = -1,
-    val batteryStatus: String = "Unknown"
+    val batteryStatus: String = "Unknown",
+    val headphonesConnected: Boolean = false,
+    val headsetMicrophoneConnected: Boolean = false
 ) {
     companion object {
         val Empty = DualSenseInput("Nincs input", 128, 128, 128, 128, 0, 0, emptySet())
@@ -57,6 +59,9 @@ object DualSenseInputParser {
         val buttons0 = p[base + 7].u8()
         val buttons1 = p[base + 8].u8()
         val buttons2 = p[base + 9].u8()
+        // status[1] of the common DualSense input payload: bit 0 is the
+        // 3.5 mm headset detect bit and bit 1 denotes a headset microphone.
+        val audioStatus = if (p.size > base + 53) p[base + 53].u8() else 0
         return DualSenseInput(
             reportMode = "Teljes Bluetooth report (0x31)",
             leftX = p[base].u8(), leftY = p[base + 1].u8(),
@@ -68,7 +73,9 @@ object DualSenseInputParser {
             accel = Triple(p.s16(base + 21), p.s16(base + 23), p.s16(base + 25)),
             touches = parseTouchPoints(p, base),
             batteryPercent = batteryPercent(p, base),
-            batteryStatus = batteryStatus(p, base)
+            batteryStatus = batteryStatus(p, base),
+            headphonesConnected = (audioStatus and 0x01) != 0,
+            headsetMicrophoneConnected = (audioStatus and 0x02) != 0
         )
     }
 

@@ -46,6 +46,7 @@ object DualSenseMicrophoneBridge {
         if (muted == value) return muted
         muted = value
         DualSenseWiredOutput.setMicrophoneMuted(value)
+        DualSenseBridge.setMicrophoneMuted(value)
         LimeLog.info("DualSense microphone forwarding " + if (value) "muted" else "unmuted")
         return muted
     }
@@ -60,6 +61,22 @@ object DualSenseMicrophoneBridge {
         if (!DualSenseMicrophoneNative.start()) {
             LimeLog.warning("DualSense microphone Opus encoder failed to start")
             return false
+        }
+
+        // The USB bridge is a raw Bluetooth HCI transport, not an Android
+        // AudioDevice. Its DualSense microphone returns Opus frames inside BT
+        // HID input reports and is decoded by onBluetoothOpusFrame() below.
+        if (selectedSource == SOURCE_DUALSENSE && DualSenseBridge.controllerConnected) {
+            if (!DualSenseMicrophoneNative.startBluetooth()) {
+                DualSenseMicrophoneNative.stop()
+                return false
+            }
+            DualSenseBridge.setMicrophoneMuted(muted)
+            DualSenseBridge.setBluetoothMicrophoneCapture(true)
+            DualSenseWiredOutput.setMicrophoneMuted(muted)
+            running = true
+            LimeLog.info("DualSense Bridge microphone capture armed")
+            return true
         }
 
         val minBuffer = AudioRecord.getMinBufferSize(48_000,
@@ -118,6 +135,12 @@ object DualSenseMicrophoneBridge {
         return true
     }
 
+    /** Called only for filtered BT Duplex 0xD4 Opus frames. */
+    @JvmStatic fun onBluetoothOpusFrame(opus: ByteArray) {
+        if (!running || selectedSource != SOURCE_DUALSENSE || muted || opus.isEmpty()) return
+        DualSenseMicrophoneNative.decodeBluetoothAndSend(opus)
+    }
+
     private fun createRecorder(bufferSize: Int): AudioRecord? = try {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             AudioRecord.Builder()
@@ -166,6 +189,9 @@ object DualSenseMicrophoneBridge {
     }
 
     @JvmStatic @Synchronized fun stop() {
+        if (selectedSource == SOURCE_DUALSENSE) {
+            DualSenseBridge.setBluetoothMicrophoneCapture(false)
+        }
         stopRequested.set(true)
         try { recorder?.stop() } catch (_: Throwable) { }
         captureThread?.join(300)
@@ -174,5 +200,6 @@ object DualSenseMicrophoneBridge {
         recorder = null
         running = false
         DualSenseMicrophoneNative.stop()
+        DualSenseBridge.setMicrophoneMuted(muted)
     }
 }

@@ -26,9 +26,12 @@ object DualSenseAudioBridge {
     private val DUALSENSE_PRODUCT_IDS = setOf(0x0ce6, 0x0df2)
     private const val USB_AUDIO_STREAMING_SUBCLASS = 0x02
     // The DualSense hardware route is already configured for maximum clean
-    // speaker output. Keep the PCM at unity when the UI volume is 100%; lower
-    // settings are implemented purely as client-side PCM attenuation.
+    // speaker output. The amplified internal membrane reaches clipping well
+    // before full-scale PCM; a headset does not have that limitation.
     private const val CLEAN_SPEAKER_GAIN_PERCENT = 100
+    // UI 100% on the controller membrane means the former 30% PCM gain:
+    // -10.46 dB relative to the old full-scale slider.
+    private const val INTERNAL_SPEAKER_MAX_GAIN_PERCENT = 30
 
     private lateinit var appContext: Context
     private lateinit var usbManager: UsbManager
@@ -59,6 +62,17 @@ object DualSenseAudioBridge {
             btNativeDrops++
         }
     }
+    // Normal Moonlight game audio is independent from Apollo's 4-channel
+    // controller feedback. A second packetizer keeps its speaker Opus frames
+    // from modifying the physical HD-haptics samples on channels 3/4.
+    private val btStreamSpeakerResampler = NativeBluetoothHapticsResampler { haptics, speaker ->
+        if (speaker != null) btSpeakerReports++
+        if (DualSenseBridge.sendNativeBluetoothHaptics(haptics, speaker, speakerOnly = true)) {
+            btNativeReports++
+        } else {
+            btNativeDrops++
+        }
+    }
 
     private val permissionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -83,6 +97,8 @@ object DualSenseAudioBridge {
         if (mode != normalized) closeUsbRoute()
         mode = normalized
         controllerVolume = selectedVolume.coerceIn(0, 100)
+        DualSenseBridge.setBluetoothHeadsetRoute(
+            mode == "usb_headset" || (mode == "auto" && DualSenseBridge.headphonesConnected))
         LimeLog.info("DualSense audio mode: $mode, controller volume: $controllerVolume%")
     }
 
@@ -100,8 +116,7 @@ object DualSenseAudioBridge {
      * and stay reserved for Apollo's independent native HD-haptics packets.
      */
     @JvmStatic fun routeStandardStreamAudio(pcm: ShortArray, channels: Int): Boolean {
-        if (!wiredControllerActive || !DualSenseController.getActiveHeadphonesConnected() ||
-            !usbRouteActive || mode == "off" || channels < 2 || pcm.isEmpty()) return false
+        if (mode == "off" || channels < 2 || pcm.isEmpty()) return false
         val frameCount = pcm.size / channels
         if (frameCount <= 0) return false
         val output = ByteArray(frameCount * 8)
@@ -115,7 +130,16 @@ object DualSenseAudioBridge {
             input += channels
             outputOffset += 8
         }
-        return DualSenseIsoNative.push(output) == 0
+        if (wiredControllerActive && DualSenseController.getActiveHeadphonesConnected() &&
+            usbRouteActive) {
+            return DualSenseIsoNative.push(output) == 0
+        }
+        if (DualSenseBridge.controllerConnected &&
+            (mode == "usb_headset" || (mode == "auto" && DualSenseBridge.headphonesConnected))) {
+            btStreamSpeakerResampler.pushFourChannelPcm(output, frameCount, true)
+            return true
+        }
+        return false
     }
 
     @JvmStatic fun initialize(context: Context) {
@@ -235,7 +259,7 @@ object DualSenseAudioBridge {
     }
 
     private fun applySpeakerGain(pcm: ByteArray, frameCount: Int): ByteArray {
-        val volume = controllerVolume
+        val volume = effectiveSpeakerGainPercent()
         return pcm.copyOf().also { output ->
             var offset = 0
             repeat(frameCount) {
@@ -257,12 +281,21 @@ object DualSenseAudioBridge {
     }
 
     private fun writeScaledS16(data: ByteArray, offset: Int, sample: Short) {
-        val volume = controllerVolume
+        val volume = effectiveSpeakerGainPercent()
         val divisor = 100 * 100
         val numerator = sample.toInt() * volume * CLEAN_SPEAKER_GAIN_PERCENT
         val scaled = (numerator + if (sample >= 0) divisor / 2 else -divisor / 2) / divisor
         data[offset] = scaled.toByte()
         data[offset + 1] = (scaled shr 8).toByte()
+    }
+
+    /** Keep the full software range for a headset; cap only the built-in membrane. */
+    private fun effectiveSpeakerGainPercent(): Int {
+        val internalSpeakerActive =
+            (wiredControllerActive && !DualSenseController.getActiveHeadphonesConnected()) ||
+                (DualSenseBridge.controllerConnected && !DualSenseBridge.headphonesConnected)
+        val maximum = if (internalSpeakerActive) INTERNAL_SPEAKER_MAX_GAIN_PERCENT else 100
+        return controllerVolume * maximum / 100
     }
 
     /**
