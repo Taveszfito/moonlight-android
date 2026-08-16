@@ -10,6 +10,8 @@ import android.os.SystemClock;
 import com.limelight.LimeLog;
 import com.limelight.dualsense.DualSenseWiredOutput;
 import com.limelight.dualsense.DualSenseAudioBridge;
+import com.limelight.dualsense.DualSenseMicrophoneBridge;
+import com.limelight.Game;
 import com.limelight.nvstream.input.ControllerPacket;
 import com.limelight.nvstream.jni.MoonBridge;
 
@@ -29,6 +31,7 @@ public final class DualSenseController extends AbstractController {
     private final boolean[] touchActive = new boolean[2];
     private boolean headphonesConnected;
     private boolean audioRouteInitialized;
+    private boolean microphoneMutePressed;
     private long inputPacketCount;
     private long inputReadErrors;
     private volatile long lastInputAtMs;
@@ -122,6 +125,9 @@ public final class DualSenseController extends AbstractController {
         notifyDeviceAdded();
         LimeLog.info("DualSense raw USB driver active: " + device.getDeviceName());
         DualSenseAudioBridge.onWiredControllerConnected();
+        if (Game.instance != null) {
+            Game.instance.refreshDualSenseMicrophoneCapture();
+        }
         return true;
     }
 
@@ -165,7 +171,13 @@ public final class DualSenseController extends AbstractController {
         if ((b1 & 0x80) != 0) buttonFlags |= ControllerPacket.RS_CLK_FLAG;
         if ((b2 & 0x01) != 0) buttonFlags |= ControllerPacket.SPECIAL_BUTTON_FLAG;
         if ((b2 & 0x02) != 0) buttonFlags |= ControllerPacket.TOUCHPAD_FLAG;
-        if ((b2 & 0x04) != 0) buttonFlags |= ControllerPacket.MISC_FLAG;
+        boolean mutePressed = (b2 & 0x04) != 0;
+        if (mutePressed) buttonFlags |= ControllerPacket.MISC_FLAG;
+        if (mutePressed && !microphoneMutePressed) {
+            boolean muted = DualSenseMicrophoneBridge.toggleMuted();
+            Game.notifyDualSenseMicrophoneMute(muted);
+        }
+        microphoneMutePressed = mutePressed;
         reportInput();
 
         gyroX = s16(r, 16) / 16f; gyroY = s16(r, 18) / 16f; gyroZ = s16(r, 20) / 16f;
@@ -234,6 +246,7 @@ public final class DualSenseController extends AbstractController {
         running.set(false);
         if (activeController == this) activeController = null;
         DualSenseAudioBridge.onWiredControllerDisconnected();
+        DualSenseMicrophoneBridge.stopIfUsingDualSense();
         if (inputThread != null) inputThread.interrupt();
         try { connection.releaseInterface(hidInterface); } catch (Throwable ignored) { }
         connection.close();

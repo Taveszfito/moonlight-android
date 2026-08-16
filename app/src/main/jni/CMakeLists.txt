@@ -30,7 +30,7 @@ add_library(moonlight-core SHARED
     moonlight-core/moonlight-common-c/src/ByteBuffer.c
     moonlight-core/moonlight-common-c/src/Connection.c
     moonlight-core/moonlight-common-c/src/ConnectionTester.c
-    moonlight-core/moonlight-common-c/src/ControlStream.c
+    moonlight-core/control_stream_extended.c
     moonlight-core/moonlight-common-c/src/FakeCallbacks.c
     moonlight-core/moonlight-common-c/src/InputStream.c
     moonlight-core/moonlight-common-c/src/LinkedBlockingQueue.c
@@ -59,6 +59,7 @@ add_library(moonlight-core SHARED
     moonlight-core/simplejni.c
     moonlight-core/callbacks.c
     moonlight-core/dualsense_iso.cpp
+    moonlight-core/microphone_capture.cpp
     moonlight-core/minisdl.c
 )
 

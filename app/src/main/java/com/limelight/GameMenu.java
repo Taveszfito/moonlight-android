@@ -56,6 +56,7 @@ import android.util.TypedValue;
 import androidx.preference.PreferenceManager;
 import com.limelight.dualsense.DualSenseBridge;
 import com.limelight.dualsense.DualSenseAudioBridge;
+import com.limelight.dualsense.DualSenseMicrophoneBridge;
 import com.limelight.binding.input.driver.DualSenseController;
 import com.example.usbbtonandroid.DualSenseInput;
 import androidx.appcompat.view.WindowCallbackWrapper;
@@ -107,6 +108,8 @@ public class GameMenu implements Game.GameMenuCallbacks {
     private static final String MENU_ROTATE_SCREEN = "rotate_screen";
     private static final String MENU_ADVANCED = "advanced";
     private static final String MENU_DUALSENSE_BRIDGE = "dualsense_bridge";
+    private static final String MENU_DUALSENSE_MICROPHONE = "dualsense_microphone";
+    private static final String MENU_DUALSENSE_AUDIO_ROUTE = "dualsense_audio_route";
     private static final String MENU_GYRO_AXIS_MAPPING = "gyro_axis_mapping";
     private static final String MENU_CANCEL = "cancel";
 
@@ -140,6 +143,8 @@ public class GameMenu implements Game.GameMenuCallbacks {
             MENU_ROTATE_SCREEN,
             MENU_GYRO_AXIS_MAPPING,
             MENU_DUALSENSE_BRIDGE,
+            MENU_DUALSENSE_MICROPHONE,
+            MENU_DUALSENSE_AUDIO_ROUTE,
             MENU_ADVANCED,
             MENU_CANCEL
     );
@@ -820,11 +825,12 @@ public class GameMenu implements Game.GameMenuCallbacks {
             controllerVolumeButton.setColorFilter(Color.WHITE);
             controllerVolumeButton.setBackgroundColor(Color.TRANSPARENT);
             controllerVolumeButton.setContentDescription(
-                    getString(R.string.title_dualsense_controller_volume));
+                    getString(getDualSenseVolumeTitleRes()));
             controllerVolumeButton.setOnClickListener(view -> finalControllerVolumePanel.setVisibility(
                     finalControllerVolumePanel.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE));
             applyControllerFocusStyle(controllerVolumeButton);
             header.addView(controllerVolumeButton, new LinearLayout.LayoutParams(dp(44), dp(44)));
+            refreshControllerVolumePresentation(controllerVolumePanel, controllerVolumeButton);
         }
         else {
             controllerNavigationHint = null;
@@ -878,9 +884,10 @@ public class GameMenu implements Game.GameMenuCallbacks {
         panel.setBackground(roundedBackground(0xFF202A36, 12));
 
         TextView label = new TextView(getThemedContext());
-        label.setText(R.string.title_dualsense_controller_volume);
+        label.setText(getDualSenseVolumeTitleRes());
         label.setTextColor(Color.WHITE);
         label.setTextSize(14);
+        panel.setTag(label);
         panel.addView(label, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -916,6 +923,32 @@ public class GameMenu implements Game.GameMenuCallbacks {
         });
         applyControllerFocusStyle(slider);
         return panel;
+    }
+
+    private void refreshControllerVolumePresentation(LinearLayout panel, ImageButton button) {
+        Runnable updater = new Runnable() {
+            @Override public void run() {
+                int titleRes = getDualSenseVolumeTitleRes();
+                button.setContentDescription(getString(titleRes));
+                Object tag = panel.getTag();
+                if (tag instanceof TextView) {
+                    ((TextView) tag).setText(titleRes);
+                }
+                // The controller reports jack changes asynchronously. Keep this
+                // lightweight polling confined to the visible Quick Menu.
+                if (panel.isAttachedToWindow()) {
+                    panel.postDelayed(this, 250L);
+                }
+            }
+        };
+        panel.post(updater);
+    }
+
+    private int getDualSenseVolumeTitleRes() {
+        return DualSenseController.hasActiveController() &&
+                DualSenseController.getActiveHeadphonesConnected() ?
+                R.string.title_dualsense_headphone_volume :
+                R.string.title_dualsense_controller_volume;
     }
 
     private void applyControllerFocusStyle(View view) {
@@ -3999,11 +4032,167 @@ public class GameMenu implements Game.GameMenuCallbacks {
                 DualSenseController.hasActiveController() ?
                         "DualSense USB / HD audio • BETA" : "DualSense Bridge • BETA",
                 () -> showDualSenseBridgeMenu(device)));
+        options.add(new MenuOption(MENU_DUALSENSE_MICROPHONE,
+                "Microphone passthrough\n" + microphoneStatusLabel(),
+                () -> showDualSenseMicrophoneMenu(device)));
+        options.add(new MenuOption(MENU_DUALSENSE_AUDIO_ROUTE,
+                "DualSense audio route: " + audioRouteLabel(),
+                () -> showDualSenseAudioRouteMenu(device)));
         options.add(new MenuOption(MENU_ADVANCED, getString(R.string.game_menu_advanced), true,
                 () -> showAdvancedMenu(device)));
         options.add(new MenuOption(MENU_CANCEL, getString(R.string.game_menu_cancel), null));
 
         return options;
+    }
+
+    private String microphoneStatusLabel() {
+        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(game);
+        boolean enabled = prefs.getBoolean(
+                PreferenceConfiguration.DUALSENSE_MICROPHONE_ENABLED_PREF_STRING, false);
+        if (!enabled) return "Off";
+        return "On • Source: " + microphoneSourceLabel();
+    }
+
+    private String microphoneSourceLabel() {
+        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(game);
+        String source = prefs.getString(PreferenceConfiguration.DUALSENSE_MICROPHONE_SOURCE_PREF_STRING,
+                PreferenceConfiguration.DEFAULT_DUALSENSE_MICROPHONE_SOURCE);
+        if (DualSenseMicrophoneBridge.SOURCE_DUALSENSE.equals(source)) return "DualSense controller";
+        return "Client microphone";
+    }
+
+    private String audioRouteLabel() {
+        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(game);
+        String route = prefs.getString(PreferenceConfiguration.DUALSENSE_AUDIO_MODE_PREF_STRING,
+                PreferenceConfiguration.DEFAULT_DUALSENSE_AUDIO_MODE);
+        switch (route) {
+            case "usb_speaker": return "USB speaker";
+            case "usb_headset": return "USB headset";
+            case "haptics_only": return "HD haptics only";
+            case "off": return "Off";
+            default: return "Automatic";
+        }
+    }
+
+    private void showDualSenseMicrophoneMenu(GameInputDevice device) {
+        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(game);
+        boolean enabled = prefs.getBoolean(
+                PreferenceConfiguration.DUALSENSE_MICROPHONE_ENABLED_PREF_STRING, false);
+        String selectedSource = prefs.getString(
+                PreferenceConfiguration.DUALSENSE_MICROPHONE_SOURCE_PREF_STRING,
+                PreferenceConfiguration.DEFAULT_DUALSENSE_MICROPHONE_SOURCE);
+        if (!DualSenseMicrophoneBridge.SOURCE_DUALSENSE.equals(selectedSource) &&
+                !DualSenseMicrophoneBridge.SOURCE_DEVICE.equals(selectedSource)) {
+            selectedSource = DualSenseMicrophoneBridge.SOURCE_DUALSENSE;
+        }
+
+        LinearLayout content = new LinearLayout(getThemedContext());
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(12), dp(10), dp(12), dp(12));
+
+        Switch forwarding = new Switch(getThemedContext());
+        forwarding.setText("Microphone forwarding: " + (enabled ? "On" : "Off"));
+        forwarding.setTextColor(Color.WHITE);
+        forwarding.setTextSize(17);
+        forwarding.setChecked(enabled);
+        forwarding.setPadding(dp(6), dp(4), dp(6), dp(12));
+        forwarding.setOnCheckedChangeListener((button, checked) -> {
+            if (checked == enabled) return;
+            prefs.edit().putBoolean(PreferenceConfiguration.DUALSENSE_MICROPHONE_ENABLED_PREF_STRING,
+                    checked).apply();
+            game.refreshDualSenseMicrophoneCapture();
+            showDualSenseMicrophoneMenu(device);
+        });
+        applyControllerFocusStyle(forwarding);
+        content.addView(forwarding, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView sourceTitle = new TextView(getThemedContext());
+        sourceTitle.setText("Source");
+        sourceTitle.setTextColor(0xFFBBC7D6);
+        sourceTitle.setTextSize(14);
+        sourceTitle.setPadding(dp(6), dp(10), dp(6), dp(7));
+        content.addView(sourceTitle);
+
+        content.addView(createMicrophoneSourceRow("DualSense controller",
+                DualSenseMicrophoneBridge.SOURCE_DUALSENSE.equals(selectedSource), () ->
+                setMicrophoneSource(DualSenseMicrophoneBridge.SOURCE_DUALSENSE, device)));
+        content.addView(createMicrophoneSourceRow("Client microphone",
+                DualSenseMicrophoneBridge.SOURCE_DEVICE.equals(selectedSource), () ->
+                setMicrophoneSource(DualSenseMicrophoneBridge.SOURCE_DEVICE, device)));
+
+        ScrollView scroll = new ScrollView(getThemedContext());
+        scroll.addView(content);
+        LinearLayout shell = createFullscreenMenuShell("Microphone passthrough", scroll,
+                null, () -> showMenu(device));
+        showFullscreenDialog(shell, null);
+    }
+
+    private View createMicrophoneSourceRow(String label, boolean current, Runnable onSelect) {
+        LinearLayout row = new LinearLayout(getThemedContext());
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(14), dp(13), dp(14), dp(13));
+        row.setBackground(roundedBackground(current ? 0xFF34475A : 0xFF242D38, 10));
+        row.setClickable(true);
+        row.setFocusable(true);
+        row.setOnClickListener(view -> onSelect.run());
+        row.setOnFocusChangeListener((view, focused) -> {
+            hideControllerNavigationHint();
+            view.setBackground(roundedBackground(focused ? 0xFF465E74 :
+                    (current ? 0xFF34475A : 0xFF242D38), 10));
+        });
+
+        TextView labelView = new TextView(getThemedContext());
+        labelView.setText(label);
+        labelView.setTextColor(Color.WHITE);
+        labelView.setTextSize(16);
+        row.addView(labelView, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        if (current) {
+            TextView currentView = new TextView(getThemedContext());
+            currentView.setText("Current");
+            currentView.setTextColor(0xFF7CDBFF);
+            currentView.setTextSize(14);
+            row.addView(currentView);
+        }
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.setMargins(0, dp(4), 0, dp(4));
+        row.setLayoutParams(params);
+        return row;
+    }
+
+    private void setMicrophoneSource(String source, GameInputDevice device) {
+        PreferenceManager.getDefaultSharedPreferences(game).edit()
+                .putString(PreferenceConfiguration.DUALSENSE_MICROPHONE_SOURCE_PREF_STRING, source)
+                .apply();
+        game.refreshDualSenseMicrophoneCapture();
+        showDualSenseMicrophoneMenu(device);
+    }
+
+    private void showDualSenseAudioRouteMenu(GameInputDevice device) {
+        List<MenuOption> options = new ArrayList<>();
+        addAudioRouteOption(options, "auto", "Automatic (speaker / headset jack)", device);
+        addAudioRouteOption(options, "usb_speaker", "USB: controller speaker + HD haptics", device);
+        addAudioRouteOption(options, "usb_headset", "USB: headset jack + HD haptics", device);
+        addAudioRouteOption(options, "haptics_only", "HD haptics only", device);
+        addAudioRouteOption(options, "off", "Disabled", device);
+        options.add(new MenuOption(MENU_CANCEL, getString(R.string.game_menu_cancel),
+                () -> showMenu(device)));
+        showMenuDialog("DualSense audio route (Apollo Extended)",
+                options.toArray(new MenuOption[0]), () -> showMenu(device));
+    }
+
+    private void addAudioRouteOption(List<MenuOption> options, String mode, String label,
+                                     GameInputDevice device) {
+        options.add(new MenuOption("audio_" + mode, label, () -> {
+            PreferenceManager.getDefaultSharedPreferences(game).edit()
+                    .putString(PreferenceConfiguration.DUALSENSE_AUDIO_MODE_PREF_STRING, mode).apply();
+            DualSenseAudioBridge.configure(mode, PreferenceManager.getDefaultSharedPreferences(game).getInt(
+                    PreferenceConfiguration.DUALSENSE_CONTROLLER_VOLUME_PREF_STRING,
+                    PreferenceConfiguration.DEFAULT_DUALSENSE_CONTROLLER_VOLUME));
+            showDualSenseAudioRouteMenu(device);
+        }));
     }
 
     private void showDualSenseBridgeMenu(GameInputDevice device) {

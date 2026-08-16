@@ -10,6 +10,9 @@
 #include "controller_type.h"
 #include "controller_list.h"
 
+// Implemented by the Android-only control_stream_extended.c wrapper.
+int LiSendRawControlStreamPacket(uint16_t packetType, const void* data, int length);
+
 JNIEXPORT void JNICALL
 Java_com_limelight_nvstream_jni_MoonBridge_sendMouseMove(JNIEnv *env, jclass clazz, jshort deltaX, jshort deltaY) {
     LiSendMouseMoveEvent(deltaX, deltaY);
@@ -269,4 +272,17 @@ JNIEXPORT jboolean JNICALL
 Java_com_limelight_nvstream_jni_MoonBridge_guessControllerHasShareButton(JNIEnv *env, jclass clazz, jint vendorId, jint productId) {
     // Xbox Elite and DualSense Edge controllers have paddles
     return SDL_IsJoystickXboxSeriesX(vendorId, productId);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_sendMicrophonePacket(JNIEnv *env, jclass clazz,
+                                                                  jbyteArray packet) {
+    if (packet == NULL) return -1;
+    jsize length = (*env)->GetArrayLength(env, packet);
+    if (length <= 0 || length > 252) return -1;
+    jbyte* data = (*env)->GetByteArrayElements(env, packet, NULL);
+    if (data == NULL) return -1;
+    int result = LiSendRawControlStreamPacket(0x3003, data, length);
+    (*env)->ReleaseByteArrayElements(env, packet, data, JNI_ABORT);
+    return result;
 }

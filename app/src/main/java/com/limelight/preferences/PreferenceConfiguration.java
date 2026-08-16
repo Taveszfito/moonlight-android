@@ -38,8 +38,11 @@ public class PreferenceConfiguration {
     public static final String VOLUME_BUTTON_MODE_WINDOWS = "windows";
     public static final String DUALSENSE_AUDIO_MODE_PREF_STRING = "dualsense_audio_mode";
     public static final String DUALSENSE_CONTROLLER_VOLUME_PREF_STRING = "dualsense_controller_volume";
+    public static final String DUALSENSE_MICROPHONE_SOURCE_PREF_STRING = "dualsense_microphone_source";
+    public static final String DUALSENSE_MICROPHONE_ENABLED_PREF_STRING = "dualsense_microphone_enabled";
     public static final String DEFAULT_DUALSENSE_AUDIO_MODE = "auto";
     public static final int DEFAULT_DUALSENSE_CONTROLLER_VOLUME = 100;
+    public static final String DEFAULT_DUALSENSE_MICROPHONE_SOURCE = "dualsense";
 
     private static final String LEGACY_RES_FPS_PREF_STRING = "list_resolution_fps";
     private static final String LEGACY_ENABLE_51_SURROUND_PREF_STRING = "checkbox_51_surround";
@@ -433,6 +436,8 @@ public class PreferenceConfiguration {
     public boolean enableRumble;
     public String dualSenseAudioMode;
     public int dualSenseControllerVolume;
+    public String dualSenseMicrophoneSource;
+    public boolean dualSenseMicrophoneEnabled;
     public boolean preventPacketLoss;
 
     public boolean rememberZoomPan;
@@ -1100,6 +1105,16 @@ private static int getFramePacingValue(Context context) {
         config.dualSenseControllerVolume = Math.max(0, Math.min(100,
                 prefs.getInt(DUALSENSE_CONTROLLER_VOLUME_PREF_STRING,
                         DEFAULT_DUALSENSE_CONTROLLER_VOLUME)));
+        String storedMicrophoneSource = prefs.getString(
+                DUALSENSE_MICROPHONE_SOURCE_PREF_STRING,
+                DEFAULT_DUALSENSE_MICROPHONE_SOURCE);
+        // Migrate the first implementation's combined Off/source preference.
+        boolean hasStoredSource = prefs.contains(DUALSENSE_MICROPHONE_SOURCE_PREF_STRING);
+        config.dualSenseMicrophoneEnabled = prefs.getBoolean(
+                DUALSENSE_MICROPHONE_ENABLED_PREF_STRING,
+                hasStoredSource && !"off".equals(storedMicrophoneSource));
+        config.dualSenseMicrophoneSource = "off".equals(storedMicrophoneSource) ?
+                DEFAULT_DUALSENSE_MICROPHONE_SOURCE : storedMicrophoneSource;
         config.preventPacketLoss = prefs.getBoolean(PREVENT_PACKET_LOSS_PREF_STRING, DEFAULT_PREVENT_PACKET_LOSS);
 
         // Read custom values

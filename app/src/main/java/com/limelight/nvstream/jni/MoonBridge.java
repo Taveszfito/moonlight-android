@@ -417,6 +417,9 @@ public class MoonBridge {
 
     public static native void sendUtf8Text(String text);
 
+    // Artemis Extended client microphone packet: [sequence, mono, flags, Opus].
+    public static native int sendMicrophonePacket(byte[] packet);
+
     public static native String getStageName(int stage);
 
     public static native String findExternalAddressIP4(String stunHostName, int stunPort);

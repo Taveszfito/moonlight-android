@@ -90,6 +90,34 @@ object DualSenseAudioBridge {
         controllerVolume = selectedVolume.coerceIn(0, 100)
     }
 
+    /**
+     * Routes ordinary Moonlight game audio to a wired controller only while a
+     * headset is physically present. The regular Android AudioTrack caller
+     * receives true only after the ISO packet was accepted, so the phone never
+     * goes silent merely because the controller route is unavailable.
+     *
+     * Channels 1/2 carry the game mix; channels 3/4 are explicitly silent here
+     * and stay reserved for Apollo's independent native HD-haptics packets.
+     */
+    @JvmStatic fun routeStandardStreamAudio(pcm: ShortArray, channels: Int): Boolean {
+        if (!wiredControllerActive || !DualSenseController.getActiveHeadphonesConnected() ||
+            !usbRouteActive || mode == "off" || channels < 2 || pcm.isEmpty()) return false
+        val frameCount = pcm.size / channels
+        if (frameCount <= 0) return false
+        val output = ByteArray(frameCount * 8)
+        var input = 0
+        var outputOffset = 0
+        repeat(frameCount) {
+            writeScaledS16(output, outputOffset, pcm[input])
+            writeScaledS16(output, outputOffset + 2, pcm[input + 1])
+            // 3/4 intentionally remain zero: native haptics is delivered by
+            // receive(), not derived from or mixed into game speaker audio.
+            input += channels
+            outputOffset += 8
+        }
+        return DualSenseIsoNative.push(output) == 0
+    }
+
     @JvmStatic fun initialize(context: Context) {
         if (initialized) return
         synchronized(this) {
@@ -223,6 +251,15 @@ object DualSenseAudioBridge {
             (data[offset + 1].toInt() shl 8)).toShort().toInt()
         val divisor = 100 * 100
         val numerator = sample * volume * CLEAN_SPEAKER_GAIN_PERCENT
+        val scaled = (numerator + if (sample >= 0) divisor / 2 else -divisor / 2) / divisor
+        data[offset] = scaled.toByte()
+        data[offset + 1] = (scaled shr 8).toByte()
+    }
+
+    private fun writeScaledS16(data: ByteArray, offset: Int, sample: Short) {
+        val volume = controllerVolume
+        val divisor = 100 * 100
+        val numerator = sample.toInt() * volume * CLEAN_SPEAKER_GAIN_PERCENT
         val scaled = (numerator + if (sample >= 0) divisor / 2 else -divisor / 2) / divisor
         data[offset] = scaled.toByte()
         data[offset + 1] = (scaled shr 8).toByte()

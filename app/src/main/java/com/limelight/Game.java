@@ -31,6 +31,7 @@ import com.limelight.binding.video.MediaCodecHelper;
 import com.limelight.binding.video.PerfOverlayListener;
 import com.limelight.dualsense.DualSenseBridge;
 import com.limelight.dualsense.DualSenseAudioBridge;
+import com.limelight.dualsense.DualSenseMicrophoneBridge;
 import com.limelight.binding.input.driver.DualSenseController;
 import com.example.usbbtonandroid.DualSenseInput;
 import com.example.usbbtonandroid.hci.HciUsbController;
@@ -60,6 +61,7 @@ import com.limelight.utils.SpinnerDialog;
 import com.limelight.utils.UiHelper;
 
 import android.annotation.SuppressLint;
+import android.Manifest;
 import android.annotation.TargetApi;
 import android.app.AlertDialog;
 import android.app.PictureInPictureParams;
@@ -246,6 +248,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     private boolean overlayToggleZoomButtonShown;
     private TextView notificationOverlayView;
     private TextView controllerLowBatteryOverlayView;
+    private TextView controllerMicrophoneOverlayView;
     private TextView controllerConnectionOverlayView;
     private View controllerConnectionOverlayContainer;
     private View controllerConnectionLogClearView;
@@ -253,6 +256,15 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     private long lastControllerLowBatteryWarningMs;
     private static final int CONTROLLER_LOW_BATTERY_PERCENT = 15;
     private static final long CONTROLLER_LOW_BATTERY_REMINDER_MS = 5 * 60 * 1000L;
+    private static final int MICROPHONE_PERMISSION_REQUEST = 741;
+    private final Runnable hideControllerMicrophoneOverlay = () -> {
+        if (controllerMicrophoneOverlayView != null) {
+            controllerMicrophoneOverlayView.animate().cancel();
+            controllerMicrophoneOverlayView.animate().alpha(0f).setDuration(250L)
+                    .withEndAction(() -> controllerMicrophoneOverlayView.setVisibility(View.GONE))
+                    .start();
+        }
+    };
     private final Runnable hideControllerLowBatteryOverlay = () -> {
         if (controllerLowBatteryOverlayView != null) {
             controllerLowBatteryOverlayView.animate().cancel();
@@ -404,6 +416,8 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         prefConfig = PreferenceConfiguration.readPreferences(this);
         DualSenseAudioBridge.configure(prefConfig.dualSenseAudioMode,
                 prefConfig.dualSenseControllerVolume);
+        DualSenseMicrophoneBridge.configure(prefConfig.dualSenseMicrophoneEnabled ?
+                prefConfig.dualSenseMicrophoneSource : DualSenseMicrophoneBridge.SOURCE_OFF);
         tombstonePrefs = Game.this.getSharedPreferences("DecoderTombstone", 0);
 
         if (prefConfig.fullScreen) {
@@ -569,6 +583,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
         notificationOverlayView = findViewById(R.id.notificationOverlay);
         controllerLowBatteryOverlayView = findViewById(R.id.controllerLowBatteryOverlay);
+        controllerMicrophoneOverlayView = findViewById(R.id.controllerMicrophoneOverlay);
         controllerConnectionOverlayView = findViewById(R.id.controllerConnectionOverlay);
         controllerConnectionOverlayContainer = findViewById(R.id.controllerConnectionOverlayContainer);
         controllerConnectionLogClearView = findViewById(R.id.controllerConnectionLogClear);
@@ -3894,6 +3909,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     @Override
     public void connectionTerminated(final int errorCode) {
         DualSenseAudioBridge.stop();
+        DualSenseMicrophoneBridge.stop();
         // Perform a connection test if the failure could be due to a blocked port
         // This does network I/O, so don't do it on the main thread.
         final int portFlags = MoonBridge.getPortFlagsFromTerminationErrorCode(errorCode);
@@ -4018,6 +4034,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
                 connected = true;
                 connecting = false;
+                startClientMicrophoneCapture();
                 updatePipAutoEnter();
 
                 // A resumed/replaced host session has a fresh input context even
@@ -4074,6 +4091,57 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             // This may be null if launched from the "Resume Session" PC context menu item
             shortcutHelper.reportGameLaunched(computer, app);
         }
+    }
+
+    public void refreshDualSenseMicrophoneCapture() {
+        prefConfig = PreferenceConfiguration.readPreferences(this);
+        DualSenseMicrophoneBridge.configure(prefConfig.dualSenseMicrophoneEnabled ?
+                prefConfig.dualSenseMicrophoneSource : DualSenseMicrophoneBridge.SOURCE_OFF);
+        if (connected) {
+            startClientMicrophoneCapture();
+        }
+    }
+
+    private void startClientMicrophoneCapture() {
+        if (!prefConfig.dualSenseMicrophoneEnabled) {
+            DualSenseMicrophoneBridge.stop();
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+                checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},
+                    MICROPHONE_PERMISSION_REQUEST);
+            return;
+        }
+        DualSenseMicrophoneBridge.start(this);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
+                                           @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == MICROPHONE_PERMISSION_REQUEST && grantResults.length > 0 &&
+                grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            startClientMicrophoneCapture();
+        }
+    }
+
+    public static void notifyDualSenseMicrophoneMute(final boolean muted) {
+        Game game = instance;
+        if (game == null) return;
+        game.runOnUiThread(() -> game.showDualSenseMicrophoneMuteOverlay(muted));
+    }
+
+    private void showDualSenseMicrophoneMuteOverlay(boolean muted) {
+        if (controllerMicrophoneOverlayView == null || prefConfig.disableWarnings) return;
+        timerHandler.removeCallbacks(hideControllerMicrophoneOverlay);
+        controllerMicrophoneOverlayView.animate().cancel();
+        controllerMicrophoneOverlayView.setAlpha(0f);
+        controllerMicrophoneOverlayView.setText(muted ?
+                "DualSense microphone muted" : "DualSense microphone enabled");
+        controllerMicrophoneOverlayView.setVisibility(View.VISIBLE);
+        controllerMicrophoneOverlayView.animate().alpha(1f).setDuration(170L).start();
+        timerHandler.postDelayed(hideControllerMicrophoneOverlay, 1800L);
     }
 
     @Override

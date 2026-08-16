@@ -30,6 +30,10 @@ object DualSenseWiredOutput {
     private var initialized = false
     @Volatile private var permissionRequestPending = false
     private var headphonesConnected = false
+    // This is deliberately separate from host feedback. The DualSense mute
+    // button gates client-to-host forwarding, so its LED must remain stable
+    // even while the host updates player LEDs, triggers, or lightbar state.
+    private var microphoneMuted = false
     @Volatile private var nativeAudioRouteActive = false
 
     private val permissionReceiver = object : BroadcastReceiver() {
@@ -113,6 +117,12 @@ object DualSenseWiredOutput {
         return true
     }
 
+    @JvmStatic fun setMicrophoneMuted(muted: Boolean): Boolean {
+        synchronized(stateLock) { microphoneMuted = muted }
+        sendCurrentState()
+        return true
+    }
+
     private fun sendAudioRouteSequence(jack: Boolean) {
         // Exact PS5CTBRO sequence. These must remain separate reports: physical
         // audio route -> music-rumble route -> DSP wake. Combining the valid
@@ -148,7 +158,11 @@ object DualSenseWiredOutput {
 
         val wake = ByteArray(63)
         wake[0] = 0x02
-        wake[2] = 0x15
+        // Keep the DSP/haptics wake separate from the merged controller
+        // state. 0x14 retains lightbar/player validity but deliberately omits
+        // bit 0 (mic mute LED), so this helper cannot immediately clear a
+        // mute LED value that the merged report just applied.
+        wake[2] = 0x14
         wake[39] = 0x03
         wake[42] = 0x02
         wake[44] = 0x24
@@ -166,7 +180,8 @@ object DualSenseWiredOutput {
     private fun sendMusicRumbleWake(): Boolean {
         val wake = ByteArray(63)
         wake[0] = 0x02
-        wake[2] = 0x15
+        // Do not include the mic-LED valid bit in periodic DSP wake reports.
+        wake[2] = 0x14
         wake[39] = 0x03
         wake[42] = 0x02
         wake[44] = 0x24
@@ -265,7 +280,7 @@ object DualSenseWiredOutput {
         report[6] = if (jack) 0x00 else 0xff.toByte()
         report[7] = 0x40
         report[8] = if (jack) 0x00 else 0xff.toByte()
-        report[9] = if (config.micLed) 1 else 0
+        report[9] = if (synchronized(stateLock) { microphoneMuted }) 1 else 0
         writeTrigger(report, 11, config.rightTriggerEffect)
         writeTrigger(report, 22, config.leftTriggerEffect)
         report[39] = 0x03

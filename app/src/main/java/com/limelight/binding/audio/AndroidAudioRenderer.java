@@ -10,6 +10,7 @@ import android.media.audiofx.AudioEffect;
 import android.os.Build;
 
 import com.limelight.LimeLog;
+import com.limelight.dualsense.DualSenseAudioBridge;
 import com.limelight.nvstream.av.audio.AudioRenderer;
 import com.limelight.nvstream.jni.MoonBridge;
 
@@ -19,6 +20,7 @@ public class AndroidAudioRenderer implements AudioRenderer {
     private final boolean enableAudioFx;
 
     private AudioTrack track;
+    private int channelCount;
 
     public AndroidAudioRenderer(Context context, boolean enableAudioFx) {
         this.context = context;
@@ -90,6 +92,7 @@ public class AndroidAudioRenderer implements AudioRenderer {
                 LimeLog.severe("Decoder returned unhandled channel count");
                 return -1;
         }
+        channelCount = audioConfiguration.channelCount;
 
         LimeLog.info("Audio channel config: "+String.format("0x%X", channelConfig));
 
@@ -187,6 +190,12 @@ public class AndroidAudioRenderer implements AudioRenderer {
 
     @Override
     public void playDecodedAudio(short[] audioData) {
+        // With a wired DualSense headset attached, the native USB ISO stream
+        // becomes the audio sink. Do this before AudioTrack.write() so game
+        // audio does not leak to the phone/tablet speakers in parallel.
+        if (DualSenseAudioBridge.routeStandardStreamAudio(audioData, channelCount)) {
+            return;
+        }
         // Only queue up to 40 ms of pending audio data in addition to what AudioTrack is buffering for us.
         if (MoonBridge.getPendingAudioDuration() < 40) {
             // This will block until the write is completed. That can cause a backlog

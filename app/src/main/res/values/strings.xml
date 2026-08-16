@@ -13,7 +13,16 @@
     <string name="dualsense_audio_usb_headset">USB: headset jack + HD haptics</string>
     <string name="dualsense_audio_haptics_only">HD haptics only</string>
     <string name="dualsense_audio_off">Disabled</string>
+    <string name="category_extended_controller">Extended Controller</string>
+    <string name="title_dualsense_microphone_source">Client microphone passthrough (Apollo Extended)</string>
+    <string name="summary_dualsense_microphone_source">Forwards the selected client microphone to Apollo Extended. The DualSense mute button always gates forwarding.</string>
+    <string name="title_dualsense_microphone_enabled">Enable microphone passthrough</string>
+    <string name="summary_dualsense_microphone_enabled">Forward the selected microphone to Apollo Extended during a stream.</string>
+    <string name="dualsense_microphone_off">Disabled</string>
+    <string name="dualsense_microphone_device">Phone / tablet microphone</string>
+    <string name="dualsense_microphone_controller">DualSense USB microphone</string>
     <string name="title_dualsense_controller_volume">Controller volume</string>
+    <string name="title_dualsense_headphone_volume">Headphone volume</string>
     <string name="summary_dualsense_controller_volume">Controls DualSense speaker and headset volume for wired USB and Bluetooth Bridge modes. 100% is the calibrated clean maximum; native haptic channels are unaffected.</string>
     <!-- Shortcut strings -->
     <string name="scut_deleted_pc">PC deleted</string>

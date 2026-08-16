@@ -5,9 +5,9 @@
     app:iconSpaceReserved="false">
 
     <PreferenceCategory
-        android:key="category_video_settings"
-        android:title="@string/category_video_settings"
-        app:initialExpandedChildrenCount="3"
+        android:key="category_extended_controller"
+        android:title="@string/category_extended_controller"
+        app:initialExpandedChildrenCount="4"
         app:iconSpaceReserved="false">
         <ListPreference
             android:defaultValue="auto"
@@ -25,6 +25,27 @@
             android:summary="@string/summary_dualsense_audio_mode"
             android:title="@string/title_dualsense_audio_mode"
             app:iconSpaceReserved="false" />
+        <ListPreference
+            android:defaultValue="dualsense"
+            android:entries="@array/dualsense_microphone_source_names"
+            android:entryValues="@array/dualsense_microphone_source_values"
+            android:key="dualsense_microphone_source"
+            android:summary="@string/summary_dualsense_microphone_source"
+            android:title="@string/title_dualsense_microphone_source"
+            app:iconSpaceReserved="false" />
+        <SwitchPreference
+            android:defaultValue="false"
+            android:key="dualsense_microphone_enabled"
+            android:summary="@string/summary_dualsense_microphone_enabled"
+            android:title="@string/title_dualsense_microphone_enabled"
+            app:iconSpaceReserved="false" />
+    </PreferenceCategory>
+
+    <PreferenceCategory
+        android:key="category_video_settings"
+        android:title="@string/category_video_settings"
+        app:initialExpandedChildrenCount="3"
+        app:iconSpaceReserved="false">
         <ListPreference
             android:defaultValue="1280x720"
             android:entries="@array/resolution_names"

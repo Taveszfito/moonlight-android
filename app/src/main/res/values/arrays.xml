@@ -26,6 +26,14 @@
         <item>haptics_only</item>
         <item>off</item>
     </string-array>
+    <string-array name="dualsense_microphone_source_names">
+        <item>@string/dualsense_microphone_device</item>
+        <item>@string/dualsense_microphone_controller</item>
+    </string-array>
+    <string-array name="dualsense_microphone_source_values" translatable="false">
+        <item>device</item>
+        <item>dualsense</item>
+    </string-array>
     <string-array name="resolution_names">
         <item>@string/resolution_360p</item>
         <item>@string/resolution_480p</item>
