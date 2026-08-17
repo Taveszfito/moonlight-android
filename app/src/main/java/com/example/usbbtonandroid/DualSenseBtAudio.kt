@@ -85,6 +85,59 @@ object DualSenseBtAudioBuilder {
     }
 
     /**
+     * Arms the native Bluetooth microphone without submitting speaker media.
+     *
+     * This is the control-only 0x36 transport used by the known-good
+     * DS5Dongle microphone implementation: audio-control bit 0 enables the
+     * uplink, a complete SetStateData block keeps the controller state valid,
+     * and the silent haptics block deliberately has no speaker sub-report.
+     * The caller sends this only while waiting for incoming microphone frames.
+     */
+    fun buildMicrophoneArm(sequence: Int, packetCounter: Int,
+                           config: DualSenseOutputConfig,
+                           headsetRoute: Boolean): ByteArray {
+        val report = ByteArray(398)
+        report[0] = 0x36
+        report[1] = ((sequence and 0x0f) shl 4).toByte()
+        report[2] = 0x91.toByte()
+        report[3] = 7
+        report[4] = 0xff.toByte() // audio path plus microphone-enable (bit 0)
+        report.fill(64, 5, 10)
+        report[10] = packetCounter.toByte()
+
+        // Reuse the exact current output-state encoding instead of emitting a
+        // synthetic LED/trigger/motor snapshot. The 0x31 payload after its
+        // report header is the 63-byte SetStateData structure expected here.
+        val state = DualSenseBtOutputBuilder.build(
+            config, sequence, nativeBluetoothAudio = true, headsetRoute = headsetRoute
+        )
+        // The controller's wireless microphone transport is sensitive to the
+        // audio portion of SetStateData. Keep every host-owned field from the
+        // current merged state (LEDs, player indicators, triggers and rumble),
+        // but apply the known-good duplex profile used by DS5Dongle. In
+        // particular, do not inherit the normal report's zero headphone volume
+        // or its speaker-only preamp profile into a microphone arm packet.
+        //
+        // These offsets are relative to the 63-byte SetStateData block, which
+        // starts at byte 3 in the regular 0x31 Bluetooth output report.
+        state[7] = HEADSET_VOLUME_MAX.toByte()       // state[4]: headphone volume
+        state[8] = SPEAKER_VOLUME_SAFE.toByte()      // state[5]: speaker volume
+        state[9] = MICROPHONE_VOLUME.toByte()        // state[6]: microphone volume
+        state[10] = DUPLEX_AUDIO_CONTROL.toByte()    // state[7]: audio control
+        state[42] = SPEAKER_PREAMP_ENABLED.toByte()  // state[39]: speaker preamp
+        state[43] = DUPLEX_AUDIO_CONTROL_2.toByte()  // state[40]: audio control 2
+        report[11] = 0x90.toByte()
+        report[12] = 63
+        state.copyInto(report, destinationOffset = 13, startIndex = 3, endIndex = 66)
+
+        report[76] = 0x92.toByte()
+        report[77] = HAPTICS_BYTES_PER_REPORT.toByte()
+        // report[78..141] intentionally stays zero: silent haptics, no speaker packet.
+        fillBluetoothCrc(report)
+        return report
+    }
+
+    /**
      * Full wireless audio state packet. Bit 0 of the 0x11 config mask enables
      * the controller's Opus microphone duplex stream. It is deliberately sent
      * separately from game feedback so mic state never overwrites LEDs,
@@ -148,8 +201,23 @@ object DualSenseBtAudioBuilder {
     private const val SPEAKER_BYTES_PER_REPORT = 200
     private const val HEADSET_VOLUME_MAX = 0x7f
     private const val SPEAKER_VOLUME_SAFE = 0x64
+    private const val MICROPHONE_VOLUME = 0x40
+    private const val DUPLEX_AUDIO_CONTROL = 0x09
+    private const val SPEAKER_PREAMP_ENABLED = 0x0a
+    private const val DUPLEX_AUDIO_CONTROL_2 = 0x07
     private const val LEGACY_SPEAKER_VOLUME = 0x7f
     private const val LEGACY_SPEAKER_AUDIO_CONTROL = 0xff
     private const val SPEAKER_PREAMP_SAFE = 0x02
     private const val LEGACY_SPEAKER_PREAMP = 0x07
+
+    private fun fillBluetoothCrc(report: ByteArray) {
+        val crc = CRC32()
+        crc.update(0xa2)
+        crc.update(report, 0, report.size - 4)
+        val value = crc.value
+        report[report.size - 4] = value.toByte()
+        report[report.size - 3] = (value ushr 8).toByte()
+        report[report.size - 2] = (value ushr 16).toByte()
+        report[report.size - 1] = (value ushr 24).toByte()
+    }
 }

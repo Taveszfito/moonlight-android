@@ -9,6 +9,7 @@ import android.media.MediaRecorder
 import android.os.Build
 import com.limelight.LimeLog
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.ArrayBlockingQueue
 
 /**
  * Captures either the Android device microphone or the USB DualSense audio input,
@@ -25,7 +26,12 @@ object DualSenseMicrophoneBridge {
     @Volatile private var running = false
     private val stopRequested = AtomicBoolean(false)
     private var captureThread: Thread? = null
+    private var bluetoothDecodeThread: Thread? = null
     private var recorder: AudioRecord? = null
+    // The adapter's ACL reader is also responsible for gamepad input. Never do
+    // Opus decode or network transmission inline on that real-time USB thread.
+    private val bluetoothFrameQueue = ArrayBlockingQueue<ByteArray>(24)
+    private var bluetoothFramesDropped = 0L
 
     @JvmStatic fun configure(source: String?) {
         selectedSource = when (source) {
@@ -74,7 +80,15 @@ object DualSenseMicrophoneBridge {
             DualSenseBridge.setMicrophoneMuted(muted)
             DualSenseBridge.setBluetoothMicrophoneCapture(true)
             DualSenseWiredOutput.setMicrophoneMuted(muted)
+            bluetoothFrameQueue.clear()
+            bluetoothFramesDropped = 0
+            stopRequested.set(false)
             running = true
+            bluetoothDecodeThread = Thread(::bluetoothDecodeLoop,
+                "DualSenseBluetoothMicrophone").apply {
+                isDaemon = true
+                start()
+            }
             LimeLog.info("DualSense Bridge microphone capture armed")
             return true
         }
@@ -138,7 +152,34 @@ object DualSenseMicrophoneBridge {
     /** Called only for filtered BT Duplex 0xD4 Opus frames. */
     @JvmStatic fun onBluetoothOpusFrame(opus: ByteArray) {
         if (!running || selectedSource != SOURCE_DUALSENSE || muted || opus.isEmpty()) return
-        DualSenseMicrophoneNative.decodeBluetoothAndSend(opus)
+        // Keep the newest audio when a transient network stall occurs. This is
+        // preferable to blocking the ACL reader and losing many later HID/mic
+        // packets at the USB boundary.
+        if (!bluetoothFrameQueue.offer(opus)) {
+            bluetoothFrameQueue.poll()
+            if (!bluetoothFrameQueue.offer(opus)) return
+            bluetoothFramesDropped++
+            if (bluetoothFramesDropped == 1L || bluetoothFramesDropped % 50L == 0L) {
+                LimeLog.warning("DualSense BT microphone queue overrun: $bluetoothFramesDropped frame(s) dropped")
+            }
+        }
+    }
+
+    private fun bluetoothDecodeLoop() {
+        try {
+            while (!stopRequested.get() && running && selectedSource == SOURCE_DUALSENSE) {
+                val opus = bluetoothFrameQueue.take()
+                // This is the same lossless path used by the verified Windows
+                // client: every controller-supplied 71-byte Opus frame is sent
+                // immediately and unchanged. Do not add a second Android-side
+                // clock; the controller already owns this packet cadence.
+                if (!muted) DualSenseMicrophoneNative.forwardBluetoothOpus(opus)
+            }
+        } catch (_: InterruptedException) {
+            // Normal shutdown.
+        } catch (error: Throwable) {
+            LimeLog.warning("DualSense Bluetooth microphone worker stopped: ${error.message}")
+        }
     }
 
     private fun createRecorder(bufferSize: Int): AudioRecord? = try {
@@ -193,6 +234,10 @@ object DualSenseMicrophoneBridge {
             DualSenseBridge.setBluetoothMicrophoneCapture(false)
         }
         stopRequested.set(true)
+        bluetoothDecodeThread?.interrupt()
+        bluetoothDecodeThread?.join(300)
+        bluetoothDecodeThread = null
+        bluetoothFrameQueue.clear()
         try { recorder?.stop() } catch (_: Throwable) { }
         captureThread?.join(300)
         captureThread = null

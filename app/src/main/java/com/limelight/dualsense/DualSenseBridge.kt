@@ -65,16 +65,22 @@ object DualSenseBridge {
     // its own mic LED bit, but it must not override this global mute indicator.
     @Volatile private var microphoneMuted = false
     @Volatile private var lastStreamRelayAtMs = 0L
+    @Volatile private var streamActive = false
+    @Volatile private var streamRecoveryArmed = false
     private var lastBatteryLedPercent = -1
     @Volatile private var lowBatteryBlinkActive = false
     @Volatile private var lowBatteryBlinkShowingRed = false
     private var lowBatteryBlinkPhase = 0
     private val watchdogHandler = Handler(Looper.getMainLooper())
     @Volatile private var lastInputAtMs = 0L
+    @Volatile private var lastBluetoothMicrophoneActivityMs = 0L
     @Volatile private var activeControllerAddress: String? = null
     @Volatile private var smartRecoveryInProgress = false
     @Volatile private var adapterRecoveryPerformed = false
+    @Volatile private var recoveryOverlayStage = RECOVERY_OVERLAY_NONE
+    @Volatile private var recoveryOverlayStageAtMs = 0L
     private const val INPUT_TIMEOUT_MS = 2500L
+    private const val BLUETOOTH_MIC_ACTIVITY_UI_INTERVAL_MS = 250L
     // Preserve and rebuild the live Bluetooth link first. A complete adapter
     // restart is deliberately delayed as the final fallback.
     private const val ADAPTER_RECOVERY_DELAY_MS = 15_000L
@@ -83,6 +89,7 @@ object DualSenseBridge {
         if (!smartRecoveryInProgress || controllerConnected) return@Runnable
         val device = adapter ?: return@Runnable
         adapterRecoveryPerformed = true
+        setRecoveryOverlayStage(RECOVERY_OVERLAY_ADAPTER_RESET)
         updateStatus(s(R.string.dualsense_bridge_status_adapter_recovery))
         // Terminate the live radio link before resetting USB. Without this grace
         // period the dongle restarts, but DualSense can remain powered in a
@@ -100,7 +107,10 @@ object DualSenseBridge {
                 SystemClock.elapsedRealtime() - lastInputAtMs > INPUT_TIMEOUT_MS) {
                 recordIncident(s(R.string.dualsense_diag_input_timeout_history,
                     SystemClock.elapsedRealtime() - lastInputAtMs))
-                beginSmartRecovery()
+                // The Bridge UI must always reflect a dead HID link. Only the
+                // destructive recovery/reset path is limited to an active stream
+                // that has actually consumed this controller's input.
+                if (streamActive && streamRecoveryArmed) beginSmartRecovery()
                 markControllerDisconnected(s(R.string.dualsense_bridge_status_connection_lost))
             }
             expireStaleDiscoveredDevices()
@@ -254,6 +264,7 @@ object DualSenseBridge {
         val device = adapter ?: return@Runnable
         if (controllerConnected) return@Runnable
         appendLog("Controller disconnected; preparing clean adapter state for reconnect")
+        setRecoveryOverlayStage(RECOVERY_OVERLAY_ADAPTER_RESET)
         startController(device, true)
     }
 
@@ -293,6 +304,26 @@ object DualSenseBridge {
 
     @JvmStatic fun markStreamInputForwarded() {
         lastStreamRelayAtMs = SystemClock.elapsedRealtime()
+        // The first real relay proves that this particular stream has consumed
+        // controller input. Only then may an input timeout trigger recovery.
+        streamRecoveryArmed = true
+    }
+
+    /** Called by the stream controller, not by the Bridge settings Activity. */
+    @JvmStatic fun setStreamActive(active: Boolean) {
+        streamActive = active
+        streamRecoveryArmed = false
+        if (!active) return
+
+        // A controller that was already healthy before this stream began is not
+        // a reconnect. Clear stale recovery work instead of resetting its adapter.
+        if (controllerConnected) {
+            smartRecoveryInProgress = false
+            adapterRecoveryPerformed = false
+            watchdogHandler.removeCallbacks(adapterRecovery)
+            recoveryOverlayStage = RECOVERY_OVERLAY_NONE
+            recoveryOverlayStageAtMs = 0L
+        }
     }
 
     @JvmStatic fun getDiagnosticsSnapshot(): DiagnosticsSnapshot {
@@ -376,6 +407,21 @@ object DualSenseBridge {
 
     @JvmStatic fun stopNativeBluetoothHaptics() {
         runCatching { controller?.stopNativeBluetoothHaptics() }
+    }
+
+    /** Short-lived stream UI state; recovery itself does not depend on this UI. */
+    @JvmStatic fun getRecoveryOverlaySnapshot(): RecoveryOverlaySnapshot {
+        val age = (SystemClock.elapsedRealtime() - recoveryOverlayStageAtMs).coerceAtLeast(0L)
+        val stage = when {
+            recoveryOverlayStage == RECOVERY_OVERLAY_RECONNECTED && !controllerConnected ->
+                RECOVERY_OVERLAY_NONE
+            recoveryOverlayStage == RECOVERY_OVERLAY_READY &&
+                age > RECOVERY_OVERLAY_READY_TIMEOUT_MS -> RECOVERY_OVERLAY_NONE
+            recoveryOverlayStage == RECOVERY_OVERLAY_RECONNECTED &&
+                age > RECOVERY_OVERLAY_SUCCESS_TIMEOUT_MS -> RECOVERY_OVERLAY_NONE
+            else -> recoveryOverlayStage
+        }
+        return RecoveryOverlaySnapshot(stage, age)
     }
 
     @JvmStatic fun setBluetoothMicrophoneCapture(enabled: Boolean): Boolean =
@@ -470,6 +516,16 @@ object DualSenseBridge {
             },
             { item ->
                 val normalizedAddress = item.address.uppercase()
+                // Inquiry results usually arrive before Remote Name Request has
+                // completed. Reuse the last verified name for this MAC so the UI
+                // never falls back to "Unknown device" on a later scan. A fresh
+                // Remote Name result below still replaces this cached label.
+                val rememberedName = rememberedDeviceName(normalizedAddress)
+                val namedItem = if (isPlaceholderDeviceName(item.name) && rememberedName != null) {
+                    item.copy(name = rememberedName)
+                } else {
+                    item
+                }
                 synchronized(devicesByAddress) {
                     val ignoreUntil = ignoredDeviceCallbacksUntil[normalizedAddress] ?: 0L
                     if (SystemClock.elapsedRealtime() < ignoreUntil) {
@@ -477,28 +533,31 @@ object DualSenseBridge {
                     }
                     ignoredDeviceCallbacksUntil.remove(normalizedAddress)
                 }
-                val active = item.state == s(R.string.dualsense_bridge_state_connected_hid) ||
-                    item.state == s(R.string.dualsense_bridge_state_connected_live)
-                val inactive = item.state == s(R.string.dualsense_bridge_state_disconnected)
-                val displayed = if (inactive) item.copy(rssi = null) else item
+                val active = namedItem.state == s(R.string.dualsense_bridge_state_connected_hid) ||
+                    namedItem.state == s(R.string.dualsense_bridge_state_connected_live)
+                val inactive = namedItem.state == s(R.string.dualsense_bridge_state_disconnected)
+                val displayed = if (inactive) namedItem.copy(rssi = null) else namedItem
                 synchronized(devicesByAddress) {
                     devicesByAddress[normalizedAddress] = displayed
-                    if (active || item.state == s(R.string.dualsense_bridge_state_available)) {
+                    if (active || namedItem.state == s(R.string.dualsense_bridge_state_available)) {
                         deviceLastSeenAt[normalizedAddress] = SystemClock.elapsedRealtime()
                     }
                 }
-                if (item.name != s(R.string.dualsense_bridge_unknown_device)) saveDevice(item)
+                // Only a real Remote Name result may update the cache. Generic
+                // pairing/unknown labels must never overwrite a useful name.
+                if (!isPlaceholderDeviceName(item.name)) saveDevice(item)
                 if (active) {
-                    activeControllerAddress = item.address
+                    activeControllerAddress = namedItem.address
                 }
-                else if (inactive && item.address == activeControllerAddress) {
-                    markControllerDisconnected(item.state)
+                else if (inactive && namedItem.address == activeControllerAddress) {
+                    markControllerDisconnected(namedItem.state)
                     // The dongle demonstrably reconnects reliably only after its
                     // host/page/L2CAP state has been reinitialized. Do that while
                     // the controller is off, before it can make the next incoming
                     // connection attempt, rather than repairing a failed attempt.
                     smartRecoveryInProgress = false
                     adapterRecoveryPerformed = false
+                    setRecoveryOverlayStage(RECOVERY_OVERLAY_DISCONNECTED)
                     watchdogHandler.removeCallbacks(adapterRecovery)
                     watchdogHandler.removeCallbacks(prepareAdapterForReconnect)
                     watchdogHandler.postDelayed(
@@ -526,6 +585,11 @@ object DualSenseBridge {
                         adapterRecoveryPerformed = false
                         watchdogHandler.removeCallbacks(adapterRecovery)
                         appendLog(s(R.string.dualsense_bridge_status_recovery_success))
+                    }
+                    if (recoveryOverlayStage != RECOVERY_OVERLAY_NONE &&
+                        recoveryOverlayStage != RECOVERY_OVERLAY_RECONNECTED
+                    ) {
+                        setRecoveryOverlayStage(RECOVERY_OVERLAY_RECONNECTED)
                     }
                     lastInputAtMs = SystemClock.elapsedRealtime()
                     if (firstUsableInput) {
@@ -555,7 +619,11 @@ object DualSenseBridge {
                     inputListeners.forEach { it.onInput(input) }
                 }
             },
-            { opus -> DualSenseMicrophoneBridge.onBluetoothOpusFrame(opus) },
+            { opus, sequence ->
+                noteBluetoothMicrophoneActivity()
+                DualSenseMicrophoneBridge.onBluetoothOpusFrame(opus)
+                DualSenseBluetoothMicrophoneTest.onBluetoothOpusFrame(opus, sequence)
+            },
             { address -> keyPrefs().getString(address, null) },
             { address, key -> keyPrefs().edit().putString(address, key).apply() }
         ).also { it.start() }
@@ -569,6 +637,7 @@ object DualSenseBridge {
         if (smartRecoveryInProgress) return
         smartRecoveryInProgress = true
         adapterRecoveryPerformed = false
+        setRecoveryOverlayStage(RECOVERY_OVERLAY_LINK_REPAIR)
         appendLog(s(R.string.dualsense_bridge_status_link_recovery))
         controller?.requestLinkRecovery()
         watchdogHandler.removeCallbacks(adapterRecovery)
@@ -591,8 +660,51 @@ object DualSenseBridge {
 
     private fun updateStatus(value: String) {
         status = value
+        // HciUsbController emits this only after Page Scan has been enabled, so
+        // the controller can safely be turned back on at this point.
+        if (recoveryOverlayStage == RECOVERY_OVERLAY_ADAPTER_RESET &&
+            value == s(R.string.dualsense_bridge_status_scan_finished)
+        ) {
+            setRecoveryOverlayStage(RECOVERY_OVERLAY_READY)
+        }
         appendLog(value)
         notifyState()
+    }
+
+    /**
+     * BT microphone frames replace the regular DualSense state report while
+     * capture is active. They are still authoritative HID traffic on the live
+     * interrupt channel, so they must keep the connection watchdog alive.
+     *
+     * This is throttled because the microphone arrives at audio cadence; the
+     * UI only needs a heartbeat, not 100 main-thread jobs per second.
+     */
+    private fun noteBluetoothMicrophoneActivity() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastBluetoothMicrophoneActivityMs < BLUETOOTH_MIC_ACTIVITY_UI_INTERVAL_MS) return
+        lastBluetoothMicrophoneActivityMs = now
+        watchdogHandler.post {
+            lastInputAtMs = now
+            if (!controllerConnected) {
+                controllerConnected = true
+                status = s(R.string.dualsense_bridge_status_connected)
+                activeControllerAddress?.let { address ->
+                    synchronized(devicesByAddress) {
+                        devicesByAddress[address]?.let { device ->
+                            devicesByAddress[address] = device.copy(
+                                state = s(R.string.dualsense_bridge_state_connected_hid)
+                            )
+                        }
+                    }
+                }
+                notifyState()
+            }
+        }
+    }
+
+    private fun setRecoveryOverlayStage(stage: Int) {
+        recoveryOverlayStage = stage
+        recoveryOverlayStageAtMs = SystemClock.elapsedRealtime()
     }
 
     private fun updateBatteryLedIfNeeded(percent: Int) {
@@ -754,6 +866,13 @@ object DualSenseBridge {
     private fun ensureInitialized(context: Context) { if (!initialized) initialize(context) }
     private fun keyPrefs() = appContext.getSharedPreferences("dualsense_hci_keys", Context.MODE_PRIVATE)
 
+    private fun rememberedDeviceName(address: String): String? =
+        keyPrefs().getString("name_$address", null)?.takeUnless(::isPlaceholderDeviceName)
+
+    private fun isPlaceholderDeviceName(name: String?): Boolean = name.isNullOrBlank() ||
+        name == s(R.string.dualsense_bridge_unknown_device) ||
+        name == s(R.string.dualsense_bridge_paired_name)
+
     private fun saveDevice(device: HciUsbController.HciDevice) {
         keyPrefs().edit().putString("name_${device.address}", device.name)
             .putString("class_${device.address}", device.deviceClass).apply()
@@ -788,9 +907,22 @@ object DualSenseBridge {
         val recentIncidentLog: String
     )
 
+    data class RecoveryOverlaySnapshot(
+        val stage: Int,
+        val ageMs: Long
+    )
+
     private const val DISCOVERED_DEVICE_EXPIRY_MS = 30_000L
     private const val FORGET_CALLBACK_GUARD_MS = 5_000L
     private const val RECONNECT_PREPARE_DELAY_MS = 350L
+    private const val RECOVERY_OVERLAY_READY_TIMEOUT_MS = 20_000L
+    private const val RECOVERY_OVERLAY_SUCCESS_TIMEOUT_MS = 1_100L
+    const val RECOVERY_OVERLAY_NONE = 0
+    const val RECOVERY_OVERLAY_DISCONNECTED = 1
+    const val RECOVERY_OVERLAY_LINK_REPAIR = 2
+    const val RECOVERY_OVERLAY_ADAPTER_RESET = 3
+    const val RECOVERY_OVERLAY_READY = 4
+    const val RECOVERY_OVERLAY_RECONNECTED = 5
 
     @Suppress("DEPRECATION")
     private fun Intent.usbDevice(): UsbDevice? = if (Build.VERSION.SDK_INT >= 33) {

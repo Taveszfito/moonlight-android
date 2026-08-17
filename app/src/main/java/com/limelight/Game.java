@@ -249,11 +249,13 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     private TextView notificationOverlayView;
     private TextView controllerLowBatteryOverlayView;
     private TextView controllerMicrophoneOverlayView;
+    private TextView controllerRecoveryOverlayView;
     private TextView controllerConnectionOverlayView;
     private View controllerConnectionOverlayContainer;
     private View controllerConnectionLogClearView;
     private boolean controllerBatteryWasLow;
     private long lastControllerLowBatteryWarningMs;
+    private int lastControllerRecoveryOverlayStage = DualSenseBridge.RECOVERY_OVERLAY_NONE;
     private static final int CONTROLLER_LOW_BATTERY_PERCENT = 15;
     private static final long CONTROLLER_LOW_BATTERY_REMINDER_MS = 5 * 60 * 1000L;
     private static final int MICROPHONE_PERMISSION_REQUEST = 741;
@@ -262,6 +264,14 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             controllerMicrophoneOverlayView.animate().cancel();
             controllerMicrophoneOverlayView.animate().alpha(0f).setDuration(250L)
                     .withEndAction(() -> controllerMicrophoneOverlayView.setVisibility(View.GONE))
+                    .start();
+        }
+    };
+    private final Runnable hideControllerRecoveryOverlay = () -> {
+        if (controllerRecoveryOverlayView != null) {
+            controllerRecoveryOverlayView.animate().cancel();
+            controllerRecoveryOverlayView.animate().alpha(0f).setDuration(180L)
+                    .withEndAction(() -> controllerRecoveryOverlayView.setVisibility(View.GONE))
                     .start();
         }
     };
@@ -279,6 +289,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         @Override
         public void run() {
             refreshControllerConnectionOverlay();
+            refreshControllerRecoveryOverlay();
             if (timerHandler != null) timerHandler.postDelayed(this, 500L);
         }
     };
@@ -584,6 +595,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         notificationOverlayView = findViewById(R.id.notificationOverlay);
         controllerLowBatteryOverlayView = findViewById(R.id.controllerLowBatteryOverlay);
         controllerMicrophoneOverlayView = findViewById(R.id.controllerMicrophoneOverlay);
+        controllerRecoveryOverlayView = findViewById(R.id.controllerRecoveryOverlay);
         controllerConnectionOverlayView = findViewById(R.id.controllerConnectionOverlay);
         controllerConnectionOverlayContainer = findViewById(R.id.controllerConnectionOverlayContainer);
         controllerConnectionLogClearView = findViewById(R.id.controllerConnectionLogClear);
@@ -1949,6 +1961,63 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         controllerConnectionOverlayView.setTextColor(quality >= 85 ? 0xFFE8FFF0 :
                 quality >= 50 ? 0xFFFFF1C2 : 0xFFFFD6D6);
         controllerConnectionOverlayContainer.setVisibility(View.VISIBLE);
+    }
+
+    private void refreshControllerRecoveryOverlay() {
+        if (controllerRecoveryOverlayView == null || isFinishing()) return;
+
+        DualSenseBridge.RecoveryOverlaySnapshot snapshot =
+                DualSenseBridge.getRecoveryOverlaySnapshot();
+        int stage = snapshot.getStage();
+        if (stage == DualSenseBridge.RECOVERY_OVERLAY_NONE || prefConfig.disableWarnings) {
+            timerHandler.removeCallbacks(hideControllerRecoveryOverlay);
+            controllerRecoveryOverlayView.setVisibility(View.GONE);
+            lastControllerRecoveryOverlayStage = DualSenseBridge.RECOVERY_OVERLAY_NONE;
+            return;
+        }
+
+        String message;
+        switch (stage) {
+            case DualSenseBridge.RECOVERY_OVERLAY_DISCONNECTED:
+                message = "DualSense disconnected\nRestoring controller connection…";
+                break;
+            case DualSenseBridge.RECOVERY_OVERLAY_LINK_REPAIR:
+                message = "Restoring controller connection…\nRepairing Bluetooth link…";
+                break;
+            case DualSenseBridge.RECOVERY_OVERLAY_ADAPTER_RESET:
+                message = "Restoring controller connection…\nResetting Bluetooth adapter…";
+                break;
+            case DualSenseBridge.RECOVERY_OVERLAY_READY:
+                message = "Adapter ready\nTurn on the controller to reconnect";
+                break;
+            case DualSenseBridge.RECOVERY_OVERLAY_RECONNECTED:
+                message = "DualSense reconnected";
+                break;
+            default:
+                return;
+        }
+
+        controllerRecoveryOverlayView.setText(message);
+        boolean success = stage == DualSenseBridge.RECOVERY_OVERLAY_RECONNECTED;
+        boolean disconnected = stage == DualSenseBridge.RECOVERY_OVERLAY_DISCONNECTED;
+        controllerRecoveryOverlayView.setBackgroundResource(success ?
+                R.drawable.controller_status_overlay_green :
+                disconnected ? R.drawable.controller_low_battery_overlay_background :
+                R.drawable.controller_status_overlay_blue);
+        controllerRecoveryOverlayView.setTextColor(success ? 0xFFE8FFF0 :
+                disconnected ? 0xFFFFF2F2 : 0xFFEAF5FF);
+        if (controllerRecoveryOverlayView.getVisibility() != View.VISIBLE ||
+                stage != lastControllerRecoveryOverlayStage) {
+            timerHandler.removeCallbacks(hideControllerRecoveryOverlay);
+            controllerRecoveryOverlayView.animate().cancel();
+            controllerRecoveryOverlayView.setAlpha(0f);
+            controllerRecoveryOverlayView.setVisibility(View.VISIBLE);
+            controllerRecoveryOverlayView.animate().alpha(1f).setDuration(170L).start();
+            if (stage == DualSenseBridge.RECOVERY_OVERLAY_RECONNECTED) {
+                timerHandler.postDelayed(hideControllerRecoveryOverlay, 1_100L);
+            }
+        }
+        lastControllerRecoveryOverlayStage = stage;
     }
 
     @Override
@@ -3803,6 +3872,11 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             connecting = connected = false;
             updatePipAutoEnter();
 
+            // The microphone sender uses Moonlight's encrypted control stream.
+            // It must be stopped before conn.stop() tears that stream down;
+            // otherwise an in-flight Bluetooth mic frame can lock a destroyed
+            // native control-stream mutex.
+            DualSenseMicrophoneBridge.stop();
             controllerHandler.stop();
 
             // Update GameManager state to indicate we're no longer in game
@@ -4139,6 +4213,10 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         controllerMicrophoneOverlayView.setAlpha(0f);
         controllerMicrophoneOverlayView.setText(muted ?
                 "DualSense microphone muted" : "DualSense microphone enabled");
+        controllerMicrophoneOverlayView.setBackgroundResource(muted ?
+                R.drawable.controller_low_battery_overlay_background :
+                R.drawable.controller_status_overlay_green);
+        controllerMicrophoneOverlayView.setTextColor(muted ? 0xFFFFF2F2 : 0xFFE8FFF0);
         controllerMicrophoneOverlayView.setVisibility(View.VISIBLE);
         controllerMicrophoneOverlayView.animate().alpha(1f).setDuration(170L).start();
         timerHandler.postDelayed(hideControllerMicrophoneOverlay, 1800L);

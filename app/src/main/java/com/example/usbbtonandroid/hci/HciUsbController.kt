@@ -6,12 +6,16 @@ import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
+import android.hardware.usb.UsbRequest
 import android.os.SystemClock
 import android.os.Process
 import com.limelight.R
 import java.io.Closeable
+import java.nio.ByteBuffer
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.LockSupport
@@ -24,7 +28,7 @@ class HciUsbController(
     private val onStatus: (String) -> Unit,
     private val onDevice: (HciDevice) -> Unit,
     private val onAclPacket: (AclPacket) -> Unit,
-    private val onDualSenseMicrophoneFrame: (ByteArray) -> Unit,
+    private val onDualSenseMicrophoneFrame: (ByteArray, Int) -> Unit,
     private val loadLinkKey: (String) -> String?,
     private val saveLinkKey: (String, String) -> Unit
 ) : Closeable {
@@ -47,9 +51,14 @@ class HciUsbController(
     @Volatile private var outputConnectionEpoch = 0L
     private val discoveredDevices = linkedMapOf<String, InquiryDevice>()
     @Volatile private var pendingConnection: InquiryDevice? = null
+    @Volatile private var pendingIncomingConnection: InquiryDevice? = null
     @Volatile private var authorizedPairingAddress: String? = null
     @Volatile private var pendingDiscovery = false
     @Volatile private var pendingLinkRecovery = false
+    // All HCI commands are deliberately issued by the one event worker.  This
+    // generation lets a newer UI action interrupt the long event waits of an
+    // older operation without introducing a second, racing command writer.
+    private val controlGeneration = AtomicLong(0)
     @Volatile private var activeDevice: InquiryDevice? = null
     @Volatile private var activeHandle: Int? = null
     @Volatile private var encryptedAtMs = 0L
@@ -74,11 +83,21 @@ class HciUsbController(
     @Volatile private var nativeBluetoothHapticsRequested = false
     @Volatile private var nativeBluetoothMicrophoneRequested = false
     @Volatile private var nativeBluetoothHeadsetRoute = false
+    @Volatile private var lastBluetoothMicrophoneFrameMs = 0L
+    private var lastBluetoothMicrophoneArmMs = 0L
     private var nativeAudioWakeEpoch = -1L
     @Volatile private var lastOutputErrorLogMs = 0L
     private var droppedInputPackets = 0L
     @Volatile private var lastActiveDevicePublishMs = 0L
     @Volatile private var lastAclLogMs = 0L
+    private var btMicFramesSinceLog = 0
+    private var btMicSequenceGapsSinceLog = 0
+    private val btMicSequenceDeltaCounts = IntArray(16)
+    private var btMicLastSequence = -1
+    private var btMicLastLogMs = 0L
+    private var btMicCandidateFramesSinceLog = 0
+    private var btMicCandidateLastLogMs = 0L
+    private val btMicCandidateTocCounts = IntArray(256)
     @Volatile private var lastUsbAclAtMs = 0L
     @Volatile private var lastHidInputElapsedMs = 0L
     @Volatile private var linkQualityPercent = 100
@@ -92,12 +111,23 @@ class HciUsbController(
     @Volatile private var postConnectTuningStage = 0
     @Volatile private var postConnectTuningAtMs = 0L
     @Volatile private var lastExitLowPowerModeAtMs = 0L
+    // HCI Mode Change uses 0 for active and 2 for sniff mode. Keep the last
+    // adapter-confirmed value rather than assuming that a successfully written
+    // command actually changed the radio schedule.
+    @Volatile private var currentLinkMode = LINK_MODE_UNKNOWN
+    @Volatile private var microphoneActiveModeRequested = false
     // Read from the adapter during startup. Native DualSense audio reports are
     // larger than the ACL buffer exposed by a number of inexpensive dongles.
     @Volatile private var aclDataPacketLength = DEFAULT_ACL_DATA_PACKET_LENGTH
     @Volatile private var aclPacketCapacity = 0
     private val aclPacketsSent = AtomicLong(0)
     private val aclPacketsCompleted = AtomicLong(0)
+    // Controller-to-host flow control is enabled during adapter startup. This
+    // counter returns HCI ACL buffer credits to the dongle after a packet has
+    // been fully consumed by this reader.
+    @Volatile private var controllerToHostFlowControlEnabled = false
+    private var hostCompletedAclHandle = -1
+    private var hostCompletedAclPackets = 0
     // Signaling is received on the ACL reader while fallback/recovery runs on
     // the HCI event worker. These maps must never be ordinary mutable maps.
     private val pendingChannels = ConcurrentHashMap<Int, L2capChannel>()
@@ -137,15 +167,27 @@ class HciUsbController(
                 )
             }
 
+            // The USB dongle used by the bridge has a small receive-side ACL
+            // pool. With controller-to-host flow control left at its implicit
+            // default it can discard a periodic incoming packet before this
+            // raw HCI host has a chance to read it. Advertise a bounded host
+            // queue and explicitly return credits after parsing each batch.
+            // This must happen before the first ACL connection exists.
+            configureControllerToHostAclFlowControl()
+
             // Always use the proven standalone startup path. Skipping inquiry on
             // recovery leaves cheap HCI dongles with stale page/clock state and
             // produces an ACL link that often never becomes a usable HID session.
+            // Page Scan must be active *before* inquiry/name resolution. A
+            // controller-initiated reconnect is otherwise invisible until the
+            // potentially long discovery pass completes.
+            enableIncomingConnections()
             onStatus(text(R.string.dualsense_bridge_status_classic_scan))
             sendCommand(0x0401, byteArrayOf(0x33, 0x8B.toByte(), 0x9E.toByte(), 0x08, 0x00))
-            val discovered = resolveRemoteNames(scanUntilComplete())
+            val generation = controlGeneration.get()
+            val discovered = resolveRemoteNames(scanUntilComplete(generation), generation)
             discoveredDevices.clear()
             discovered.forEach { discoveredDevices[it.address] = it }
-            enableIncomingConnections()
             onStatus(text(R.string.dualsense_bridge_status_scan_finished))
             hostLoop()
         } catch (t: Throwable) {
@@ -160,7 +202,7 @@ class HciUsbController(
         val normalizedAddress = address.uppercase()
         val current = activeDevice
         val handle = activeHandle
-        if (handle != null && current?.address == address) {
+        if (handle != null && current?.address?.uppercase() == normalizedAddress) {
             if (hidChannelsReady) {
                 onStatus(text(R.string.dualsense_bridge_status_already_connected))
             } else if (!hasHidChannelProgress()) {
@@ -176,6 +218,9 @@ class HciUsbController(
             return
         }
         if (loadLinkKey(normalizedAddress) == null) authorizedPairingAddress = normalizedAddress
+        // A direct controller choice must never wait behind an inquiry.
+        pendingDiscovery = false
+        controlGeneration.incrementAndGet()
         pendingConnection = discoveredDevices[normalizedAddress] ?: InquiryDevice(
             address = normalizedAddress,
             addressLittleEndian = addressToLittleEndian(normalizedAddress),
@@ -186,12 +231,22 @@ class HciUsbController(
             rssi = null,
             name = name
         )
+        if (handle != null && current != null && current.address != normalizedAddress) {
+            onLog("Switching controller → disconnecting ${current.address} before connecting $normalizedAddress")
+            // connect() is called from the UI thread. Keep the actual HCI write
+            // on the event worker by queuing its normal disconnect intent.
+            pendingDisconnectAddress = current.address.uppercase()
+        }
         onStatus(text(R.string.dualsense_bridge_status_preparing_connection))
     }
 
     @Volatile private var pendingDisconnectAddress: String? = null
 
     fun disconnect(address: String) {
+        // Disconnect is a user override too: stop a pending scan/connect first.
+        pendingDiscovery = false
+        pendingConnection = null
+        controlGeneration.incrementAndGet()
         pendingDisconnectAddress = address.uppercase()
     }
 
@@ -210,6 +265,8 @@ class HciUsbController(
     }
 
     fun requestDiscovery() {
+        // Restart rather than queue discovery behind an older operation.
+        controlGeneration.incrementAndGet()
         pendingDiscovery = true
     }
 
@@ -258,11 +315,16 @@ class HciUsbController(
 
     fun setNativeBluetoothMicrophoneCapture(enabled: Boolean): Boolean {
         nativeBluetoothMicrophoneRequested = enabled
-        // Keep the main 0x31 state report in the same audio-enabled shape as
-        // the duplex setup. This prevents an unrelated LED/battery update from
-        // clearing audio-control fields between microphone frames.
+        microphoneActiveModeRequested = enabled
+        // The controller does not document a reliable BT mic-stop command.
+        // Once armed, stop forwarding on the client side; do not inject a
+        // speculative status packet that can reset its live audio path.
+        if (!enabled) return activeHandle != null && hidInterruptRemoteCid != null
+        lastBluetoothMicrophoneFrameMs = 0L
+        lastBluetoothMicrophoneArmMs = 0L
+        val queued = queueNativeBluetoothSetup()
         outputSignal.offer(Unit)
-        return queueNativeBluetoothSetup()
+        return queued
     }
 
     fun setNativeBluetoothHeadsetRoute(enabled: Boolean): Boolean {
@@ -286,7 +348,8 @@ class HciUsbController(
         if (activeHandle == null || hidInterruptRemoteCid == null || lastHidInputMs == 0L) {
             return false
         }
-        val setup = NativeAudioPayload(ByteArray(64), null, configurationOnly = true)
+        val setup = NativeAudioPayload(ByteArray(64), null, configurationOnly = true,
+            microphoneArm = true)
         if (audioQueue.offer(setup)) return true
         audioQueue.poll()
         return audioQueue.offer(setup)
@@ -300,18 +363,6 @@ class HciUsbController(
     private fun hostLoop() {
         var lastLinkCheck = 0L
         while (running.get()) {
-            if (pendingDiscovery) {
-                pendingDiscovery = false
-                if (activeHandle == null) {
-                    runCatching { performLiveDiscovery() }.onFailure {
-                        onLog("Live inquiry failed: ${it.message ?: it.javaClass.simpleName}")
-                        onStatus(text(R.string.dualsense_bridge_status_probe_failed))
-                        runCatching { enableIncomingConnections() }
-                    }
-                } else {
-                    onStatus(text(R.string.dualsense_bridge_status_already_connected))
-                }
-            }
             if (pendingLinkRecovery) {
                 pendingLinkRecovery = false
                 val handle = activeHandle
@@ -329,12 +380,56 @@ class HciUsbController(
                     }
                 }
             }
+            pendingIncomingConnection?.let { target ->
+                pendingIncomingConnection = null
+                // An incoming page can win while the user has just tapped the
+                // same controller. The physical ACL link is then already being
+                // established; retaining the manual request would start a
+                // second Create Connection after pairing and block the event
+                // worker until its 45-second timeout.
+                if (pendingConnection?.address?.uppercase() == target.address.uppercase()) {
+                    pendingConnection = null
+                    onLog("Incoming controller link superseded matching Connect request")
+                }
+                runCatching { connectAndPair(target, incomingAddress = target.addressLittleEndian) }.onFailure {
+                    onLog("Incoming connection failed: ${it.message ?: it.javaClass.simpleName}")
+                }
+            }
             pendingConnection?.let { target ->
+                // A connection being torn down must finish its Disconnect Complete
+                // event before the adapter is asked to page another controller.
+                if (activeHandle != null && activeDevice?.address?.uppercase() != target.address.uppercase()) {
+                    return@let
+                }
+                if (activeHandle != null && activeDevice?.address?.uppercase() == target.address.uppercase()) {
+                    // The HCI link was completed by the controller while this
+                    // UI request was queued. Do not page an already-connected
+                    // controller again; the normal post-encryption path will
+                    // open HID on the next event-worker pass.
+                    pendingConnection = null
+                    onLog("Connect request consumed: ${target.address} already has an active HCI link")
+                    return@let
+                }
                 pendingConnection = null
-                runCatching { connectAndPair(target) }.onFailure {
+                val generation = controlGeneration.get()
+                runCatching { connectAndPair(target, operationGeneration = generation) }.onFailure {
+                    if (it is OperationSupersededException) return@onFailure
                     onLog("HIBA: ${it.message ?: it.javaClass.simpleName}")
                     onStatus(text(R.string.dualsense_bridge_status_connection_failed))
                     publishDevice(target, "Sikertelen")
+                }
+            }
+            if (pendingDiscovery) {
+                pendingDiscovery = false
+                if (activeHandle == null) {
+                    val generation = controlGeneration.get()
+                    runCatching { performLiveDiscovery(generation) }.onFailure {
+                        onLog("Live inquiry failed: ${it.message ?: it.javaClass.simpleName}")
+                        onStatus(text(R.string.dualsense_bridge_status_probe_failed))
+                        runCatching { enableIncomingConnections() }
+                    }
+                } else {
+                    onStatus(text(R.string.dualsense_bridge_status_already_connected))
                 }
             }
             val now = System.currentTimeMillis()
@@ -344,6 +439,12 @@ class HciUsbController(
             ) {
                 applyNextPostConnectTuning(active, now)
             }
+            // Do not force a mode transition while the DualSense Bluetooth
+            // microphone is active.  The controller's own scheduling is part
+            // of its 100 Hz Opus uplink: forcing Exit Sniff was measured to
+            // collapse a healthy ~100 frame/s capture to ~40 frame/s once the
+            // transition completed.  Normal gamepad recovery still uses the
+            // mode-change handler below when microphone capture is inactive.
             if (active != null && hidChannelReopenAtMs != 0L && now >= hidChannelReopenAtMs) {
                 hidChannelReopenAtMs = 0L
                 hidOpenAttempted = false
@@ -434,23 +535,50 @@ class HciUsbController(
                 }
                 0x05 -> handleDisconnection(event.parameters)
                 0x14 -> handleModeChange(event.parameters)
-                0x0E -> handleLinkCheckResult(event.parameters)
+                0x0E -> handleCommandComplete(event.parameters)
+                0x0F -> handleCommandStatus(event.parameters)
             }
         }
     }
 
-    private fun performLiveDiscovery() {
+    private fun performLiveDiscovery(generation: Long) {
         onStatus(text(R.string.dualsense_bridge_status_classic_scan))
         onLog("Live HCI Inquiry → clearing stale discovery cache")
         discoveredDevices.clear()
+        // Keep paired controllers pageable during both inquiry and the remote
+        // name requests that follow it.
+        enableIncomingConnections()
         sendCommand(0x0401, byteArrayOf(
             0x33, 0x8B.toByte(), 0x9E.toByte(), 0x08, 0x00
         ))
-        val discovered = resolveRemoteNames(scanUntilComplete())
+        val discovered = resolveRemoteNames(scanUntilComplete(generation), generation)
         discovered.forEach { discoveredDevices[it.address] = it }
-        enableIncomingConnections()
         onStatus(text(R.string.dualsense_bridge_status_scan_finished))
         onLog("Live HCI Inquiry complete → ${discovered.size} device(s)")
+    }
+
+    private fun handleCommandComplete(parameters: ByteArray) {
+        if (parameters.size < 4) return
+        val opcode = parameters.le16(1)
+        val status = parameters[3].u8()
+        when (opcode) {
+            0x1405 -> handleLinkCheckResult(parameters)
+            0x080D, 0x0C37 -> onLog(
+                "HCI link command 0x${opcode.hex4()} " +
+                    if (status == 0) "confirmed" else "rejected: status=0x${status.hex2()}"
+            )
+        }
+    }
+
+    private fun handleCommandStatus(parameters: ByteArray) {
+        if (parameters.size < 4) return
+        val opcode = parameters.le16(2)
+        if (opcode != 0x0804) return
+        val status = parameters[0].u8()
+        onLog(
+            "HCI Exit Sniff " +
+                if (status == 0) "accepted; waiting for Mode Change" else "rejected: status=0x${status.hex2()}"
+        )
     }
 
     private fun handleLinkCheckResult(parameters: ByteArray) {
@@ -504,6 +632,8 @@ class HciUsbController(
         postConnectTuningStage = 0
         postConnectTuningAtMs = 0L
         lastExitLowPowerModeAtMs = 0L
+        currentLinkMode = LINK_MODE_UNKNOWN
+        microphoneActiveModeRequested = false
         pendingChannels.clear()
         pendingConfigs.clear()
         channelsByLocalCid.clear()
@@ -637,7 +767,22 @@ class HciUsbController(
         var nextSendAtNs = 0L
         while (running.get()) {
             try {
-                var audio = audioQueue.take()
+                var audio = audioQueue.poll(MICROPHONE_ARM_POLL_MS, TimeUnit.MILLISECONDS)
+                if (audio == null) {
+                    val nowMs = SystemClock.elapsedRealtime()
+                    val microphoneStalled = nativeBluetoothMicrophoneRequested &&
+                        (lastBluetoothMicrophoneFrameMs == 0L ||
+                            nowMs - lastBluetoothMicrophoneFrameMs >= MICROPHONE_STALE_MS)
+                    if (!microphoneStalled || nowMs - lastBluetoothMicrophoneArmMs <
+                        MICROPHONE_ARM_INTERVAL_MS) {
+                        continue
+                    }
+                    // Match the known-good DS5Dongle control-only transport:
+                    // at most 4 Hz while arming, then no traffic once the DS5
+                    // starts its sticky Opus uplink.
+                    audio = NativeAudioPayload(ByteArray(64), null,
+                        configurationOnly = true, microphoneArm = true)
+                }
                 // Moonlight packets may arrive in short bursts. Feeding that burst
                 // directly into the Bluetooth radio makes the controller speaker
                 // alternate between buffer overrun and underrun. Keep only the most
@@ -673,7 +818,12 @@ class HciUsbController(
                 // than delivering an obsolete waveform after it has starved
                 // buttons, sticks, or motion input.
                 val hidAgeMs = SystemClock.elapsedRealtime() - lastHidInputElapsedMs
-                if (lastHidInputElapsedMs != 0L && hidAgeMs >= AUDIO_HID_PRIORITY_AGE_MS) {
+                // A state transition (mic enable/disable or headset route) is
+                // not disposable real-time media. In particular, dropping the
+                // final mic-disable report leaves the DualSense in an active
+                // audio state and it eventually tears down the ACL link.
+                if (!audio.configurationOnly && lastHidInputElapsedMs != 0L &&
+                    hidAgeMs >= AUDIO_HID_PRIORITY_AGE_MS) {
                     nativeAudioReportsSkippedForInput++
                     if (nativeAudioReportsSkippedForInput == 1L ||
                         nativeAudioReportsSkippedForInput % 100L == 0L) {
@@ -683,7 +833,7 @@ class HciUsbController(
                     continue
                 }
                 val epoch = outputConnectionEpoch
-                if (nativeAudioWakeEpoch != epoch) {
+                if (nativeAudioWakeEpoch != epoch && !audio.configurationOnly) {
                     // Use the same narrow audio-only configuration for initial
                     // activation as for mic and headset transitions. The old
                     // broad 0x32 wake snapshot carried independent LED and
@@ -700,13 +850,21 @@ class HciUsbController(
                     onLog("DualSense native Bluetooth audio/haptics path enabled")
                 }
                 if (audio.configurationOnly) {
-                    val setup = com.example.usbbtonandroid.DualSenseBtAudioBuilder.buildDuplexSetup(
-                        nextOutputSequence(), nativeBluetoothMicrophoneRequested,
-                        nativeBluetoothHeadsetRoute)
-                    sendAcl(handle, cid, byteArrayOf(0xa2.toByte()) + setup,
+                    if (!audio.microphoneArm || !nativeBluetoothMicrophoneRequested) continue
+                    // The standalone bridge microphone diagnostic has no
+                    // Apollo feedback yet. Use the bridge's neutral controller
+                    // state in that case; during a stream the latest host state
+                    // still takes precedence and is copied byte-for-byte.
+                    val config = latestOutputConfig
+                        ?: com.example.usbbtonandroid.DualSenseOutputConfig()
+                    audioPacketCounter = (audioPacketCounter + 1) and 0xff
+                    val arm = com.example.usbbtonandroid.DualSenseBtAudioBuilder
+                        .buildMicrophoneArm(nextOutputSequence(), audioPacketCounter, config,
+                            nativeBluetoothHeadsetRoute)
+                    sendAcl(handle, cid, byteArrayOf(0xa2.toByte()) + arm,
                         AUDIO_WRITE_TIMEOUT_MS, false)
-                    sendAmplifiedBluetoothSpeakerSetup(handle, cid)
-                    onLog("DualSense BT audio setup: mic=${nativeBluetoothMicrophoneRequested}")
+                    lastBluetoothMicrophoneArmMs = SystemClock.elapsedRealtime()
+                    onLog("DualSense BT microphone arm sent; waiting for native Opus uplink")
                     continue
                 }
                 audioPacketCounter = (audioPacketCounter + 1) and 0xff
@@ -793,14 +951,56 @@ class HciUsbController(
         // every report. This keeps GC away from the real-time input edge.
         val pending = ByteArray(MAX_USB_CARRY_BYTES)
         var pendingSize = 0
+        val conn = connection ?: return
+        val endpoint = aclIn ?: return
+        val requests = ArrayList<UsbRequest>(ACL_USB_REQUEST_COUNT)
+        try {
+            repeat(ACL_USB_REQUEST_COUNT) {
+                val request = UsbRequest()
+                check(request.initialize(conn, endpoint)) { "ACL USB request initialization failed" }
+                val buffer = ByteBuffer.allocate(ACL_USB_REQUEST_BYTES)
+                request.clientData = buffer
+                check(request.queue(buffer)) { "ACL USB request queue failed" }
+                requests += request
+            }
+            onLog("ACL asynchronous receive ring armed: $ACL_USB_REQUEST_COUNT request(s)")
+        } catch (error: Throwable) {
+            requests.forEach { request ->
+                runCatching { request.cancel() }
+                runCatching { request.close() }
+            }
+            onLog("ACL asynchronous receive setup failed: ${error.message ?: error.javaClass.simpleName}")
+            return
+        }
+        try {
         while (running.get()) {
             if (pendingSize == pending.size) {
                 onLog("ACL carry buffer full ($pendingSize); reset")
                 pendingSize = 0
             }
-            val size = connection?.bulkTransfer(
-                aclIn, pending, pendingSize, pending.size - pendingSize, ACL_READ_TIMEOUT_MS
-            ) ?: -1
+            val request = try {
+                conn.requestWait(ACL_READ_TIMEOUT_MS.toLong())
+            } catch (_: TimeoutException) {
+                continue
+            } catch (error: Throwable) {
+                if (running.get()) onLog("ACL USB request wait failed: ${error.message ?: error.javaClass.simpleName}")
+                break
+            } ?: continue
+            val buffer = request.clientData as? ByteBuffer ?: continue
+            val size = buffer.position()
+            if (size > 0 && pendingSize + size > pending.size) {
+                onLog("ACL carry buffer overflow ($pendingSize + $size); reset")
+                pendingSize = 0
+            }
+            if (size > 0) {
+                buffer.flip()
+                buffer.get(pending, pendingSize, size)
+            }
+            buffer.clear()
+            if (running.get() && !request.queue(buffer)) {
+                onLog("ACL USB request requeue failed")
+                break
+            }
             if (size <= 0) continue
             lastUsbAclAtMs = SystemClock.elapsedRealtime()
             pendingSize += size
@@ -853,16 +1053,73 @@ class HciUsbController(
                 val isHidInput = cid != null && cid != 0x0001 &&
                     payload.firstOrNull()?.u8() == 0xA1
                 // Bluetooth Duplex audio is sent by the DualSense on the same
-                // 0x31 input-report path as gamepad state. Its Opus TOC is D4
-                // at report offset 3 (payload offset 4 including the A1 HID
+                // 0x31 input-report path as gamepad state. A microphone frame
+                // is tagged by bit 1 of report byte 2 and contains exactly one
+                // 71-byte Opus packet at report offset 4 (including the A1 HID
                 // input prefix). Never enqueue it as a controller report: it
                 // otherwise becomes phantom stick/button input at mic rate.
-                val isDualSenseMicrophoneFrame = isHidInput && payload.size > 8 &&
-                    payload[1].u8() == 0x31 && payload[4].u8() == 0xD4
+                //
+                // Do not infer the Opus size from the Bluetooth report tail.
+                // The tail also carries report/checksum data, and treating it
+                // as compressed audio corrupts the Opus frame boundaries.
+                val microphoneOpusOffset = 4
+                val microphoneOpusSize = 71
+                val isDualSenseMicrophoneCandidate = isHidInput &&
+                    payload.size >= microphoneOpusOffset + microphoneOpusSize &&
+                    payload[1].u8() == 0x31
+                if (isDualSenseMicrophoneCandidate) {
+                    btMicCandidateFramesSinceLog++
+                    btMicCandidateTocCounts[payload[microphoneOpusOffset].u8()]++
+                    if (now - btMicCandidateLastLogMs >= 1000L) {
+                        val topTocs = btMicCandidateTocCounts.indices
+                            .filter { btMicCandidateTocCounts[it] > 0 }
+                            .sortedByDescending { btMicCandidateTocCounts[it] }
+                            .take(4)
+                            .joinToString { toc -> "%02X:%d".format(toc, btMicCandidateTocCounts[toc]) }
+                        onLog("BT mic candidates → $btMicCandidateFramesSinceLog frame/s, TOC [$topTocs]")
+                        btMicCandidateFramesSinceLog = 0
+                        btMicCandidateTocCounts.fill(0)
+                        btMicCandidateLastLogMs = now
+                    }
+                }
+                val isDualSenseMicrophoneFrame = isDualSenseMicrophoneCandidate &&
+                    // Same discriminator used by SDL's working Windows
+                    // DualSense Bluetooth implementation.  The byte following
+                    // report ID 0x31 is a dedicated mic tag; the apparent Opus
+                    // first byte is not a report-type discriminator.
+                    (payload[2].u8() and 0x02) != 0
                 if (isDualSenseMicrophoneFrame) {
-                    // Strip A1 and the trailing Bluetooth report CRC. The Opus
-                    // packet intentionally retains its D4 TOC byte.
-                    onDualSenseMicrophoneFrame(payload.copyOfRange(4, payload.size - 4))
+                    val micSequence = payload[3].u8()
+                    if (btMicLastSequence >= 0) {
+                        val delta = (micSequence - btMicLastSequence) and 0xFF
+                        if (delta > 1) btMicSequenceGapsSinceLog += delta - 1
+                        if (delta in btMicSequenceDeltaCounts.indices) {
+                            btMicSequenceDeltaCounts[delta]++
+                        }
+                    }
+                    btMicLastSequence = micSequence
+                    btMicFramesSinceLog++
+                    if (now - btMicLastLogMs >= 1000L) {
+                        onLog(
+                            "BT mic RX → $btMicFramesSinceLog frame/s, " +
+                                "$btMicSequenceGapsSinceLog sequence gap(s), seq=$micSequence, delta=" +
+                                btMicSequenceDeltaCounts.indices
+                                    .filter { btMicSequenceDeltaCounts[it] > 0 }
+                                    .joinToString(",") { "$it:${btMicSequenceDeltaCounts[it]}" }
+                        )
+                        btMicFramesSinceLog = 0
+                        btMicSequenceGapsSinceLog = 0
+                        btMicSequenceDeltaCounts.fill(0)
+                        btMicLastLogMs = now
+                    }
+                    onDualSenseMicrophoneFrame(
+                        payload.copyOfRange(
+                            microphoneOpusOffset,
+                            microphoneOpusOffset + microphoneOpusSize
+                        ),
+                        micSequence
+                    )
+                    lastBluetoothMicrophoneFrameMs = now
                 }
                 if (isHidInput) {
                     val previousHidInputMs = lastHidInputMs
@@ -899,6 +1156,7 @@ class HciUsbController(
                             text(R.string.dualsense_bridge_state_connected_hid), paired = true) }
                     }
                 }
+                acknowledgeCompletedAclPacket(handle)
                 if (isHidInput && !isDualSenseMicrophoneFrame) enqueueInput(packet)
                 offset = packetEnd
             }
@@ -908,6 +1166,12 @@ class HciUsbController(
                     System.arraycopy(pending, offset, pending, 0, remaining)
                 }
                 pendingSize = remaining
+            }
+        }
+        } finally {
+            requests.forEach { request ->
+                runCatching { request.cancel() }
+                runCatching { request.close() }
             }
         }
     }
@@ -939,16 +1203,97 @@ class HciUsbController(
             if (event.code == 0x0F && event.parameters.size >= 4 &&
                 event.parameters.le16(2) == opcode && event.parameters[0].u8() != 0
             ) error("HCI 0x${opcode.hex4()} status=0x${event.parameters[0].u8().hex2()}")
+            if (event.code == 0x04) {
+                // Do not lose a controller's reconnect request while this
+                // helper is waiting for a harmless adapter command completion.
+                queueIncomingConnection(event.parameters)
+            }
         }
         error("HCI 0x${opcode.hex4()} időtúllépés")
     }
 
-    private fun scanUntilComplete(): List<InquiryDevice> {
+    /**
+     * Tell the raw USB HCI adapter how much incoming ACL data this host can
+     * retain, then enable the standard controller-to-host credit mechanism.
+     *
+     * This is intentionally negotiated before inquiry/pairing because the HCI
+     * specification only permits changing it while no connection exists.
+     */
+    private fun configureControllerToHostAclFlowControl() {
+        controllerToHostFlowControlEnabled = false
+        hostCompletedAclHandle = -1
+        hostCompletedAclPackets = 0
+        runCatching {
+            // HCI_Host_Buffer_Size: 679-byte ACL packets, 32 host slots, no SCO.
+            // 679 matches the adapter's reported ACL maximum on this bridge.
+            requireCommandComplete(0x0C33, byteArrayOf(
+                (HOST_ACL_BUFFER_BYTES and 0xFF).toByte(),
+                (HOST_ACL_BUFFER_BYTES ushr 8).toByte(),
+                0x00,
+                (HOST_ACL_BUFFER_PACKETS and 0xFF).toByte(),
+                (HOST_ACL_BUFFER_PACKETS ushr 8).toByte(),
+                0x00, 0x00
+            ))
+            requireCommandComplete(0x0C31, byteArrayOf(0x01))
+            controllerToHostFlowControlEnabled = true
+            onLog("HCI controller→host ACL flow control enabled")
+        }.onFailure { error ->
+            // The HCI default is unlimited controller→host delivery. Keep that
+            // safe fallback for adapters that do not implement this optional
+            // BR/EDR command rather than failing bridge startup.
+            onLog("HCI controller→host flow control unavailable: " +
+                (error.message ?: error.javaClass.simpleName))
+        }
+    }
+
+    /** Returns controller-to-host ACL credits in small batches without logging. */
+    private fun acknowledgeCompletedAclPacket(handle: Int) {
+        if (!controllerToHostFlowControlEnabled || handle == 0) return
+        if (hostCompletedAclHandle != handle) {
+            flushCompletedAclPackets()
+            hostCompletedAclHandle = handle
+        }
+        hostCompletedAclPackets++
+        if (hostCompletedAclPackets >= HOST_ACL_COMPLETION_BATCH) {
+            flushCompletedAclPackets()
+        }
+    }
+
+    private fun flushCompletedAclPackets() {
+        val handle = hostCompletedAclHandle
+        val completed = hostCompletedAclPackets
+        if (!controllerToHostFlowControlEnabled || handle < 0 || completed <= 0) return
+        hostCompletedAclPackets = 0
+        runCatching {
+            // HCI_Host_Number_Of_Completed_Packets is explicitly allowed at
+            // any time during a connection and has no completion event.
+            sendCommand(0x0C35, byteArrayOf(
+                0x01,
+                handle.toByte(), (handle ushr 8).toByte(),
+                completed.toByte(), (completed ushr 8).toByte()
+            ), logPacket = false)
+        }.onFailure { error ->
+            controllerToHostFlowControlEnabled = false
+            onLog("HCI controller→host credit return failed; disabled: " +
+                (error.message ?: error.javaClass.simpleName))
+        }
+    }
+
+    private fun scanUntilComplete(operationGeneration: Long): List<InquiryDevice> {
         val discovered = linkedMapOf<String, InquiryDevice>()
         val deadline = System.currentTimeMillis() + INQUIRY_TIMEOUT_MS
         while (running.get() && System.currentTimeMillis() < deadline) {
+            if (controlGeneration.get() != operationGeneration) {
+                cancelInquiryForNewOperation()
+                return discovered.values.toList()
+            }
             val event = readEvent(1000) ?: continue
             when (event.code) {
+                0x04 -> {
+                    queueIncomingConnection(event.parameters)
+                    cancelInquiryForNewOperation()
+                    return discovered.values.toList()
+                }
                 0x01 -> {
                     val status = event.parameters.firstOrNull()?.u8() ?: -1
                     if (status != 0) error("Inquiry Complete status=0x${status.hex2()}")
@@ -1016,10 +1361,13 @@ class HciUsbController(
         reportDevice(address, deviceClass, rssi, name)
     }
 
-    private fun resolveRemoteNames(devices: List<InquiryDevice>): List<InquiryDevice> {
+    private fun resolveRemoteNames(
+        devices: List<InquiryDevice>,
+        operationGeneration: Long
+    ): List<InquiryDevice> {
         val resolved = devices.toMutableList()
         devices.filter { it.name.isNullOrBlank() }.forEachIndexed { index, device ->
-            if (!running.get()) return resolved
+            if (!running.get() || controlGeneration.get() != operationGeneration) return resolved
             onStatus(text(R.string.dualsense_bridge_status_resolving_name,
                 index + 1, devices.size))
             onLog("Remote Name Request → ${device.address}")
@@ -1033,7 +1381,13 @@ class HciUsbController(
 
             val deadline = System.currentTimeMillis() + REMOTE_NAME_TIMEOUT_MS
             while (running.get() && System.currentTimeMillis() < deadline) {
+                if (controlGeneration.get() != operationGeneration) return resolved
                 val event = readEvent(1000) ?: continue
+                if (event.code == 0x04) {
+                    queueIncomingConnection(event.parameters)
+                    cancelRemoteNameRequest(device)
+                    return resolved
+                }
                 if (event.code == 0x0F && event.parameters.size >= 4 &&
                     event.parameters.le16(2) == 0x0419 &&
                     event.parameters[0].u8() != 0
@@ -1064,12 +1418,25 @@ class HciUsbController(
         return resolved
     }
 
-    private fun connectAndPair(device: InquiryDevice, incomingAddress: ByteArray? = null) {
+    private fun connectAndPair(
+        device: InquiryDevice,
+        incomingAddress: ByteArray? = null,
+        operationGeneration: Long = controlGeneration.get()
+    ) {
+        if (incomingAddress != null &&
+            pendingConnection?.address?.uppercase() == device.address.uppercase()
+        ) {
+            pendingConnection = null
+            onLog("Incoming controller link superseded matching Connect request")
+        }
         onStatus(text(R.string.dualsense_bridge_status_connecting_device, device.name ?: "DualSense"))
         publishDevice(device, text(R.string.dualsense_bridge_state_connecting))
         if (incomingAddress != null) {
             onLog("Accept Connection Request → ${device.address}")
-            sendCommand(0x0409, incomingAddress + byteArrayOf(0x00))
+            // Preserve the controller as BR/EDR master for controller-initiated
+            // reconnects. This matches the proven DS5Dongle link setup and lets
+            // the DualSense schedule its own 100 Hz microphone ACL uplink.
+            sendCommand(0x0409, incomingAddress + byteArrayOf(0x01))
         } else {
             onLog("Create Connection → ${device.address}")
             val parameters = ByteArray(13)
@@ -1088,6 +1455,10 @@ class HciUsbController(
         var connectionHandle: Int? = null
         var pairingComplete = false
         while (running.get() && System.currentTimeMillis() < deadline) {
+            if (controlGeneration.get() != operationGeneration) {
+                cancelConnectionForNewOperation(device, connectionHandle)
+                throw OperationSupersededException()
+            }
             val event = readEvent(1000) ?: continue
             when (event.code) {
                 0x03 -> {
@@ -1097,6 +1468,10 @@ class HciUsbController(
                     connectionHandle = event.parameters.le16(1) and 0x0FFF
                     activeHandle = connectionHandle
                     activeDevice = device
+                    if (pendingConnection?.address?.uppercase() == device.address.uppercase()) {
+                        pendingConnection = null
+                        onLog("Connection Complete consumed matching Connect request")
+                    }
                     onLog("Connection Complete → handle=0x${connectionHandle.hex4()}")
                     publishDevice(device, text(R.string.dualsense_bridge_state_connected_live),
                         paired = loadLinkKey(device.address) != null)
@@ -1203,6 +1578,67 @@ class HciUsbController(
         }
     }
 
+    /** Stops an inquiry without waiting for its normal 15 second completion. */
+    private fun cancelInquiryForNewOperation() {
+        if (!running.get()) return
+        onLog("Inquiry cancelled → newer controller action takes priority")
+        // HCI Inquiry Cancel. Do not wait here: this worker must return to the
+        // host loop, which will consume the command result and the next intent.
+        runCatching { sendCommand(0x0402) }
+    }
+
+    /** Stops an in-flight Remote Name Request so an incoming DualSense page wins. */
+    private fun cancelRemoteNameRequest(device: InquiryDevice) {
+        if (!running.get()) return
+        onLog("Remote Name Request cancelled → incoming controller takes priority")
+        // HCI Remote Name Request Cancel uses the target controller's BD_ADDR.
+        // It is distinct from Inquiry Cancel and is valid after inquiry has
+        // already completed.
+        runCatching { sendCommand(0x041A, device.addressLittleEndian) }
+    }
+
+    /** Queues an incoming controller request so discovery/name lookup cannot lose it. */
+    private fun queueIncomingConnection(parameters: ByteArray) {
+        if (parameters.size < 10) return
+        val addressBytes = parameters.copyOfRange(0, 6)
+        val address = formatAddress(addressBytes, 0)
+        val known = discoveredDevices[address] ?: InquiryDevice(
+            address, addressBytes, 0x01, 0, 0,
+            "%02X%02X%02X".format(
+                parameters[8].u8(), parameters[7].u8(), parameters[6].u8()
+            ),
+            null, text(R.string.dualsense_bridge_paired_name)
+        )
+        onLog("Incoming Connection Request ← $address")
+        val paired = loadLinkKey(address) != null
+        val explicitlyAuthorized = authorizedPairingAddress == address
+        if (paired || explicitlyAuthorized) {
+            pendingIncomingConnection = known
+        } else {
+            onLog("Incoming connection rejected: $address (not paired/authorized)")
+            sendCommand(0x040A, addressBytes + byteArrayOf(0x0F))
+        }
+    }
+
+    private fun cancelConnectionForNewOperation(device: InquiryDevice, handle: Int?) {
+        if (handle == null) {
+            onLog("Create Connection cancelled → newer controller action takes priority")
+            // HCI Create Connection Cancel, valid before Connection Complete.
+            sendCommand(0x0408, device.addressLittleEndian)
+        } else {
+            onLog("Disconnecting provisional link 0x${handle.hex4()} → newer controller action")
+            sendDisconnect(handle)
+        }
+    }
+
+    private fun sendDisconnect(handle: Int) {
+        sendCommand(0x0406, byteArrayOf(
+            handle.toByte(), (handle ushr 8).toByte(), 0x13
+        ))
+    }
+
+    private class OperationSupersededException : Exception()
+
     private fun handleLinkKeyRequest(parameters: ByteArray) {
         if (parameters.size < 6) return
         val addressBytes = parameters.copyOfRange(0, 6)
@@ -1262,7 +1698,8 @@ class HciUsbController(
         return null
     }
 
-    private fun sendCommand(opcode: Int, parameters: ByteArray = byteArrayOf()) {
+    private fun sendCommand(opcode: Int, parameters: ByteArray = byteArrayOf(),
+                            logPacket: Boolean = true) {
         val packet = ByteArray(3 + parameters.size)
         packet[0] = (opcode and 0xFF).toByte()
         packet[1] = (opcode ushr 8).toByte()
@@ -1273,7 +1710,7 @@ class HciUsbController(
             0, 0, hciInterface?.id ?: 0, packet, packet.size, COMMAND_TIMEOUT_MS
         ) ?: -1
         check(sent == packet.size) { "HCI command write: $sent/${packet.size} byte" }
-        onLog("TX CMD 0x${opcode.hex4()} (${parameters.size} byte)")
+        if (logPacket) onLog("TX CMD 0x${opcode.hex4()} (${parameters.size} byte)")
     }
 
     @Synchronized
@@ -1611,14 +2048,28 @@ class HciUsbController(
         if (parameters.size < 4 || parameters[0].u8() != 0) return
         val handle = parameters.le16(1) and 0x0FFF
         val mode = parameters[3].u8()
-        if (handle != activeHandle || mode == 0 || lastHidInputMs == 0L) return
+        if (handle != activeHandle) return
+        currentLinkMode = mode
+        if (mode == LINK_MODE_ACTIVE) {
+            onLog("Live HID active mode confirmed")
+            return
+        }
+        if (microphoneActiveModeRequested) {
+            onLog("DualSense BT microphone owns link mode $mode; leaving controller schedule unchanged")
+            return
+        }
+        if (lastHidInputMs == 0L) return
+        requestActiveHidMode(handle, "Live HID")
+    }
+
+    private fun requestActiveHidMode(handle: Int, reason: String) {
         val now = System.currentTimeMillis()
         if (now - lastExitLowPowerModeAtMs < EXIT_LOW_POWER_RETRY_MS) return
         lastExitLowPowerModeAtMs = now
         runCatching {
             sendCommand(0x0804, byteArrayOf(handle.toByte(), (handle ushr 8).toByte()))
         }.onSuccess {
-            onLog("Live HID entered low-power mode $mode → requesting active mode")
+            onLog("$reason: low-power mode $currentLinkMode → requesting active mode")
         }.onFailure {
             onLog("Unable to restore active HID mode: ${it.message}")
         }
@@ -1733,7 +2184,8 @@ class HciUsbController(
         val haptics: ByteArray,
         val speakerOpus: ByteArray?,
         val configurationOnly: Boolean = false,
-        val speakerOnly: Boolean = false
+        val speakerOnly: Boolean = false,
+        val microphoneArm: Boolean = false
     )
     private data class L2capChannel(
         val psm: Int,
@@ -1796,12 +2248,19 @@ class HciUsbController(
         private const val OUTPUT_STALL_LOG_MS = 40L
         private const val OUTPUT_ERROR_LOG_INTERVAL_MS = 2_000L
         private const val ACL_READ_TIMEOUT_MS = 250
+        // Keep several receives submitted to Android's USB host stack at all
+        // times. A DualSense microphone emits a 10 ms packet cadence, so a
+        // synchronous receive/re-submit gap can otherwise become packet loss.
+        private const val ACL_USB_REQUEST_COUNT = 4
+        private const val ACL_USB_REQUEST_BYTES = 1024
         private const val INQUIRY_TIMEOUT_MS = 15_000
         private const val REMOTE_NAME_TIMEOUT_MS = 8_000
         private const val CONNECTION_TIMEOUT_MS = 45_000
         private const val LINK_CHECK_INTERVAL_MS = 3_000L
         private const val POST_CONNECT_COMMAND_GAP_MS = 500L
         private const val EXIT_LOW_POWER_RETRY_MS = 2_000L
+        private const val LINK_MODE_UNKNOWN = -1
+        private const val LINK_MODE_ACTIVE = 0
         private const val HID_OPEN_DELAY_MS = 750L
         private const val HID_CHANNEL_REOPEN_DELAY_MS = 350L
         // BlueZ does not tear down a valid HID channel pair merely because the
@@ -1822,6 +2281,12 @@ class HciUsbController(
         private const val AUDIO_QUEUE_CAPACITY = 4
         private const val AUDIO_REPORT_INTERVAL_NS = 10_666_667L
         private const val AUDIO_CLOCK_RESET_NS = 100_000_000L
+        private const val HOST_ACL_BUFFER_BYTES = 679
+        private const val HOST_ACL_BUFFER_PACKETS = 32
+        private const val HOST_ACL_COMPLETION_BATCH = 4
+        private const val MICROPHONE_ARM_POLL_MS = 100L
+        private const val MICROPHONE_ARM_INTERVAL_MS = 250L
+        private const val MICROPHONE_STALE_MS = 1_000L
         private const val ACL_CREDIT_POLL_NS = 500_000L
         private const val DEFAULT_ACL_DATA_PACKET_LENGTH = 1021
         private const val MIN_ACL_DATA_PACKET_LENGTH = 27

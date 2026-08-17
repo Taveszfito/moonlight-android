@@ -475,6 +475,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         // Stop new device contexts from being created or used
         stopped = true;
         dualSenseBridgeStreamConnected = false;
+        DualSenseBridge.setStreamActive(false);
         DualSenseBridge.removeInputListener(dualSenseBridgeInputListener);
         mainThreadHandler.removeCallbacks(dualSenseBridgeFailsafeRunnable);
         mainThreadHandler.removeCallbacks(dualSenseBridgeStreamWatchdogRunnable);
@@ -1605,6 +1606,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         }
 
         dualSenseBridgeStreamConnected = true;
+        DualSenseBridge.setStreamActive(true);
         dualSenseBridgeLastInputAtMs = 0;
         dualSenseBridgeContext.lastExtendedAcceptedMode = -1;
         dualSenseBridgeContext.extendedRequestAttempts = 0;

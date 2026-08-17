@@ -17,7 +17,7 @@ enum class TriggerMode { OFF, RESISTANCE, VIBRATION }
 
 object DualSenseBtOutputBuilder {
     fun build(config: DualSenseOutputConfig, sequence: Int,
-              nativeBluetoothHaptics: Boolean = false,
+              nativeBluetoothAudio: Boolean = false,
               headsetRoute: Boolean = false): ByteArray {
         val report = ByteArray(78)
         report[0] = 0x31
@@ -27,32 +27,26 @@ object DualSenseBtOutputBuilder {
         // Native Bluetooth audio normally owns the haptics path. If the host
         // sends ordinary rumble, temporarily select compatible vibration too;
         // the next zero-motor report automatically returns to native HD haptics.
-        report[3] = if (nativeBluetoothHaptics) {
+        report[3] = if (nativeBluetoothAudio) {
             (if (compatibleRumbleActive) 0xFF else 0xFC).toByte()
         } else {
             0x0F
         }
-        report[4] = if (nativeBluetoothHaptics) 0x95.toByte() else 0x15
+        report[4] = if (nativeBluetoothAudio) 0xD5.toByte() else 0x15
         report[5] = config.rightRumble.coerceIn(0, 255).toByte()
         report[6] = config.leftRumble.coerceIn(0, 255).toByte()
-        if (nativeBluetoothHaptics) {
-            // These are the normal DualSense audio-control fields (the same
-            // common payload used by USB, after the Bluetooth header). The
-            // route selector belongs here, not in a 0x35 Opus data packet.
-            // This field is the physical headset volume and has a 0x7f ceiling.
-            report[7] = HEADSET_VOLUME_MAX.toByte()
-            // Keep this aligned with the duplex state snapshot. The physical
-            // controller's speaker volume is an independent control from the
-            // PCM and preamp gain, so it must not be reduced by a later mic
-            // configuration report.
-            // The deleted alpha used this legacy amplifier profile for the
-            // controller membrane. It is intentionally distinct from the
-            // headset route below: the firmware does not treat 0x64/0x30/0x02
-            // as the same internal-speaker mode.
-            report[8] = (if (headsetRoute) SPEAKER_VOLUME_SAFE else LEGACY_SPEAKER_VOLUME).toByte()
-            report[9] = 0x40
-            report[10] = if (headsetRoute) 0x10 else LEGACY_SPEAKER_AUDIO_CONTROL.toByte()
-            report[40] = (if (headsetRoute) SPEAKER_PREAMP_SAFE else LEGACY_SPEAKER_PREAMP).toByte()
+        if (nativeBluetoothAudio) {
+            // Keep the control-state profile byte-for-byte aligned with the
+            // verified Windows BT client. The 0xD5 mask and these audio fields
+            // are what make the controller produce a continuous 10 ms Opus
+            // microphone stream; the media reports themselves remain owned by
+            // the separate native audio path.
+            report[7] = if (headsetRoute) HEADSET_VOLUME_MAX.toByte() else 0
+            report[8] = SPEAKER_VOLUME_SAFE.toByte()
+            report[9] = 0xFF.toByte()
+            report[10] = if (headsetRoute) 0x01 else 0x09
+            report[39] = 0x0A
+            report[40] = 0x03
         }
         report[11] = if (config.micLed) 1 else 0
         writeTrigger(report, 13, config.rightTriggerMode, config.triggerStrength,

@@ -39,6 +39,9 @@ object DualSenseAudioBridge {
     @Volatile private var usbRouteActive = false
     @Volatile private var wiredControllerActive = false
     @Volatile private var streamActive = false
+
+    /** Used by bridge diagnostics to avoid competing with a real media stream. */
+    @JvmStatic fun isStreamActive(): Boolean = streamActive
     @Volatile private var mode = "auto"
     @Volatile private var controllerVolume = 100
     private var audioConnection: UsbDeviceConnection? = null

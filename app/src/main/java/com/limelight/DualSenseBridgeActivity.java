@@ -27,6 +27,7 @@ import com.example.usbbtonandroid.DualSenseInput;
 import com.example.usbbtonandroid.hci.HciUsbController;
 import com.limelight.dualsense.DualSenseBridge;
 import com.limelight.dualsense.DualSenseAudioBridge;
+import com.limelight.dualsense.DualSenseBluetoothMicrophoneTest;
 import com.limelight.binding.input.driver.DualSenseController;
 import com.limelight.utils.UiHelper;
 
@@ -45,6 +46,7 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
     private LinearLayout deviceContainer;
     private LinearLayout diagnosticsPanel;
     private LinearLayout toolsPanel;
+    private LinearLayout microphoneTestPanel;
     private TextView statusTitle;
     private TextView statusDetails;
     private TextView batteryView;
@@ -52,6 +54,10 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
     private TextView logView;
     private ScrollView pageScroll;
     private ScrollView logScroll;
+    private TextView microphoneTestStatus;
+    private Button microphoneRecordButton;
+    private Button microphonePlaybackButton;
+    private Button microphoneMonitorButton;
     private int red;
     private int green = 80;
     private int blue = 255;
@@ -79,6 +85,7 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
     protected void onDestroy() {
         DualSenseBridge.removeStateListener(stateListener);
         mainHandler.removeCallbacks(refreshRunnable);
+        DualSenseBluetoothMicrophoneTest.stop();
         super.onDestroy();
     }
 
@@ -192,6 +199,19 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
         deviceContainer = vertical();
         root.addView(deviceContainer);
 
+        LinearLayout microphoneTestLauncher = horizontal();
+        microphoneTestLauncher.setGravity(Gravity.CENTER_VERTICAL);
+        TextView microphoneTestHint = text("DualSense Bluetooth microphone diagnostic", 13,
+                TEXT_SECONDARY);
+        microphoneTestLauncher.addView(microphoneTestHint, weighted());
+        microphoneTestLauncher.addView(iconButton(android.R.drawable.ic_btn_speak_now,
+                "Open DualSense microphone test", v -> togglePanel(microphoneTestPanel)));
+        root.addView(microphoneTestLauncher, match(dp(4)));
+
+        microphoneTestPanel = buildMicrophoneTestPanel();
+        microphoneTestPanel.setVisibility(View.GONE);
+        root.addView(microphoneTestPanel, match(dp(8)));
+
         diagnosticsPanel = card();
         diagnosticsPanel.setVisibility(View.GONE);
         diagnosticsPanel.addView(panelHeader(getString(R.string.dualsense_bridge_diagnostics),
@@ -216,6 +236,54 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
         toolsPanel.setVisibility(View.GONE);
         root.addView(toolsPanel, match(dp(12)));
         return pageScroll;
+    }
+
+    private LinearLayout buildMicrophoneTestPanel() {
+        LinearLayout panel = card();
+        panel.addView(panelHeader("Bluetooth microphone test",
+                "Local recording only. It does not send audio to the host.", panel));
+        TextView description = text("Records the raw DualSense Bluetooth microphone, " +
+                "decodes it locally, then plays it through this phone's media output. " +
+                "Live monitor bypasses recording and host forwarding.",
+                13, TEXT_SECONDARY);
+        description.setPadding(0, dp(8), 0, dp(5));
+        panel.addView(description);
+
+        microphoneTestStatus = text("Idle", 13, Color.WHITE);
+        microphoneTestStatus.setPadding(0, dp(6), 0, dp(4));
+        panel.addView(microphoneTestStatus);
+
+        LinearLayout actions = horizontal();
+        microphoneRecordButton = actionButton("Start recording", true, view -> {
+            if (DualSenseBluetoothMicrophoneTest.isRecording()) {
+                DualSenseBluetoothMicrophoneTest.stopRecording();
+            } else {
+                DualSenseBluetoothMicrophoneTest.startRecording();
+            }
+            refreshMicrophoneTest();
+        });
+        actions.addView(microphoneRecordButton, weightedWithMargin());
+        microphonePlaybackButton = actionButton("Play on phone", false, view -> {
+            DualSenseBluetoothMicrophoneTest.playRecording(this);
+            refreshMicrophoneTest();
+        });
+        actions.addView(microphonePlaybackButton, weightedWithMargin());
+        panel.addView(actions, match(dp(4)));
+        microphoneMonitorButton = actionButton("Start live monitor", false, view -> {
+            if (DualSenseBluetoothMicrophoneTest.isLiveMonitoring()) {
+                DualSenseBluetoothMicrophoneTest.stopLiveMonitor();
+            } else {
+                DualSenseBluetoothMicrophoneTest.startLiveMonitor(this);
+            }
+            refreshMicrophoneTest();
+        });
+        panel.addView(microphoneMonitorButton, match(dp(4)));
+        Button clear = actionButton("Clear recording", false, view -> {
+            DualSenseBluetoothMicrophoneTest.clear();
+            refreshMicrophoneTest();
+        });
+        panel.addView(clear, match(dp(4)));
+        return panel;
     }
 
     private LinearLayout buildToolsPanel() {
@@ -252,6 +320,7 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
 
     private void refresh() {
         if (statusTitle == null) return;
+        refreshMicrophoneTest();
         if (DualSenseController.hasActiveController()) {
             long age = DualSenseController.getActiveInputAgeMs();
             int percent = DualSenseController.getActiveBatteryPercent();
@@ -306,6 +375,7 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
                     .append(device.getName()).append(';');
         }
         if (signature.toString().equals(lastDeviceSignature)) {
+            scheduleMicrophoneTestRefresh();
             return;
         }
         lastDeviceSignature = signature.toString();
@@ -351,6 +421,30 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
             row.addView(deviceActions);
             deviceContainer.addView(row, match(dp(6)));
         }
+        scheduleMicrophoneTestRefresh();
+    }
+
+    private void scheduleMicrophoneTestRefresh() {
+        if (microphoneTestPanel != null &&
+                (microphoneTestPanel.getVisibility() == View.VISIBLE ||
+                        (DualSenseBluetoothMicrophoneTest.isRecording() ||
+                                DualSenseBluetoothMicrophoneTest.isLiveMonitoring()))) {
+            mainHandler.removeCallbacks(refreshRunnable);
+            mainHandler.postDelayed(refreshRunnable, 250L);
+        }
+    }
+
+    private void refreshMicrophoneTest() {
+        if (microphoneTestStatus == null) return;
+        boolean recording = DualSenseBluetoothMicrophoneTest.isRecording();
+        boolean monitoring = DualSenseBluetoothMicrophoneTest.isLiveMonitoring();
+        microphoneTestStatus.setText(DualSenseBluetoothMicrophoneTest.status());
+        microphoneRecordButton.setText(recording ? "Stop recording" : "Start recording");
+        microphoneRecordButton.setEnabled(!monitoring);
+        microphoneMonitorButton.setText(monitoring ? "Stop live monitor" : "Start live monitor");
+        microphoneMonitorButton.setEnabled(!recording);
+        microphonePlaybackButton.setEnabled(!recording && !monitoring &&
+                DualSenseBluetoothMicrophoneTest.hasRecording());
     }
 
     private View panelHeader(String title, String subtitle, View panel) {
@@ -380,6 +474,7 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
     private void togglePanel(View panel) {
         panel.setVisibility(panel.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
         if (panel.getVisibility() == View.VISIBLE) panel.requestFocus();
+        if (panel == microphoneTestPanel) refresh();
     }
 
     private void testRumble(int low, int high) {
