@@ -1894,7 +1894,8 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                     DualSenseController.getActiveInputPacketCount() +
                     "  ·  read errors " + DualSenseController.getActiveInputReadErrors() +
                     "\nAudio route: " + route +
-                    "\n\nAudio / HD haptics: " + DualSenseAudioBridge.diagnostics();
+                    "\n\nAudio / HD haptics: " + DualSenseAudioBridge.diagnostics() +
+                    "\n\nMicrophone / stream: " + DualSenseMicrophoneBridge.diagnostics();
             controllerConnectionLogClearView.setVisibility(View.GONE);
             controllerConnectionOverlayView.setText(overlayText);
             controllerConnectionOverlayView.setTextColor(age >= 0 && age <= 250 ?
@@ -1955,6 +1956,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                     "\n" + snapshot.getRecentIncidentLog();
         }
         overlayText += "\n\nAudio / HD haptics: " + DualSenseAudioBridge.diagnostics();
+        overlayText += "\n\nMicrophone / stream: " + DualSenseMicrophoneBridge.diagnostics();
         controllerConnectionLogClearView.setVisibility(
                 snapshot.getRecentIncidentLog().isEmpty() ? View.GONE : View.VISIBLE);
         controllerConnectionOverlayView.setText(overlayText);

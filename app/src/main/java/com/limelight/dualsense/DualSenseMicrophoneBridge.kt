@@ -9,6 +9,7 @@ import android.media.MediaRecorder
 import android.os.Build
 import com.limelight.LimeLog
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.ArrayBlockingQueue
 
 /**
@@ -32,6 +33,12 @@ object DualSenseMicrophoneBridge {
     // Opus decode or network transmission inline on that real-time USB thread.
     private val bluetoothFrameQueue = ArrayBlockingQueue<ByteArray>(24)
     private var bluetoothFramesDropped = 0L
+    private val bluetoothFramesReceived = AtomicLong(0)
+    private val bluetoothStreamFramesSent = AtomicLong(0)
+    private val bluetoothStreamFailures = AtomicLong(0)
+    @Volatile private var bluetoothCaptureStartedAtMs = 0L
+    @Volatile private var lastBluetoothFrameAtMs = 0L
+    @Volatile private var lastBluetoothStreamSendAtMs = 0L
 
     @JvmStatic fun configure(source: String?) {
         selectedSource = when (source) {
@@ -82,6 +89,12 @@ object DualSenseMicrophoneBridge {
             DualSenseWiredOutput.setMicrophoneMuted(muted)
             bluetoothFrameQueue.clear()
             bluetoothFramesDropped = 0
+            bluetoothFramesReceived.set(0)
+            bluetoothStreamFramesSent.set(0)
+            bluetoothStreamFailures.set(0)
+            bluetoothCaptureStartedAtMs = android.os.SystemClock.elapsedRealtime()
+            lastBluetoothFrameAtMs = 0L
+            lastBluetoothStreamSendAtMs = 0L
             stopRequested.set(false)
             running = true
             bluetoothDecodeThread = Thread(::bluetoothDecodeLoop,
@@ -152,6 +165,8 @@ object DualSenseMicrophoneBridge {
     /** Called only for filtered BT Duplex 0xD4 Opus frames. */
     @JvmStatic fun onBluetoothOpusFrame(opus: ByteArray) {
         if (!running || selectedSource != SOURCE_DUALSENSE || muted || opus.isEmpty()) return
+        bluetoothFramesReceived.incrementAndGet()
+        lastBluetoothFrameAtMs = android.os.SystemClock.elapsedRealtime()
         // Keep the newest audio when a transient network stall occurs. This is
         // preferable to blocking the ACL reader and losing many later HID/mic
         // packets at the USB boundary.
@@ -169,11 +184,24 @@ object DualSenseMicrophoneBridge {
         try {
             while (!stopRequested.get() && running && selectedSource == SOURCE_DUALSENSE) {
                 val opus = bluetoothFrameQueue.take()
-                // This is the same lossless path used by the verified Windows
-                // client: every controller-supplied 71-byte Opus frame is sent
-                // immediately and unchanged. Do not add a second Android-side
-                // clock; the controller already owns this packet cadence.
-                if (!muted) DualSenseMicrophoneNative.forwardBluetoothOpus(opus)
+                // The Bluetooth DualSense microphone uses its own 10 ms Opus
+                // framing. Decode it locally, then feed the normal 48 kHz/20 ms
+                // Moonlight microphone encoder so the host sees precisely the
+                // same stream format as an Android-device microphone capture.
+                // This intentionally keeps the controller-radio cadence out of
+                // the encrypted host microphone transport.
+                if (!muted) {
+                    val result = DualSenseMicrophoneNative.decodeBluetoothAndSend(opus)
+                    // A successful result of 0 represents one complete 20 ms
+                    // Moonlight packet; 1 means the first 10 ms BT half was
+                    // buffered locally and is expected.
+                    if (result == 0) {
+                        bluetoothStreamFramesSent.incrementAndGet()
+                        lastBluetoothStreamSendAtMs = android.os.SystemClock.elapsedRealtime()
+                    } else if (result < 0) {
+                        bluetoothStreamFailures.incrementAndGet()
+                    }
+                }
             }
         } catch (_: InterruptedException) {
             // Normal shutdown.
@@ -246,5 +274,27 @@ object DualSenseMicrophoneBridge {
         running = false
         DualSenseMicrophoneNative.stop()
         DualSenseBridge.setMicrophoneMuted(muted)
+    }
+
+    /** Compact, live end-to-end client-side status for the in-stream bridge popup. */
+    @JvmStatic fun diagnostics(): String {
+        if (!running) return "inactive"
+        if (selectedSource != SOURCE_DUALSENSE) return "phone / USB capture active"
+        val now = android.os.SystemClock.elapsedRealtime()
+        val elapsed = (now - bluetoothCaptureStartedAtMs).coerceAtLeast(0L)
+        val received = bluetoothFramesReceived.get()
+        // DualSense Bluetooth microphone packets represent 10 ms each. This
+        // is intentionally an estimate: it exposes sustained loss while not
+        // pretending the Android-side queue is host acknowledgement.
+        val expected = elapsed / 10L
+        val estimatedMissing = (expected - received).coerceAtLeast(0L)
+        val inputAge = if (lastBluetoothFrameAtMs == 0L) -1L else now - lastBluetoothFrameAtMs
+        val sendAge = if (lastBluetoothStreamSendAtMs == 0L) -1L else now - lastBluetoothStreamSendAtMs
+        return "BT mic: rx $received/$expected · est. missing $estimatedMissing\n" +
+            "queue ${bluetoothFrameQueue.size}/24 · queue drops $bluetoothFramesDropped\n" +
+            "stream: ${bluetoothStreamFramesSent.get()} × 20 ms sent · " +
+            "failures ${bluetoothStreamFailures.get()}\n" +
+            "BT age ${if (inputAge < 0) "n/a" else "${inputAge}ms"} · " +
+            "stream age ${if (sendAge < 0) "n/a" else "${sendAge}ms"}"
     }
 }

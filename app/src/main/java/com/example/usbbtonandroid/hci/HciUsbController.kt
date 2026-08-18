@@ -98,6 +98,11 @@ class HciUsbController(
     private var btMicCandidateFramesSinceLog = 0
     private var btMicCandidateLastLogMs = 0L
     private val btMicCandidateTocCounts = IntArray(256)
+    // A nonzero packet rate alone is not sufficient: a bad initial duplex
+    // session can deliver only three quarters of the 10 ms Opus cadence, which
+    // keeps the old stale-frame watchdog permanently satisfied.
+    private val btMicFramesInWatchWindow = AtomicLong(0)
+    @Volatile private var btMicWatchWindowStartedMs = 0L
     @Volatile private var lastUsbAclAtMs = 0L
     @Volatile private var lastHidInputElapsedMs = 0L
     @Volatile private var linkQualityPercent = 100
@@ -322,6 +327,8 @@ class HciUsbController(
         if (!enabled) return activeHandle != null && hidInterruptRemoteCid != null
         lastBluetoothMicrophoneFrameMs = 0L
         lastBluetoothMicrophoneArmMs = 0L
+        btMicFramesInWatchWindow.set(0)
+        btMicWatchWindowStartedMs = SystemClock.elapsedRealtime()
         val queued = queueNativeBluetoothSetup()
         outputSignal.offer(Unit)
         return queued
@@ -767,6 +774,7 @@ class HciUsbController(
         var nextSendAtNs = 0L
         while (running.get()) {
             try {
+                maybeScheduleMicrophoneCadenceRecovery(SystemClock.elapsedRealtime())
                 var audio = audioQueue.poll(MICROPHONE_ARM_POLL_MS, TimeUnit.MILLISECONDS)
                 if (audio == null) {
                     val nowMs = SystemClock.elapsedRealtime()
@@ -891,6 +899,37 @@ class HciUsbController(
             } catch (_: InterruptedException) {
                 break
             }
+        }
+    }
+
+    /**
+     * Re-arm only an actually under-running Bluetooth microphone session.
+     *
+     * A DualSense uplink frame represents 10 ms, so a healthy link supplies
+     * roughly 100 frames per second.  This intentionally does not touch link
+     * mode: forcing Exit Sniff is known to make a healthy microphone worse.
+     */
+    private fun maybeScheduleMicrophoneCadenceRecovery(nowMs: Long) {
+        if (!nativeBluetoothMicrophoneRequested) return
+        val startedAt = btMicWatchWindowStartedMs
+        if (startedAt == 0L || nowMs - startedAt < MICROPHONE_RATE_WINDOW_MS) return
+        btMicWatchWindowStartedMs = nowMs
+        val received = btMicFramesInWatchWindow.getAndSet(0)
+        if (received >= MICROPHONE_MIN_FRAMES_PER_WINDOW ||
+            nowMs - lastBluetoothMicrophoneArmMs < MICROPHONE_RATE_RECOVERY_INTERVAL_MS) {
+            return
+        }
+        onLog(
+            "DualSense BT microphone cadence low: $received/${MICROPHONE_RATE_WINDOW_MS}ms " +
+                "→ re-arming duplex session"
+        )
+        val arm = NativeAudioPayload(ByteArray(64), null,
+            configurationOnly = true, microphoneArm = true)
+        if (!audioQueue.offer(arm)) {
+            // Configuration is a recovery state transition.  Keep it ahead of
+            // stale real-time feedback; the normal queue logic preserves it.
+            audioQueue.poll()
+            audioQueue.offer(arm)
         }
     }
 
@@ -1120,6 +1159,7 @@ class HciUsbController(
                         micSequence
                     )
                     lastBluetoothMicrophoneFrameMs = now
+                    btMicFramesInWatchWindow.incrementAndGet()
                 }
                 if (isHidInput) {
                     val previousHidInputMs = lastHidInputMs
@@ -2287,6 +2327,11 @@ class HciUsbController(
         private const val MICROPHONE_ARM_POLL_MS = 100L
         private const val MICROPHONE_ARM_INTERVAL_MS = 250L
         private const val MICROPHONE_STALE_MS = 1_000L
+        private const val MICROPHONE_RATE_WINDOW_MS = 1_500L
+        // 80 frames/s gives startup jitter room but detects the observed
+        // 75%-rate duplex failure before an audible backlog accumulates.
+        private const val MICROPHONE_MIN_FRAMES_PER_WINDOW = 120L
+        private const val MICROPHONE_RATE_RECOVERY_INTERVAL_MS = 1_500L
         private const val ACL_CREDIT_POLL_NS = 500_000L
         private const val DEFAULT_ACL_DATA_PACKET_LENGTH = 1021
         private const val MIN_ACL_DATA_PACKET_LENGTH = 27
