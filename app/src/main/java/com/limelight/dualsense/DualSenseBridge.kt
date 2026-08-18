@@ -19,6 +19,7 @@ import com.example.usbbtonandroid.DualSenseInputParser
 import com.example.usbbtonandroid.DualSenseOutputConfig
 import com.example.usbbtonandroid.TriggerMode
 import com.example.usbbtonandroid.hci.HciUsbController
+import com.example.usbbtonandroid.hci.CsrHciUsbController
 import com.limelight.R
 import com.limelight.LimeLog
 import com.limelight.Game
@@ -35,6 +36,10 @@ object DualSenseBridge {
     private const val PREF_BATTERY_LED_ENABLED = "battery_led_enabled"
     private const val PREF_LOW_BATTERY_BLINK_ENABLED = "low_battery_blink_enabled"
     private const val PREF_CONNECTION_OVERLAY_ENABLED = "connection_overlay_enabled"
+    private const val PREF_HCI_PROFILE = "hci_profile"
+    const val HCI_PROFILE_AUTO = 0
+    const val HCI_PROFILE_GENERIC = 1
+    const val HCI_PROFILE_CSR = 2
     private const val LOW_BATTERY_THRESHOLD_PERCENT = 15
 
     fun interface InputListener { fun onInput(input: DualSenseInput) }
@@ -61,6 +66,8 @@ object DualSenseBridge {
     @Volatile private var batteryLedEnabled = true
     @Volatile private var lowBatteryBlinkEnabled = true
     @Volatile private var connectionOverlayEnabled = false
+    @Volatile private var requestedHciProfile = HCI_PROFILE_AUTO
+    @Volatile private var activeHciProfile = HCI_PROFILE_AUTO
     // Owned by the client's microphone forwarding state. Host feedback may set
     // its own mic LED bit, but it must not override this global mute indicator.
     @Volatile private var microphoneMuted = false
@@ -202,6 +209,7 @@ object DualSenseBridge {
             batteryLedEnabled = keyPrefs().getBoolean(PREF_BATTERY_LED_ENABLED, true)
             lowBatteryBlinkEnabled = keyPrefs().getBoolean(PREF_LOW_BATTERY_BLINK_ENABLED, true)
             connectionOverlayEnabled = keyPrefs().getBoolean(PREF_CONNECTION_OVERLAY_ENABLED, false)
+            requestedHciProfile = keyPrefs().getInt(PREF_HCI_PROFILE, HCI_PROFILE_AUTO)
             watchdogHandler.post(connectionWatchdog)
             loadSavedDevices()
             updateStatus(s(R.string.dualsense_bridge_status_ready))
@@ -307,6 +315,33 @@ object DualSenseBridge {
         // The first real relay proves that this particular stream has consumed
         // controller input. Only then may an input timeout trigger recovery.
         streamRecoveryArmed = true
+    }
+
+    /** Selects a transport profile for the next adapter open. Auto picks CSR only for 0A12:0001. */
+    @JvmStatic fun setHciProfile(context: Context, profile: Int) {
+        initialize(context)
+        requestedHciProfile = when (profile) {
+            HCI_PROFILE_GENERIC, HCI_PROFILE_CSR -> profile
+            else -> HCI_PROFILE_AUTO
+        }
+        keyPrefs().edit().putInt(PREF_HCI_PROFILE, requestedHciProfile).apply()
+        appendLog("Requested HCI profile: ${hciProfileName(requestedHciProfile)}")
+        reset(context as? Activity)
+    }
+
+    @JvmStatic fun requestedHciProfile(): Int = requestedHciProfile
+    @JvmStatic fun activeHciProfileName(): String = hciProfileName(activeHciProfile)
+
+    private fun selectHciProfile(device: UsbDevice): Int = when (requestedHciProfile) {
+        HCI_PROFILE_GENERIC, HCI_PROFILE_CSR -> requestedHciProfile
+        else -> if (device.vendorId == CSR_VENDOR_ID && device.productId == CSR_PRODUCT_ID)
+            HCI_PROFILE_CSR else HCI_PROFILE_GENERIC
+    }
+
+    private fun hciProfileName(profile: Int): String = when (profile) {
+        HCI_PROFILE_GENERIC -> "Profile 1 · Generic HCI"
+        HCI_PROFILE_CSR -> "Profile 2 · CSR HCI"
+        else -> "Auto"
     }
 
     /** Called by the stream controller, not by the Bridge settings Activity. */
@@ -506,15 +541,20 @@ object DualSenseBridge {
         ledOverrideActive = false
         lastBatteryLedPercent = -1
         stopLowBatteryBlink(false)
+        activeHciProfile = selectHciProfile(device)
+        appendLog("Opening ${hciProfileName(activeHciProfile)} for USB %04X:%04X".format(
+            device.vendorId, device.productId))
         updateStatus(s(R.string.dualsense_bridge_status_initializing))
-        controller = HciUsbController(
+        val createController = if (activeHciProfile == HCI_PROFILE_CSR)
+            ::CsrHciUsbController else ::HciUsbController
+        controller = createController(
             usbManager, device,
             { id, args -> s(id, *args) },
             { appendLog(it) },
             { value ->
                 updateStatus(value)
             },
-            { item ->
+            onDeviceCallback@{ item ->
                 val normalizedAddress = item.address.uppercase()
                 // Inquiry results usually arrive before Remote Name Request has
                 // completed. Reuse the last verified name for this MAC so the UI
@@ -529,7 +569,7 @@ object DualSenseBridge {
                 synchronized(devicesByAddress) {
                     val ignoreUntil = ignoredDeviceCallbacksUntil[normalizedAddress] ?: 0L
                     if (SystemClock.elapsedRealtime() < ignoreUntil) {
-                        return@HciUsbController
+                        return@onDeviceCallback
                     }
                     ignoredDeviceCallbacksUntil.remove(normalizedAddress)
                 }
@@ -913,6 +953,8 @@ object DualSenseBridge {
     )
 
     private const val DISCOVERED_DEVICE_EXPIRY_MS = 30_000L
+    private const val CSR_VENDOR_ID = 0x0A12
+    private const val CSR_PRODUCT_ID = 0x0001
     private const val FORGET_CALLBACK_GUARD_MS = 5_000L
     private const val RECONNECT_PREPARE_DELAY_MS = 350L
     private const val RECOVERY_OVERLAY_READY_TIMEOUT_MS = 20_000L

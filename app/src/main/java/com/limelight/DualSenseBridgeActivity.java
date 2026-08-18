@@ -12,6 +12,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
+import android.widget.AdapterView;
 import android.widget.Button;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
@@ -178,6 +179,36 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
         lowBatteryRow.setPadding(0, dp(12), 0, dp(2));
         connection.addView(lowBatteryRow);
 
+        String[] hciProfiles = {
+                "Auto (recommended)",
+                "Profile 1 · Generic HCI",
+                "Profile 2 · CSR HCI (0A12:0001)"
+        };
+        Spinner hciProfile = spinner(hciProfiles);
+        int requestedProfile = DualSenseBridge.requestedHciProfile();
+        hciProfile.setSelection(requestedProfile >= 0 && requestedProfile < hciProfiles.length ?
+                requestedProfile : DualSenseBridge.HCI_PROFILE_AUTO);
+        final boolean[] bindingHciProfile = {true};
+        hciProfile.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view,
+                                                 int position, long id) {
+                if (bindingHciProfile[0]) {
+                    bindingHciProfile[0] = false;
+                    return;
+                }
+                if (position != DualSenseBridge.requestedHciProfile()) {
+                    DualSenseBridge.setHciProfile(DualSenseBridgeActivity.this, position);
+                }
+            }
+
+            @Override public void onNothingSelected(AdapterView<?> parent) { }
+        });
+        connection.addView(labelled("Bluetooth adapter profile", hciProfile));
+        TextView profileHint = text("Profile 2 is isolated from the proven Generic HCI path. " +
+                "Auto selects it only for CSR 0A12:0001 adapters.", 12, TEXT_SECONDARY);
+        profileHint.setPadding(0, dp(1), 0, dp(6));
+        connection.addView(profileHint);
+
         Button scan = responsiveActionButton(getString(R.string.dualsense_bridge_scan), true,
                 () -> DualSenseBridge.scan(this));
         scan.setCompoundDrawablesWithIntrinsicBounds(android.R.drawable.ic_menu_search, 0, 0, 0);
@@ -329,7 +360,8 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
             statusDetails.setText("Raw HID active · " +
                     (DualSenseController.getActiveHeadphonesConnected() ?
                             "headset jack" : "controller speaker") +
-                    " · input age " + Math.max(0, age) + " ms");
+                    " · input age " + Math.max(0, age) + " ms\n" +
+                    "Adapter profile: " + DualSenseBridge.activeHciProfileName());
             if (percent >= 0) {
                 batteryView.setVisibility(View.VISIBLE);
                 batteryView.setText(percent + "%");
@@ -348,7 +380,8 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
             statusTitle.setText(connected ? R.string.dualsense_bridge_connected :
                     R.string.dualsense_bridge_not_connected);
             statusTitle.setTextColor(connected ? CONNECTED : Color.WHITE);
-            statusDetails.setText(DualSenseBridge.getStatus());
+            statusDetails.setText(DualSenseBridge.getStatus() + "\nAdapter profile: " +
+                    DualSenseBridge.activeHciProfileName());
             if (connected && input.getBatteryPercent() >= 0) {
                 batteryView.setVisibility(View.VISIBLE);
                 batteryView.setText(input.getBatteryPercent() + "%  " + input.getBatteryStatus());

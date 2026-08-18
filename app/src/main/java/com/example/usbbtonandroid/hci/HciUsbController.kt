@@ -20,11 +20,19 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.LockSupport
 
-class HciUsbController(
-    private val usbManager: UsbManager,
-    private val device: UsbDevice,
+/**
+ * Profile 1: generic, proven USB Bluetooth HCI transport.
+ *
+ * IMPORTANT: do not place chipset-specific workarounds in this class. It is
+ * the stable path for the Baseus and antenna adapters. New chipset support
+ * belongs in a dedicated subclass/profile (such as CsrHciUsbController), and
+ * changes here are limited to generic correctness or a Profile 1 regression.
+ */
+open class HciUsbController(
+    protected val usbManager: UsbManager,
+    protected val device: UsbDevice,
     private val stringProvider: (Int, Array<out Any>) -> String,
-    private val onLog: (String) -> Unit,
+    protected val onLog: (String) -> Unit,
     private val onStatus: (String) -> Unit,
     private val onDevice: (HciDevice) -> Unit,
     private val onAclPacket: (AclPacket) -> Unit,
@@ -34,9 +42,9 @@ class HciUsbController(
 ) : Closeable {
     private fun text(id: Int, vararg args: Any): String = stringProvider(id, args)
     private val running = AtomicBoolean(false)
-    private var connection: UsbDeviceConnection? = null
-    private var hciInterface: UsbInterface? = null
-    private var eventIn: UsbEndpoint? = null
+    protected var connection: UsbDeviceConnection? = null
+    protected var hciInterface: UsbInterface? = null
+    protected var eventIn: UsbEndpoint? = null
     private var aclIn: UsbEndpoint? = null
     private var aclOut: UsbEndpoint? = null
     private var worker: Thread? = null
@@ -187,13 +195,18 @@ class HciUsbController(
             // controller-initiated reconnect is otherwise invisible until the
             // potentially long discovery pass completes.
             enableIncomingConnections()
-            onStatus(text(R.string.dualsense_bridge_status_classic_scan))
-            sendCommand(0x0401, byteArrayOf(0x33, 0x8B.toByte(), 0x9E.toByte(), 0x08, 0x00))
-            val generation = controlGeneration.get()
-            val discovered = resolveRemoteNames(scanUntilComplete(generation), generation)
-            discoveredDevices.clear()
-            discovered.forEach { discoveredDevices[it.address] = it }
-            onStatus(text(R.string.dualsense_bridge_status_scan_finished))
+            if (runStartupInquiry()) {
+                onStatus(text(R.string.dualsense_bridge_status_classic_scan))
+                sendCommand(0x0401, byteArrayOf(0x33, 0x8B.toByte(), 0x9E.toByte(), 0x08, 0x00))
+                val generation = controlGeneration.get()
+                val discovered = resolveRemoteNames(scanUntilComplete(generation), generation)
+                discoveredDevices.clear()
+                discovered.forEach { discoveredDevices[it.address] = it }
+                onStatus(text(R.string.dualsense_bridge_status_scan_finished))
+            } else {
+                onLog("Adapter ready in passive Page Scan; Profile 2 starts Inquiry only on Search")
+                onStatus(text(R.string.dualsense_bridge_status_scan_finished))
+            }
             hostLoop()
         } catch (t: Throwable) {
             if (running.get()) {
@@ -269,7 +282,7 @@ class HciUsbController(
         if (lastHidInputMs != 0L) pendingLinkRecovery = true
     }
 
-    fun requestDiscovery() {
+    open fun requestDiscovery() {
         // Restart rather than queue discovery behind an older operation.
         controlGeneration.incrementAndGet()
         pendingDiscovery = true
@@ -362,7 +375,12 @@ class HciUsbController(
         return audioQueue.offer(setup)
     }
 
-    private fun enableIncomingConnections() {
+    /**
+     * Enables controller-initiated reconnects.  Some isolated adapter
+     * profiles deliberately degrade this to an optional operation when their
+     * firmware does not implement Write Scan Enable.
+     */
+    protected open fun enableIncomingConnections() {
         requireCommandComplete(0x0C1A, byteArrayOf(0x02))
         onLog("Page Scan enabled → párosított eszközök visszakapcsolódhatnak")
     }
@@ -485,7 +503,7 @@ class HciUsbController(
             }
             if (active != null && hidControlReady && !hidChannelsReady &&
                 lastHidInputMs == 0L &&
-                now - hidOpenAttemptAtMs >= HID_INTERRUPT_STAGE_TIMEOUT_MS &&
+                now - hidOpenAttemptAtMs >= hidInterruptStageTimeoutMs() &&
                 hidInterruptOpenRetries < HID_MAX_RETRIES
             ) {
                 hidInterruptOpenRetries++
@@ -499,7 +517,9 @@ class HciUsbController(
                 // Never issue diagnostic HCI commands while the real-time HID stream is
                 // active. Some Android USB stacks serialize control and bulk transfers,
                 // which produces periodic multi-second input stalls.
-                if (lastHidInputMs == 0L && now - lastLinkCheck >= LINK_CHECK_INTERVAL_MS) {
+                if (lastHidInputMs == 0L && allowIdleLinkCheck() &&
+                    now - lastLinkCheck >= LINK_CHECK_INTERVAL_MS
+                ) {
                     sendCommand(0x1405, byteArrayOf(handle.toByte(), (handle ushr 8).toByte()))
                     lastLinkCheck = now
                 }
@@ -519,27 +539,10 @@ class HciUsbController(
             }
             val event = readEvent(500) ?: continue
             when (event.code) {
-                0x04 -> if (event.parameters.size >= 10) {
-                    val addressBytes = event.parameters.copyOfRange(0, 6)
-                    val address = formatAddress(addressBytes, 0)
-                    val known = discoveredDevices[address] ?: InquiryDevice(
-                        address, addressBytes, 0x01, 0, 0,
-                        "%02X%02X%02X".format(
-                            event.parameters[8].u8(), event.parameters[7].u8(), event.parameters[6].u8()
-                        ),
-                        null, text(R.string.dualsense_bridge_paired_name)
-                    )
-                    onLog("Incoming Connection Request ← $address")
-                    val paired = loadLinkKey(address) != null
-                    val explicitlyAuthorized = authorizedPairingAddress == address
-                    if (paired || explicitlyAuthorized) {
-                        connectAndPair(known, incomingAddress = addressBytes)
-                    } else {
-                        onLog("Incoming connection rejected: $address (not paired/authorized)")
-                        // HCI Reject Connection Request: unacceptable address.
-                        sendCommand(0x040A, addressBytes + byteArrayOf(0x0F))
-                    }
-                }
+                // Always queue an incoming page. The host loop services this
+                // intent before discovery, recovery and manual connection work,
+                // so a controller-initiated reconnect cannot race a live Inquiry.
+                0x04 -> queueIncomingConnection(event.parameters)
                 0x05 -> handleDisconnection(event.parameters)
                 0x14 -> handleModeChange(event.parameters)
                 0x0E -> handleCommandComplete(event.parameters)
@@ -548,20 +551,27 @@ class HciUsbController(
         }
     }
 
+    @Volatile private var liveDiscoveryInProgress = false
+
     private fun performLiveDiscovery(generation: Long) {
-        onStatus(text(R.string.dualsense_bridge_status_classic_scan))
-        onLog("Live HCI Inquiry → clearing stale discovery cache")
-        discoveredDevices.clear()
-        // Keep paired controllers pageable during both inquiry and the remote
-        // name requests that follow it.
-        enableIncomingConnections()
-        sendCommand(0x0401, byteArrayOf(
-            0x33, 0x8B.toByte(), 0x9E.toByte(), 0x08, 0x00
-        ))
-        val discovered = resolveRemoteNames(scanUntilComplete(generation), generation)
-        discovered.forEach { discoveredDevices[it.address] = it }
-        onStatus(text(R.string.dualsense_bridge_status_scan_finished))
-        onLog("Live HCI Inquiry complete → ${discovered.size} device(s)")
+        liveDiscoveryInProgress = true
+        try {
+            onStatus(text(R.string.dualsense_bridge_status_classic_scan))
+            onLog("Live HCI Inquiry → clearing stale discovery cache")
+            discoveredDevices.clear()
+            // Keep paired controllers pageable during both inquiry and the remote
+            // name requests that follow it.
+            enableIncomingConnections()
+            sendCommand(0x0401, byteArrayOf(
+                0x33, 0x8B.toByte(), 0x9E.toByte(), 0x08, 0x00
+            ))
+            val discovered = resolveRemoteNames(scanUntilComplete(generation), generation)
+            discovered.forEach { discoveredDevices[it.address] = it }
+            onStatus(text(R.string.dualsense_bridge_status_scan_finished))
+            onLog("Live HCI Inquiry complete → ${discovered.size} device(s)")
+        } finally {
+            liveDiscoveryInProgress = false
+        }
     }
 
     private fun handleCommandComplete(parameters: ByteArray) {
@@ -654,9 +664,8 @@ class HciUsbController(
 
     private fun open() {
         val interfaces = (0 until device.interfaceCount).map(device::getInterface)
-        val iface = interfaces.firstOrNull(::isBluetoothInterface)
-            ?: interfaces.firstOrNull(::hasHciEndpointLayout)
-            ?: error("Nincs használható Bluetooth HCI interfész")
+        val conn = usbManager.openDevice(device) ?: error("Az USB eszköz nem nyitható meg")
+        val iface = selectHciInterface(conn, interfaces)
         val endpoint = (0 until iface.endpointCount)
             .map(iface::getEndpoint)
             .firstOrNull {
@@ -675,7 +684,6 @@ class HciUsbController(
                 it.direction == UsbConstants.USB_DIR_OUT &&
                     it.type == UsbConstants.USB_ENDPOINT_XFER_BULK
             } ?: error("Hiányzik a HCI ACL bulk OUT endpoint")
-        val conn = usbManager.openDevice(device) ?: error("Az USB eszköz nem nyitható meg")
         if (!conn.claimInterface(iface, true)) {
             conn.close()
             error("A Bluetooth interfész nem foglalható le")
@@ -902,6 +910,14 @@ class HciUsbController(
         }
     }
 
+    /** Profile hook: Generic chooses the first standard Bluetooth HCI interface. */
+    protected open fun selectHciInterface(
+        connection: UsbDeviceConnection,
+        interfaces: List<UsbInterface>
+    ): UsbInterface = interfaces.firstOrNull(::isBluetoothInterface)
+        ?: interfaces.firstOrNull(::hasHciEndpointLayout)
+        ?: error("Nincs használható Bluetooth HCI interfész")
+
     /**
      * Re-arm only an actually under-running Bluetooth microphone session.
      *
@@ -985,6 +1001,9 @@ class HciUsbController(
         }
     }
 
+    /** Profile seam: Generic Profile 1 receives an already-complete ACL packet. */
+    protected open fun normalizeIncomingAclPacket(packet: AclPacket): AclPacket? = packet
+
     private fun aclReadLoop() {
         // Reuse one carry buffer instead of copying the complete pending stream on
         // every report. This keeps GC away from the real-time input edge.
@@ -1059,10 +1078,10 @@ class HciUsbController(
                 val packetBoundary = (handleAndFlags ushr 12) and 0x03
                 val aclPayload = pending.copyOfRange(offset + 4, packetEnd)
                 val isStart = packetBoundary == 0 || packetBoundary == 2
-                val cid = if (isStart && aclPayload.size >= 4) aclPayload.le16(2) else null
+                var cid = if (isStart && aclPayload.size >= 4) aclPayload.le16(2) else null
                 val l2capLength = if (isStart && aclPayload.size >= 4) aclPayload.le16(0) else null
-                val payload = if (cid != null) aclPayload.copyOfRange(4, aclPayload.size) else aclPayload
-                val packet = AclPacket(
+                var payload = if (cid != null) aclPayload.copyOfRange(4, aclPayload.size) else aclPayload
+                var packet = AclPacket(
                     handle = handle,
                     packetBoundary = packetBoundary,
                     cid = cid,
@@ -1072,6 +1091,15 @@ class HciUsbController(
                     // avoidable garbage collection pressure.
                     rawHex = ""
                 )
+                // Profile 1 receives complete HID reports in the normal ACL
+                // layout. Profiles whose USB transport fragments an L2CAP
+                // payload may reassemble it before the report parser sees it.
+                packet = normalizeIncomingAclPacket(packet) ?: run {
+                    offset = packetEnd
+                    continue
+                }
+                cid = packet.cid
+                payload = packet.payload
                 val now = System.currentTimeMillis()
                 if (now - lastAclLogMs >= ACL_LOG_INTERVAL_MS) {
                     lastAclLogMs = now
@@ -1225,7 +1253,12 @@ class HciUsbController(
         else -> "Bluetooth bontás"
     }
 
-    private fun requireCommandComplete(opcode: Int, parameters: ByteArray = byteArrayOf()): ByteArray {
+    /**
+     * Profile seam only. Profile 1 uses this implementation unchanged; adapter
+     * subclasses may apply a narrowly-scoped startup retry for their own
+     * transport quirks.
+     */
+    protected open fun requireCommandComplete(opcode: Int, parameters: ByteArray = byteArrayOf()): ByteArray {
         sendCommand(opcode, parameters)
         val deadline = System.currentTimeMillis() + COMMAND_TIMEOUT_MS
         while (running.get() && System.currentTimeMillis() < deadline) {
@@ -1259,7 +1292,12 @@ class HciUsbController(
      * This is intentionally negotiated before inquiry/pairing because the HCI
      * specification only permits changing it while no connection exists.
      */
-    private fun configureControllerToHostAclFlowControl() {
+    /**
+     * Profile seam only. Profile 1 keeps the proven controller-to-host credit
+     * negotiation; adapters that falsely advertise this optional feature may
+     * decline it in their dedicated profile.
+     */
+    protected open fun configureControllerToHostAclFlowControl() {
         controllerToHostFlowControlEnabled = false
         hostCompletedAclHandle = -1
         hostCompletedAclPackets = 0
@@ -1738,8 +1776,8 @@ class HciUsbController(
         return null
     }
 
-    private fun sendCommand(opcode: Int, parameters: ByteArray = byteArrayOf(),
-                            logPacket: Boolean = true) {
+    protected open fun sendCommand(opcode: Int, parameters: ByteArray = byteArrayOf(),
+                                   logPacket: Boolean = true) {
         val packet = ByteArray(3 + parameters.size)
         packet[0] = (opcode and 0xFF).toByte()
         packet[1] = (opcode ushr 8).toByte()
@@ -1762,7 +1800,7 @@ class HciUsbController(
         l2cap[2] = cid.toByte()
         l2cap[3] = (cid ushr 8).toByte()
         payload.copyInto(l2cap, 4)
-        val fragmentLimit = aclDataPacketLength.coerceAtLeast(MIN_ACL_DATA_PACKET_LENGTH)
+        val fragmentLimit = outgoingAclFragmentLimit(aclDataPacketLength)
         var offset = 0
         var firstFragment = true
         while (offset < l2cap.size) {
@@ -1791,6 +1829,10 @@ class HciUsbController(
             )
         }
     }
+
+    /** Profile seam: Generic Profile 1 trusts the HCI-reported ACL payload MTU. */
+    protected open fun outgoingAclFragmentLimit(reportedBytes: Int): Int =
+        reportedBytes.coerceAtLeast(MIN_ACL_DATA_PACKET_LENGTH)
 
     private fun handleL2capSignaling(handle: Int, payload: ByteArray) {
         var offset = 0
@@ -2023,10 +2065,25 @@ class HciUsbController(
         onStatus(text(R.string.dualsense_bridge_status_recovery_waiting))
     }
 
-    private fun hasHidChannelProgress(): Boolean =
+    protected fun hasHidChannelProgress(): Boolean =
         pendingChannels.values.any { it.psm == 0x0011 || it.psm == 0x0013 } ||
             pendingConfigs.values.any { it.psm == 0x0011 || it.psm == 0x0013 } ||
             channelsByLocalCid.values.any { it.psm == 0x0011 || it.psm == 0x0013 }
+
+    /** Profile 1's established HID opening timeout. */
+    protected open fun hidInterruptStageTimeoutMs(): Long = HID_INTERRUPT_STAGE_TIMEOUT_MS
+
+    /** Profile 1 may probe an idle ACL link while no HID setup is in flight. */
+    protected open fun allowIdleLinkCheck(): Boolean = true
+
+    /** Profile 1 maintains its historical immediate startup discovery behavior. */
+    protected open fun runStartupInquiry(): Boolean = true
+
+    /** Read-only lifecycle seam for profiles with fragile Inquiry firmware. */
+    protected fun isLiveDiscoveryInProgress(): Boolean = liveDiscoveryInProgress
+
+    /** True after Search has been requested but before the host worker starts it. */
+    protected fun isDiscoveryQueued(): Boolean = pendingDiscovery
 
     private fun requestL2capChannel(handle: Int, psm: Int) {
         hidOpenAttemptAtMs = System.currentTimeMillis()
@@ -2137,8 +2194,9 @@ class HciUsbController(
         hidInterruptReopenAtMs = hidOpenAttemptAtMs + HID_CHANNEL_REOPEN_DELAY_MS
     }
 
-    private fun readEvent(timeoutMs: Int): HciEvent? {
-        val buffer = ByteArray(260)
+    /** Profile seam: Profile 2 reassembles fixed-size fake-CSR event fragments. */
+    protected open fun readEvent(timeoutMs: Int): HciEvent? {
+        val buffer = ByteArray(eventReadBufferBytes())
         val size = connection?.bulkTransfer(eventIn, buffer, buffer.size, timeoutMs) ?: -1
         if (size <= 0) return null
         check(size >= 2) { "Túl rövid HCI event: $size byte" }
@@ -2155,7 +2213,14 @@ class HciUsbController(
         return event
     }
 
-    private fun recordCompletedAclPackets(parameters: ByteArray) {
+    /** Generic HCI accepts a maximum-size event read; adapter profiles may not. */
+    protected open fun eventReadBufferBytes(): Int = 260
+
+    /**
+     * Accounts for HCI Number Of Completed Packets events. Profile 2 owns its
+     * fragmented event reader, so it must invoke the same accounting itself.
+     */
+    protected fun recordCompletedAclPackets(parameters: ByteArray) {
         if (parameters.isEmpty()) return
         var offset = 1
         var completed = 0L
@@ -2219,7 +2284,7 @@ class HciUsbController(
         connection = null
     }
 
-    private data class HciEvent(val code: Int, val parameters: ByteArray)
+    protected data class HciEvent(val code: Int, val parameters: ByteArray)
     private data class NativeAudioPayload(
         val haptics: ByteArray,
         val speakerOpus: ByteArray?,
