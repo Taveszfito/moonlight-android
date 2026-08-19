@@ -182,7 +182,8 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
         String[] hciProfiles = {
                 "Auto (recommended)",
                 "Profile 1 · Generic HCI",
-                "Profile 2 · CSR HCI (0A12:0001)"
+                "Profile 2 · CSR HCI (0A12:0001)",
+                "Profile 3 · Realtek HCI (0BDA:A760)"
         };
         Spinner hciProfile = spinner(hciProfiles);
         int requestedProfile = DualSenseBridge.requestedHciProfile();
@@ -204,8 +205,8 @@ public class DualSenseBridgeActivity extends AppCompatActivity {
             @Override public void onNothingSelected(AdapterView<?> parent) { }
         });
         connection.addView(labelled("Bluetooth adapter profile", hciProfile));
-        TextView profileHint = text("Profile 2 is isolated from the proven Generic HCI path. " +
-                "Auto selects it only for CSR 0A12:0001 adapters.", 12, TEXT_SECONDARY);
+        TextView profileHint = text("Profiles 2 and 3 are isolated from the proven Generic HCI path. " +
+                "Auto selects the matching profile only for its known adapter.", 12, TEXT_SECONDARY);
         profileHint.setPadding(0, dp(1), 0, dp(6));
         connection.addView(profileHint);
 

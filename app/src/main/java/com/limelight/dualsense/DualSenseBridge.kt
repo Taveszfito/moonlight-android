@@ -20,6 +20,7 @@ import com.example.usbbtonandroid.DualSenseOutputConfig
 import com.example.usbbtonandroid.TriggerMode
 import com.example.usbbtonandroid.hci.HciUsbController
 import com.example.usbbtonandroid.hci.CsrHciUsbController
+import com.example.usbbtonandroid.hci.RealtekHciUsbController
 import com.limelight.R
 import com.limelight.LimeLog
 import com.limelight.Game
@@ -40,6 +41,7 @@ object DualSenseBridge {
     const val HCI_PROFILE_AUTO = 0
     const val HCI_PROFILE_GENERIC = 1
     const val HCI_PROFILE_CSR = 2
+    const val HCI_PROFILE_REALTEK = 3
     private const val LOW_BATTERY_THRESHOLD_PERCENT = 15
 
     fun interface InputListener { fun onInput(input: DualSenseInput) }
@@ -321,7 +323,7 @@ object DualSenseBridge {
     @JvmStatic fun setHciProfile(context: Context, profile: Int) {
         initialize(context)
         requestedHciProfile = when (profile) {
-            HCI_PROFILE_GENERIC, HCI_PROFILE_CSR -> profile
+            HCI_PROFILE_GENERIC, HCI_PROFILE_CSR, HCI_PROFILE_REALTEK -> profile
             else -> HCI_PROFILE_AUTO
         }
         keyPrefs().edit().putInt(PREF_HCI_PROFILE, requestedHciProfile).apply()
@@ -333,14 +335,18 @@ object DualSenseBridge {
     @JvmStatic fun activeHciProfileName(): String = hciProfileName(activeHciProfile)
 
     private fun selectHciProfile(device: UsbDevice): Int = when (requestedHciProfile) {
-        HCI_PROFILE_GENERIC, HCI_PROFILE_CSR -> requestedHciProfile
-        else -> if (device.vendorId == CSR_VENDOR_ID && device.productId == CSR_PRODUCT_ID)
-            HCI_PROFILE_CSR else HCI_PROFILE_GENERIC
+        HCI_PROFILE_GENERIC, HCI_PROFILE_CSR, HCI_PROFILE_REALTEK -> requestedHciProfile
+        else -> when {
+            device.vendorId == CSR_VENDOR_ID && device.productId == CSR_PRODUCT_ID -> HCI_PROFILE_CSR
+            device.vendorId == REALTEK_VENDOR_ID && device.productId == REALTEK_PRODUCT_ID -> HCI_PROFILE_REALTEK
+            else -> HCI_PROFILE_GENERIC
+        }
     }
 
     private fun hciProfileName(profile: Int): String = when (profile) {
         HCI_PROFILE_GENERIC -> "Profile 1 · Generic HCI"
         HCI_PROFILE_CSR -> "Profile 2 · CSR HCI"
+        HCI_PROFILE_REALTEK -> "Profile 3 · Realtek HCI"
         else -> "Auto"
     }
 
@@ -545,8 +551,11 @@ object DualSenseBridge {
         appendLog("Opening ${hciProfileName(activeHciProfile)} for USB %04X:%04X".format(
             device.vendorId, device.productId))
         updateStatus(s(R.string.dualsense_bridge_status_initializing))
-        val createController = if (activeHciProfile == HCI_PROFILE_CSR)
-            ::CsrHciUsbController else ::HciUsbController
+        val createController = when (activeHciProfile) {
+            HCI_PROFILE_CSR -> ::CsrHciUsbController
+            HCI_PROFILE_REALTEK -> ::RealtekHciUsbController
+            else -> ::HciUsbController
+        }
         controller = createController(
             usbManager, device,
             { id, args -> s(id, *args) },
@@ -955,6 +964,8 @@ object DualSenseBridge {
     private const val DISCOVERED_DEVICE_EXPIRY_MS = 30_000L
     private const val CSR_VENDOR_ID = 0x0A12
     private const val CSR_PRODUCT_ID = 0x0001
+    private const val REALTEK_VENDOR_ID = 0x0BDA
+    private const val REALTEK_PRODUCT_ID = 0xA760
     private const val FORGET_CALLBACK_GUARD_MS = 5_000L
     private const val RECONNECT_PREPARE_DELAY_MS = 350L
     private const val RECOVERY_OVERLAY_READY_TIMEOUT_MS = 20_000L

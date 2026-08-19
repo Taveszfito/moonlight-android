@@ -526,7 +526,7 @@ open class HciUsbController(
             }
             if (active != null && hidOpenAttempted && !hidChannelsReady &&
                 lastHidInputMs == 0L &&
-                now - encryptedAtMs >= HID_START_TIMEOUT_MS
+                now - encryptedAtMs >= hidStartTimeoutMs()
             ) {
                 onStatus(text(R.string.dualsense_bridge_status_no_hid_stream))
                 if (hidRecoveryCycles < HID_INITIAL_RECOVERY_CYCLES &&
@@ -2072,6 +2072,13 @@ open class HciUsbController(
 
     /** Profile 1's established HID opening timeout. */
     protected open fun hidInterruptStageTimeoutMs(): Long = HID_INTERRUPT_STAGE_TIMEOUT_MS
+
+    /**
+     * Profile 1 treats an encrypted link without HID as failed after six
+     * seconds.  Some adapter firmwares need a longer one-time authorization
+     * window and override this without changing the generic/Baseus path.
+     */
+    protected open fun hidStartTimeoutMs(): Long = HID_START_TIMEOUT_MS
 
     /** Profile 1 may probe an idle ACL link while no HID setup is in flight. */
     protected open fun allowIdleLinkCheck(): Boolean = true
