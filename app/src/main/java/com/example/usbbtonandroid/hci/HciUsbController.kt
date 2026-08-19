@@ -1119,6 +1119,10 @@ open class HciUsbController(
                 }
                 val isHidInput = cid != null && cid != 0x0001 &&
                     payload.firstOrNull()?.u8() == 0xA1
+                if (cid != null && cid != 0x0001 && !isHidInput) {
+                    val channel = channelsByLocalCid[cid]
+                    onNonHidL2capPayload(handle, cid, channel?.remoteCid, channel?.psm, payload)
+                }
                 // Bluetooth Duplex audio is sent by the DualSense on the same
                 // 0x31 input-report path as gamepad state. A microphone frame
                 // is tagged by bit 1 of report byte 2 and contains exactly one
@@ -1514,7 +1518,7 @@ open class HciUsbController(
             // Preserve the controller as BR/EDR master for controller-initiated
             // reconnects. This matches the proven DS5Dongle link setup and lets
             // the DualSense schedule its own 100 Hz microphone ACL uplink.
-            sendCommand(0x0409, incomingAddress + byteArrayOf(0x01))
+            sendCommand(0x0409, incomingAddress + byteArrayOf(incomingConnectionRole()))
         } else {
             onLog("Create Connection → ${device.address}")
             val parameters = ByteArray(13)
@@ -2000,8 +2004,14 @@ open class HciUsbController(
             hidControlReady = true
             hidOpenAttemptAtMs = System.currentTimeMillis()
             onStatus(text(R.string.dualsense_bridge_status_hid_control_ready))
+            // A controller-initiated reconnect owns the HID channel sequence.
+            // Opening our own Interrupt channel here races the controller's
+            // PSM 0x0013 request and produces two otherwise-valid channels.
+            // The existing HID-stage timeout remains the fallback if the
+            // controller never opens Interrupt.
             if (pendingChannels.values.none { it.psm == 0x0013 } &&
-                channelsByLocalCid.values.none { it.psm == 0x0013 }
+                channelsByLocalCid.values.none { it.psm == 0x0013 } &&
+                !channel.remoteInitiated
             ) requestL2capChannel(handle, 0x0013)
         } else if (channel.psm == 0x0013) {
             hidInterruptRemoteCid = channel.remoteCid
@@ -2079,6 +2089,24 @@ open class HciUsbController(
      * window and override this without changing the generic/Baseus path.
      */
     protected open fun hidStartTimeoutMs(): Long = HID_START_TIMEOUT_MS
+
+    /** HCI Accept Connection Request role: 0x01 keeps the controller master. */
+    protected open fun incomingConnectionRole(): Byte = 0x01
+
+    /** Optional profile-only observability for non-HID L2CAP services such as SDP. */
+    protected open fun onNonHidL2capPayload(
+        handle: Int,
+        cid: Int,
+        remoteCid: Int?,
+        psm: Int?,
+        payload: ByteArray
+    ) = Unit
+
+    /** Profile-only reply path for a negotiated non-HID L2CAP service. */
+    protected fun sendNonHidL2capPayload(handle: Int, remoteCid: Int, payload: ByteArray) {
+        sendAcl(handle, remoteCid, payload)
+    }
+
 
     /** Profile 1 may probe an idle ACL link while no HID setup is in flight. */
     protected open fun allowIdleLinkCheck(): Boolean = true
