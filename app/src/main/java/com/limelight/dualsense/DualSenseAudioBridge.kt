@@ -62,7 +62,7 @@ object DualSenseAudioBridge {
     private val headsetStreamPcm = ByteArray(2_048)
     private var headsetStreamPcmPosition = 0
     @Volatile private var standardStreamRoutedToHeadset = false
-    private val btNativeResampler = NativeBluetoothHapticsResampler { haptics, speaker ->
+    private val btNativeResampler = NativeBluetoothHapticsResampler({ haptics, speaker ->
         if (speaker != null) btSpeakerReports++
         val sent = if (DualSenseBridge.controllerConnected) {
             DualSenseBridge.sendNativeBluetoothHaptics(haptics, speaker)
@@ -76,7 +76,9 @@ object DualSenseAudioBridge {
         } else {
             btNativeDrops++
         }
-    }
+    }, onDirectSilence = {
+        DirectDualSenseBt.discardNativeAudioBacklogOnSilence()
+    })
 
     private val permissionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -478,7 +480,8 @@ object DualSenseAudioBridge {
      * reduced to motor strengths, dynamically compressed, or otherwise shaped.
      */
     private class NativeBluetoothHapticsResampler(
-        private val sendReport: (ByteArray, ByteArray?) -> Unit
+        private val sendReport: (ByteArray, ByteArray?) -> Unit,
+        private val onDirectSilence: () -> Unit,
     ) {
         private val left = DoubleArray(FIR_TAPS)
         private val right = DoubleArray(FIR_TAPS)
@@ -489,6 +492,7 @@ object DualSenseAudioBridge {
         private var decimationPhase = 0
         private var reportPosition = 0
         private var speakerPosition = 0
+        private var directSilenceSignalled = false
 
         fun pushFourChannelPcm(pcm: ByteArray, frameCount: Int, includeSpeaker: Boolean) {
             var offset = 0
@@ -500,7 +504,12 @@ object DualSenseAudioBridge {
                 }
                 speakerPosition += 4
                 if (speakerPosition == speakerPcm.size) {
-                    latestSpeakerOpus = if (includeSpeaker) {
+                    val speakerIsSilent = speakerPcm.all { it == 0.toByte() }
+                    // Preserve the bridge's proven continuous clock. For the
+                    // direct Android route, exact decoded PCM silence need not
+                    // be encoded and queued merely to retain old latency.
+                    latestSpeakerOpus = if (includeSpeaker &&
+                        (DualSenseBridge.controllerConnected || !speakerIsSilent)) {
                         DualSenseBtAudioNative.encodeSpeaker(speakerPcm).also {
                             if (it == null) btSpeakerEncodeFailures++
                         }
@@ -531,7 +540,12 @@ object DualSenseAudioBridge {
                         // real-time block. The next non-silent block resumes the
                         // native stream immediately.
                         if (hasHaptics || speaker != null) {
+                            directSilenceSignalled = false
                             sendReport(report.copyOf(), speaker)
+                        } else if (!DualSenseBridge.controllerConnected &&
+                            !directSilenceSignalled) {
+                            directSilenceSignalled = true
+                            onDirectSilence()
                         }
                         reportPosition = 0
                     }
@@ -551,6 +565,7 @@ object DualSenseAudioBridge {
             decimationPhase = 0
             reportPosition = 0
             speakerPosition = 0
+            directSilenceSignalled = false
         }
 
         private fun filter(channel: DoubleArray): Double {
