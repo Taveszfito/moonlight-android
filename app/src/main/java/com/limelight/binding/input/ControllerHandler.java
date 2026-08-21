@@ -52,6 +52,7 @@ import com.example.usbbtonandroid.DualSenseInput;
 import com.example.usbbtonandroid.DualSenseTouchPoint;
 import com.limelight.dualsense.DualSenseBridge;
 import com.limelight.dualsense.DualSenseWiredOutput;
+import com.limelight.dualsense.DirectDualSenseBt;
 import com.limelight.nvstream.input.MouseButtonPacket;
 import com.limelight.nvstream.jni.MoonBridge;
 import com.limelight.preferences.PreferenceConfiguration;
@@ -191,6 +192,77 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     private volatile long dualSenseBridgeLastInputAtMs;
     private volatile boolean dualSenseBridgeFailsafeReleased = true;
     private volatile boolean dualSenseBridgeStreamConnected;
+    private final boolean[] directTouchActive = new boolean[2];
+    private final int[] directTouchId = new int[2];
+    private final float[] directTouchX = new float[2];
+    private final float[] directTouchY = new float[2];
+    private final int[] directTouchMissingReports = new int[2];
+    private final long[] directTouchLastSeenMs = new long[2];
+    private static final long DIRECT_TOUCH_RELEASE_GRACE_MS = 350;
+    private final boolean[] directTouchHostActive = new boolean[2];
+    private final float[] directTouchRenderedX = new float[2];
+    private final float[] directTouchRenderedY = new float[2];
+    private static final long DIRECT_TOUCH_RENDER_INTERVAL_MS = 16;
+    private static final float DIRECT_TOUCH_SMOOTHING = 0.55f;
+    private boolean directTouchReportLogged;
+    private boolean directTouchMotionLogged;
+    private final long[] directTouchMotionLastSendMs = new long[32];
+    private static final long DIRECT_TOUCH_MOTION_INTERVAL_MS = 16;
+    private final Runnable directDualSenseTouchPollRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (stopped || !dualSenseBridgeStreamConnected ||
+                    DualSenseBridge.getControllerConnected() ||
+                    !DirectDualSenseBt.isConnected(activityContext)) {
+                return;
+            }
+            byte[] report = DirectDualSenseBt.readInputReport();
+            if (report != null) {
+                handleDirectDualSenseTouchReport(report);
+            }
+            backgroundThreadHandler.postDelayed(this, 16);
+        }
+    };
+    private final Runnable directDualSenseTouchRenderRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (stopped || !dualSenseBridgeStreamConnected) return;
+            InputDeviceContext context = findDirectDualSenseContext();
+            if (context != null && !prefConfig.controllerKbmMode) {
+                synchronized (directTouchActive) {
+                    for (int pointer = 0; pointer < 2; pointer++) {
+                        if (directTouchActive[pointer]) {
+                            byte type;
+                            if (!directTouchHostActive[pointer]) {
+                                directTouchRenderedX[pointer] = directTouchX[pointer];
+                                directTouchRenderedY[pointer] = directTouchY[pointer];
+                                directTouchHostActive[pointer] = true;
+                                type = MoonBridge.LI_TOUCH_EVENT_DOWN;
+                            }
+                            else {
+                                directTouchRenderedX[pointer] +=
+                                        (directTouchX[pointer] - directTouchRenderedX[pointer]) *
+                                                DIRECT_TOUCH_SMOOTHING;
+                                directTouchRenderedY[pointer] +=
+                                        (directTouchY[pointer] - directTouchRenderedY[pointer]) *
+                                                DIRECT_TOUCH_SMOOTHING;
+                                type = MoonBridge.LI_TOUCH_EVENT_MOVE;
+                            }
+                            conn.sendControllerTouchEvent((byte) context.controllerNumber, type, pointer,
+                                    directTouchRenderedX[pointer], directTouchRenderedY[pointer], 1.0f);
+                        }
+                        else if (directTouchHostActive[pointer]) {
+                            conn.sendControllerTouchEvent((byte) context.controllerNumber,
+                                    MoonBridge.LI_TOUCH_EVENT_UP, pointer,
+                                    directTouchRenderedX[pointer], directTouchRenderedY[pointer], 0.0f);
+                            directTouchHostActive[pointer] = false;
+                        }
+                    }
+                }
+            }
+            mainThreadHandler.postDelayed(this, DIRECT_TOUCH_RENDER_INTERVAL_MS);
+        }
+    };
     private boolean dualSenseBridgeMicrophoneMutePressed;
     private final Runnable dualSenseBridgeFailsafeRunnable = new Runnable() {
         @Override
@@ -1442,6 +1514,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             return;
         }
         assignControllerNumberIfNeeded(originalContext);
+        if (originalContext instanceof InputDeviceContext) {
+            ((InputDeviceContext) originalContext).maybeRenegotiateDirectDualSense();
+        }
 
         // Take the context's controller number and fuse all inputs with the same number
         short controllerNumber = originalContext.controllerNumber;
@@ -1622,9 +1697,137 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             LimeLog.info("DualSense Bridge declared controller for new stream session");
         }
 
+        // Android may enumerate an already-connected Bluetooth gamepad before
+        // the stream exists, but its controller number was historically assigned
+        // only when the first input event arrived. Declare a direct DualSense at
+        // stream start so Apollo creates the endpoint without requiring a button.
+        if (!DualSenseBridge.getControllerConnected() && DirectDualSenseBt.isConnected(activityContext)) {
+            for (int i = 0; i < inputDeviceContexts.size(); i++) {
+                InputDeviceContext context = inputDeviceContexts.valueAt(i);
+                if (!isDirectWiredDualSense(context)) continue;
+                hasGameController = true;
+                if (!context.assignedControllerNumber) {
+                    assignControllerNumberIfNeeded(context);
+                } else {
+                    context.sendControllerArrival();
+                }
+                LimeLog.info("Direct DualSense declared controller for new stream session: controller=" +
+                        context.controllerNumber);
+            }
+        }
+
         mainThreadHandler.removeCallbacks(dualSenseBridgeStreamWatchdogRunnable);
         mainThreadHandler.postDelayed(dualSenseBridgeStreamWatchdogRunnable,
                 DUALSENSE_BRIDGE_STREAM_WATCHDOG_MS);
+        // Do not poll BluetoothHidHost.getReport() for the live 0x31 input report.
+        // Android already delivers the DualSense touch surface as MotionEvents.
+        // On Samsung, getReport() shares the serialized HID transaction path with
+        // output reports; an unanswered request stalls that path for its full
+        // timeout and starves the controller's 10.67 ms audio cadence. It also
+        // duplicates successful touch samples with the MotionEvent path.
+        backgroundThreadHandler.removeCallbacks(directDualSenseTouchPollRunnable);
+        mainThreadHandler.removeCallbacks(directDualSenseTouchRenderRunnable);
+    }
+
+    private InputDeviceContext findDirectDualSenseContext() {
+        for (int i = 0; i < inputDeviceContexts.size(); i++) {
+            InputDeviceContext context = inputDeviceContexts.valueAt(i);
+            if (isDirectWiredDualSense(context) &&
+                    DirectDualSenseBt.isBluetoothDualSenseInput(context.inputDevice)) {
+                if (!context.assignedControllerNumber) assignControllerNumberIfNeeded(context);
+                return context;
+            }
+        }
+        return null;
+    }
+
+    private void handleDirectDualSenseTouchReport(byte[] report) {
+        // Bluetooth report 0x31 contains the common DualSense input payload at
+        // byte 2. The two four-byte touch records begin at absolute offsets 34/38.
+        if (report.length < 42 || (report[0] & 0xff) != 0x31) return;
+        InputDeviceContext context = findDirectDualSenseContext();
+        if (context == null || prefConfig.controllerKbmMode) return;
+        if (!directTouchReportLogged) {
+            directTouchReportLogged = true;
+            LimeLog.info("Direct DualSense touch input report active: length=" + report.length);
+        }
+        boolean[] rawActive = new boolean[2];
+        int[] rawId = new int[2];
+        float[] rawX = new float[2];
+        float[] rawY = new float[2];
+        for (int rawSlot = 0; rawSlot < 2; rawSlot++) {
+            int offset = 34 + rawSlot * 4;
+            int contact = report[offset] & 0xff;
+            rawActive[rawSlot] = (contact & 0x80) == 0;
+            rawId[rawSlot] = contact & 0x7f;
+            float x = ((report[offset + 1] & 0xff) |
+                    ((report[offset + 2] & 0x0f) << 8)) / 1920.0f;
+            float y = (((report[offset + 2] & 0xf0) >> 4) |
+                    ((report[offset + 3] & 0xff) << 4)) / 1080.0f;
+            rawX[rawSlot] = Math.max(0, Math.min(1, x));
+            rawY[rawSlot] = Math.max(0, Math.min(1, y));
+        }
+
+        synchronized (directTouchActive) {
+        // Release logical pointers whose hardware contact ID disappeared. A
+        // contact may move between the two raw report slots without ending.
+        for (int pointer = 0; pointer < 2; pointer++) {
+            if (!directTouchActive[pointer]) continue;
+            boolean stillPresent = false;
+            for (int rawSlot = 0; rawSlot < 2; rawSlot++) {
+                if (rawActive[rawSlot] && rawId[rawSlot] == directTouchId[pointer]) {
+                    stillPresent = true;
+                    break;
+                }
+            }
+            if (!stillPresent) {
+                // BluetoothHidHost.getReport() can occasionally return a snapshot
+                // with a transiently stale/inactive touch record. Debounce release
+                // so one missing sample cannot turn a continuous contact into an
+                // UP/DOWN pair on the host.
+                directTouchMissingReports[pointer]++;
+                if (SystemClock.uptimeMillis() - directTouchLastSeenMs[pointer] <
+                        DIRECT_TOUCH_RELEASE_GRACE_MS) continue;
+                directTouchActive[pointer] = false;
+                directTouchMissingReports[pointer] = 0;
+            }
+            else {
+                directTouchMissingReports[pointer] = 0;
+                directTouchLastSeenMs[pointer] = SystemClock.uptimeMillis();
+            }
+        }
+
+        // Match each active hardware contact to its persistent logical pointer.
+        for (int rawSlot = 0; rawSlot < 2; rawSlot++) {
+            if (!rawActive[rawSlot]) continue;
+            int pointer = -1;
+            for (int i = 0; i < 2; i++) {
+                if (directTouchActive[i] && directTouchId[i] == rawId[rawSlot]) {
+                    pointer = i;
+                    break;
+                }
+            }
+            boolean wasActive = pointer >= 0;
+            if (!wasActive) {
+                for (int i = 0; i < 2; i++) if (!directTouchActive[i]) { pointer = i; break; }
+            }
+            if (pointer < 0) continue;
+            boolean moved = !wasActive || directTouchX[pointer] != rawX[rawSlot] ||
+                    directTouchY[pointer] != rawY[rawSlot];
+            if (!moved) continue;
+            byte type = wasActive ? MoonBridge.LI_TOUCH_EVENT_MOVE : MoonBridge.LI_TOUCH_EVENT_DOWN;
+            int touchResult = 0;
+            if (!wasActive) LimeLog.info("Direct DualSense touch DOWN: rawSlot=" + rawSlot +
+                    ", hardwareId=" + rawId[rawSlot] + ", pointerId=" + pointer +
+                    ", result=" + touchResult);
+            directTouchActive[pointer] = true;
+            directTouchMissingReports[pointer] = 0;
+            directTouchLastSeenMs[pointer] = SystemClock.uptimeMillis();
+            directTouchId[pointer] = rawId[rawSlot];
+            directTouchX[pointer] = rawX[rawSlot];
+            directTouchY[pointer] = rawY[rawSlot];
+        }
+        }
     }
 
     private void releaseStaleDualSenseBridgeInput() {
@@ -3076,38 +3279,94 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     }
 
     private boolean sendTouchpadEventForPointer(InputDeviceContext context, MotionEvent event, byte touchType, int pointerIndex) {
+        final int pointerId = event.getPointerId(pointerIndex);
+        final int timingSlot = pointerId & (directTouchMotionLastSendMs.length - 1);
+        final long nowMs = SystemClock.uptimeMillis();
+        if (touchType == MoonBridge.LI_TOUCH_EVENT_MOVE &&
+                nowMs - directTouchMotionLastSendMs[timingSlot] < DIRECT_TOUCH_MOTION_INTERVAL_MS) {
+            // Samsung can dispatch the external touchpad substantially faster
+            // than the stream input cadence. Coalesce MOVE events to display
+            // rate so controller input cannot starve Apollo's audio callback.
+            return true;
+        }
+        directTouchMotionLastSendMs[timingSlot] =
+                (touchType == MoonBridge.LI_TOUCH_EVENT_UP ||
+                        touchType == MoonBridge.LI_TOUCH_EVENT_CANCEL ||
+                        touchType == MoonBridge.LI_TOUCH_EVENT_CANCEL_ALL) ? 0 : nowMs;
         float normalizedX = normalizeRawValueWithRange(event.getX(pointerIndex), context.touchpadXRange);
         float normalizedY = normalizeRawValueWithRange(event.getY(pointerIndex), context.touchpadYRange);
         float normalizedPressure = context.touchpadPressureRange != null ?
                 normalizeRawValueWithRange(event.getPressure(pointerIndex), context.touchpadPressureRange)
-                : 0;
+                : 1.0f;
+        // The DualSense touch node has no pressure axis on this Samsung build.
+        // A zero-pressure DOWN/MOVE is treated as an inactive contact by some
+        // hosts, so use binary pressure when Android cannot provide it.
+        if (normalizedPressure <= 0 && touchType != MoonBridge.LI_TOUCH_EVENT_UP &&
+                touchType != MoonBridge.LI_TOUCH_EVENT_CANCEL &&
+                touchType != MoonBridge.LI_TOUCH_EVENT_CANCEL_ALL) {
+            normalizedPressure = 1.0f;
+        }
 
         return conn.sendControllerTouchEvent((byte)context.controllerNumber, touchType,
-                event.getPointerId(pointerIndex),
+                pointerId,
                 normalizedX, normalizedY, normalizedPressure) != MoonBridge.LI_ERR_UNSUPPORTED;
     }
 
     public boolean tryHandleTouchpadEvent(MotionEvent event) {
         // Bail if this is not a touchpad or mouse event
-        if (event.getSource() != InputDevice.SOURCE_TOUCHPAD &&
-                event.getSource() != InputDevice.SOURCE_MOUSE) {
+        final int eventSource = event.getSource();
+        final InputDevice eventDevice = event.getDevice();
+        final boolean samsungRemappedDualSenseTouchpad = eventDevice != null &&
+                isDualSenseProduct(eventDevice.getVendorId(), eventDevice.getProductId()) &&
+                (eventDevice.getSources() & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD;
+        final boolean isTouchpad =
+                (eventSource & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD ||
+                samsungRemappedDualSenseTouchpad;
+        final boolean isMouse =
+                (eventSource & InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE;
+        if (!isTouchpad && !isMouse) {
             return false;
         }
 
         // Only get a context if one already exists. We want to ensure we don't report non-gamepads.
         InputDeviceContext context = inputDeviceContexts.get(event.getDeviceId());
+        // Samsung may expose the DualSense touch surface as a separate event
+        // node/device ID even though the controller endpoint is represented by
+        // the consolidated gamepad InputDevice. Associate that touch event with
+        // the existing controller instead of requiring Bluetooth GET_REPORT
+        // polling, which serializes against controller audio output.
+        if (context == null && isTouchpad && event.getDevice() != null &&
+                event.getDevice().getVendorId() == 0x054c) {
+            context = findDirectDualSenseContext();
+        }
         if (context == null) {
             return false;
+        }
+        if (samsungRemappedDualSenseTouchpad && !directTouchMotionLogged) {
+            directTouchMotionLogged = true;
+            LimeLog.info("Direct DualSense touch MotionEvent active: source=0x" +
+                    Integer.toHexString(eventSource) + ", pointers=" + event.getPointerCount() +
+                    ", action=" + event.getActionMasked());
+        }
+        if (!context.assignedControllerNumber) {
+            assignControllerNumberIfNeeded(context);
         }
         if (prefConfig.controllerKbmMode) {
             return true;
         }
 
+        // Direct DualSense input must retain its native touch surface. This is
+        // an extended controller channel, so converting it exclusively to a
+        // mouse would prevent the host from ever seeing DualSense touches.
+        final boolean nativeDirectDualSense = isTouchpad &&
+                isDirectWiredDualSense(context) &&
+                DirectDualSenseBt.isBluetoothDualSenseInput(context.inputDevice);
+
         // When we're working with a mouse source instead of a touchpad, we're quite limited in
         // what useful input we can provide via the controller API. The ABS_X/ABS_Y values are
         // screen coordinates rather than touchpad coordinates. For now, we will just support
         // the clickpad button and nothing else.
-        if (event.getSource() == InputDevice.SOURCE_MOUSE) {
+        if (isMouse && !isTouchpad) {
             // Unlike the touchpad where down and up refer to individual touches on the touchpad,
             // down and up on a mouse indicates the state of the left mouse button.
             switch (event.getActionMasked()) {
@@ -3181,7 +3440,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         // NB: We do this after processing ACTION_BUTTON_PRESS and ACTION_BUTTON_RELEASE
         // because we want to still send the touchpad button via the gamepad even when
         // configured to use the touchpad for mouse control.
-        if (prefConfig.gamepadTouchpadAsMouse) {
+        if (prefConfig.gamepadTouchpadAsMouse && !nativeDirectDualSense) {
             return false;
         }
 
@@ -3479,6 +3738,15 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 deviceContext.lowFreqMotor = lowFreqMotor;
                 deviceContext.highFreqMotor = highFreqMotor;
 
+                // A DualSense paired to Android gets the same native HID reports as the
+                // external bridge path. Do not also invoke Android's generic vibrator API.
+                if (DirectDualSenseBt.isBluetoothDualSenseInput(deviceContext.inputDevice) &&
+                        DirectDualSenseBt.isConnected(activityContext)) {
+                    vibrated = DirectDualSenseBt.sendRumble(activityContext,
+                            lowFreqMotor, highFreqMotor);
+                    continue;
+                }
+
                 // Prefer the documented Android 12 rumble API which can handle dual vibrators on PS/Xbox controllers
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && deviceContext.vibratorManager != null) {
                     vibrated = true;
@@ -3556,6 +3824,11 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 InputDeviceContext deviceContext = inputDeviceContexts.valueAt(i);
 
                 if (deviceContext.controllerNumber == controllerNumber) {
+                    if (DirectDualSenseBt.isBluetoothDualSenseInput(deviceContext.inputDevice) &&
+                            DirectDualSenseBt.isConnected(activityContext)) {
+                        DirectDualSenseBt.setTriggerRumble(activityContext, leftTrigger, rightTrigger);
+                        continue;
+                    }
                     if (isDirectWiredDualSense(deviceContext)) {
                         int left = ((leftTrigger & 0xFFFF) * 100) / 65535;
                         int right = ((rightTrigger & 0xFFFF) * 100) / 65535;
@@ -3780,11 +4053,26 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             DualSenseBridge.sendHostLed(r, g, b);
         }
 
+        boolean directBluetoothHandled = false;
+        LimeLog.info("Routing controller LED: target=" + controllerNumber +
+                ", Android controllers=" + inputDeviceContexts.size());
         for (int i = 0; i < inputDeviceContexts.size(); i++) {
             InputDeviceContext deviceContext = inputDeviceContexts.valueAt(i);
+            LimeLog.info("LED route candidate: controller=" + deviceContext.controllerNumber +
+                    ", name=" + deviceContext.inputDevice.getName() +
+                    ", dualSense=" + isDirectWiredDualSense(deviceContext));
             if (deviceContext.controllerNumber == controllerNumber &&
                     isDirectWiredDualSense(deviceContext)) {
-                DualSenseWiredOutput.sendLed(r, g, b);
+                if (DirectDualSenseBt.isBluetoothDualSenseInput(deviceContext.inputDevice)) {
+                    // sendLed() updates the persistent desired state before it
+                    // checks HID_HOST readiness. This preserves early host LED
+                    // events and lets a later player/trigger update carry the
+                    // same RGB values in its complete state snapshot.
+                    directBluetoothHandled = DirectDualSenseBt.sendLed(activityContext, r, g, b);
+                }
+                else {
+                    DualSenseWiredOutput.sendLed(r, g, b);
+                }
             }
         }
 
@@ -3801,7 +4089,7 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 InputDeviceContext deviceContext = inputDeviceContexts.valueAt(i);
 
                 // Ignore input devices without an RGB LED
-                if (deviceContext.controllerNumber == controllerNumber && deviceContext.hasRgbLed) {
+                if (!directBluetoothHandled && deviceContext.controllerNumber == controllerNumber && deviceContext.hasRgbLed) {
                     // Create a new light session if one doesn't already exist
                     if (deviceContext.lightsSession == null) {
                         deviceContext.lightsSession = deviceContext.inputDevice.getLightsManager().openSession();
@@ -3838,6 +4126,10 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             return;
         }
 
+        LimeLog.info("Routing DualSense extension: target=" + controllerNumber +
+                ", flags=0x" + Integer.toHexString(eventFlags & 0xFF) +
+                ", Android controllers=" + inputDeviceContexts.size());
+
         if (controllerNumber == dualSenseBridgeContext.controllerNumber &&
                 DualSenseBridge.getControllerConnected()) {
             if ((eventFlags & 0x80) != 0 && left != null && left.length > 0) {
@@ -3850,12 +4142,31 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
         for (int i = 0; i < inputDeviceContexts.size(); i++) {
             InputDeviceContext context = inputDeviceContexts.valueAt(i);
+            LimeLog.info("DualSense route candidate: controller=" + context.controllerNumber +
+                    ", name=" + context.inputDevice.getName() +
+                    ", dualSense=" + isDirectWiredDualSense(context));
             if (context.controllerNumber != controllerNumber || !isDirectWiredDualSense(context)) continue;
-            if ((eventFlags & 0x80) != 0 && left != null && left.length > 0) {
-                DualSenseWiredOutput.setPlayerLeds(left[0] & 0x1F, false);
+            // The Samsung InputDevice string doesn't consistently expose its
+            // bluetoothAddress even though HID_HOST has selected the paired pad.
+            // At this point the product is already verified as DualSense and the
+            // external bridge makes DirectDualSenseBt.isConnected() return false,
+            // so HID_HOST connectivity is the authoritative route discriminator.
+            if (DirectDualSenseBt.isConnected(activityContext)) {
+                if ((eventFlags & 0x80) != 0 && left != null && left.length > 0) {
+                    DirectDualSenseBt.setPlayerLeds(activityContext, left[0] & 0x1F);
+                }
+                if ((eventFlags & 0x0C) != 0) {
+                    DirectDualSenseBt.setAdaptiveTriggerEffects(activityContext, eventFlags,
+                            typeLeft, typeRight, left, right);
+                }
             }
-            if ((eventFlags & 0x0C) != 0) {
-                DualSenseWiredOutput.setAdaptiveTriggerEffects(eventFlags, typeLeft, typeRight, left, right);
+            else {
+                if ((eventFlags & 0x80) != 0 && left != null && left.length > 0) {
+                    DualSenseWiredOutput.setPlayerLeds(left[0] & 0x1F, false);
+                }
+                if ((eventFlags & 0x0C) != 0) {
+                    DualSenseWiredOutput.setAdaptiveTriggerEffects(eventFlags, typeLeft, typeRight, left, right);
+                }
             }
         }
 
@@ -4945,6 +5256,18 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 return;
             }
         }
+
+        for (int index = 0; index < inputDeviceContexts.size(); index++) {
+            InputDeviceContext context = inputDeviceContexts.valueAt(index);
+            if (context.controllerNumber == controllerNumber && context.inputDevice != null &&
+                    DirectDualSenseBt.isBluetoothDualSenseInput(context.inputDevice)) {
+                context.directExtendedAcceptedMode = status == 0 ? accepted : -1;
+                if (status == 0) context.directExtendedRequestAttempts = 5;
+                LimeLog.info("Direct DualSense Extended ACK: requested=" + requested +
+                        ", accepted=" + accepted + ", status=" + status);
+                return;
+            }
+        }
     }
 
     class GenericControllerContext implements GameInputDevice{
@@ -5135,6 +5458,28 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         public short accelReportRateHz;
 
         public InputDevice inputDevice;
+        private byte directExtendedAcceptedMode = -1;
+        private int directExtendedRequestAttempts;
+        private long directExtendedRequestAtMs;
+        private byte directReportedType;
+        private int directSupportedButtonFlags;
+        private short directCapabilities;
+
+        void maybeRenegotiateDirectDualSense() {
+            if (!assignedControllerNumber || inputDevice == null ||
+                    !DirectDualSenseBt.isBluetoothDualSenseInput(inputDevice) ||
+                    directExtendedRequestAttempts >= 5) return;
+            long now = SystemClock.uptimeMillis();
+            if (now - directExtendedRequestAtMs < 1200) return;
+            int result = conn.sendControllerArrivalEvent((byte) controllerNumber,
+                    getActiveControllerMask(), directReportedType,
+                    directSupportedButtonFlags, directCapabilities);
+            directExtendedRequestAttempts++;
+            directExtendedRequestAtMs = now;
+            LimeLog.info("Direct DualSense Extended negotiation " +
+                    directExtendedRequestAttempts + "/5: result=" + result +
+                    ", previousAck=" + directExtendedAcceptedMode);
+        }
 
         public boolean hasRgbLed;
         public LightsManager.LightsSession lightsSession;
@@ -5328,7 +5673,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             // Direct USB access supplies these native DualSense output paths even
             // when Android doesn't expose corresponding Vibrator/Light objects.
             if (isDualSenseProduct(inputDevice.getVendorId(), inputDevice.getProductId())) {
-                capabilities |= MoonBridge.LI_CCAP_RUMBLE | MoonBridge.LI_CCAP_RGB_LED;
+                capabilities |= MoonBridge.LI_CCAP_RUMBLE | MoonBridge.LI_CCAP_TRIGGER_RUMBLE |
+                        MoonBridge.LI_CCAP_RGB_LED;
             }
 
             // Report sensors if the input device has them or we're using built-in sensors for a built-in controller
@@ -5376,8 +5722,34 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
             capabilities = extendedEmulationCapabilities(capabilities, type);
 
-            conn.sendControllerArrivalEvent((byte)controllerNumber, getActiveControllerMask(),
+            if (DirectDualSenseBt.isBluetoothDualSenseInput(inputDevice)) {
+                directReportedType = reportedType;
+                directSupportedButtonFlags = supportedButtonFlags;
+                directCapabilities = capabilities;
+                directExtendedAcceptedMode = -1;
+                directExtendedRequestAttempts = 1;
+                directExtendedRequestAtMs = SystemClock.uptimeMillis();
+            }
+
+            // Apollo may have already created this slot from a legacy input packet
+            // before Android finishes enumerating the InputDevice. Replace that
+            // legacy slot explicitly so the extended DualSense endpoint is created.
+            if (isDualSenseProduct(inputDevice.getVendorId(), inputDevice.getProductId()) &&
+                    DirectDualSenseBt.isBluetoothDualSenseInput(inputDevice)) {
+                short activeMask = getActiveControllerMask();
+                short maskWithoutController = (short) (activeMask & ~(1 << controllerNumber));
+                conn.sendControllerInput(controllerNumber, maskWithoutController,
+                        0, (byte) 0, (byte) 0,
+                        (short) 0, (short) 0, (short) 0, (short) 0);
+            }
+
+            int arrivalResult = conn.sendControllerArrivalEvent((byte)controllerNumber, getActiveControllerMask(),
                     reportedType, supportedButtonFlags, capabilities);
+            if (isDualSenseProduct(inputDevice.getVendorId(), inputDevice.getProductId())) {
+                LimeLog.info("Direct DualSense controller arrival: controller=" + controllerNumber +
+                        ", type=" + reportedType + ", capabilities=0x" +
+                        Integer.toHexString(capabilities & 0xFFFF) + ", result=" + arrivalResult);
+            }
 
             // After reporting arrival to the host, send initial battery state and begin monitoring
             // Might result in stutter in pointer device input. The problem happens within Android framework,

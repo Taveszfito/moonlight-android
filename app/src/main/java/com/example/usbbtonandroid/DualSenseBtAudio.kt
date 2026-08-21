@@ -6,9 +6,38 @@ import java.util.zip.CRC32
 object DualSenseBtAudioBuilder {
     const val HAPTICS_BYTES_PER_REPORT = 64
 
+    /** Reference Android transport: two 10.667 ms media frames per HID write. */
+    fun buildTwoFrame(haptics1: ByteArray, haptics2: ByteArray,
+                      speakerOpus1: ByteArray, speakerOpus2: ByteArray,
+                      sequence: Int, packetCounter: Int,
+                      headsetRoute: Boolean = false, latencyScale: Int = 0x80): ByteArray {
+        require(haptics1.size == HAPTICS_BYTES_PER_REPORT && haptics2.size == HAPTICS_BYTES_PER_REPORT)
+        require(speakerOpus1.size == SPEAKER_BYTES_PER_REPORT && speakerOpus2.size == SPEAKER_BYTES_PER_REPORT)
+        val report = ByteArray(547)
+        report[0] = 0x39
+        report[1] = ((sequence and 0x0f) shl 4).toByte()
+        report[2] = 0x91.toByte()
+        report[3] = 0x07
+        report[4] = 0xfe.toByte()
+        report.fill(latencyScale.coerceIn(0, 0xff).toByte(), 5, 10)
+        report[10] = packetCounter.toByte()
+        // 0xD3 routes both channels to the internal speaker. 0xD6 is full
+        // headset stereo. 0xD5 is the broken split speaker/headset mode.
+        report[11] = if (headsetRoute) 0xd6.toByte() else 0xd3.toByte()
+        report[12] = 200.toByte()
+        speakerOpus1.copyInto(report, 13)
+        speakerOpus2.copyInto(report, 213)
+        report[413] = 0xd2.toByte()
+        report[414] = 64
+        haptics1.copyInto(report, 415)
+        haptics2.copyInto(report, 479)
+        fillBluetoothCrc(report)
+        return report
+    }
+
     fun build(haptics: ByteArray, sequence: Int, packetCounter: Int,
               speakerOpus: ByteArray? = null, headsetRoute: Boolean = false,
-              microphoneEnabled: Boolean = false): ByteArray {
+              microphoneEnabled: Boolean = false, latencyScale: Int = 64): ByteArray {
         require(haptics.size == HAPTICS_BYTES_PER_REPORT)
         require(speakerOpus == null || speakerOpus.size == SPEAKER_BYTES_PER_REPORT)
 
@@ -23,7 +52,7 @@ object DualSenseBtAudioBuilder {
         report[4] = if (microphoneEnabled) 0xff.toByte() else 0xfe.toByte()
         // Each native haptics frame below is 64 bytes. Advertising 48 here
         // makes the controller consume a truncated/attenuated haptics block.
-        report.fill(64, 5, 10)
+        report.fill(latencyScale.coerceIn(0, 0xff).toByte(), 5, 10)
         report[10] = packetCounter.toByte()
         if (speakerOpus != null) {
             // 0x13 is the internal speaker stream; 0x16 is the physical

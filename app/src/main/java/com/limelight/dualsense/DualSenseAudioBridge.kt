@@ -57,20 +57,21 @@ object DualSenseAudioBridge {
     private var btSpeakerReports = 0L
     private var btSpeakerEncodeFailures = 0L
     private var lastBtDiagnosticAtMs = 0L
+    @Volatile private var headsetStreamOpus: ByteArray? = null
+    @Volatile private var lastNativeBtReportAtMs = 0L
+    private val headsetStreamPcm = ByteArray(2_048)
+    private var headsetStreamPcmPosition = 0
+    @Volatile private var standardStreamRoutedToHeadset = false
     private val btNativeResampler = NativeBluetoothHapticsResampler { haptics, speaker ->
         if (speaker != null) btSpeakerReports++
-        if (DualSenseBridge.sendNativeBluetoothHaptics(haptics, speaker)) {
-            btNativeReports++
+        val sent = if (DualSenseBridge.controllerConnected) {
+            DualSenseBridge.sendNativeBluetoothHaptics(haptics, speaker)
         } else {
-            btNativeDrops++
+            lastNativeBtReportAtMs = SystemClock.elapsedRealtime()
+            DirectDualSenseBt.sendNativeAudio(appContext, haptics,
+                if (DirectDualSenseBt.isHeadsetRoute()) headsetStreamOpus ?: speaker else speaker)
         }
-    }
-    // Normal Moonlight game audio is independent from Apollo's 4-channel
-    // controller feedback. A second packetizer keeps its speaker Opus frames
-    // from modifying the physical HD-haptics samples on channels 3/4.
-    private val btStreamSpeakerResampler = NativeBluetoothHapticsResampler { haptics, speaker ->
-        if (speaker != null) btSpeakerReports++
-        if (DualSenseBridge.sendNativeBluetoothHaptics(haptics, speaker, speakerOnly = true)) {
+        if (sent) {
             btNativeReports++
         } else {
             btNativeDrops++
@@ -102,6 +103,15 @@ object DualSenseAudioBridge {
         controllerVolume = selectedVolume.coerceIn(0, 100)
         DualSenseBridge.setBluetoothHeadsetRoute(
             mode == "usb_headset" || (mode == "auto" && DualSenseBridge.headphonesConnected))
+        if (!DualSenseBridge.controllerConnected) {
+            // Auto mode is owned by the physical jack poller. Do not reset its
+            // live detection to speaker every time a stream is configured.
+            when (mode) {
+                "usb_headset" -> DirectDualSenseBt.setHeadsetRoute(appContext, true)
+                "usb_speaker", "haptics_only", "off" ->
+                    DirectDualSenseBt.setHeadsetRoute(appContext, false)
+            }
+        }
         LimeLog.info("DualSense audio mode: $mode, controller volume: $controllerVolume%")
     }
 
@@ -109,40 +119,49 @@ object DualSenseAudioBridge {
         controllerVolume = selectedVolume.coerceIn(0, 100)
     }
 
-    /**
-     * Routes ordinary Moonlight game audio to a wired controller only while a
-     * headset is physically present. The regular Android AudioTrack caller
-     * receives true only after the ISO packet was accepted, so the phone never
-     * goes silent merely because the controller route is unavailable.
-     *
-     * Channels 1/2 carry the game mix; channels 3/4 are explicitly silent here
-     * and stay reserved for Apollo's independent native HD-haptics packets.
-     */
-    @JvmStatic fun routeStandardStreamAudio(pcm: ShortArray, channels: Int): Boolean {
-        if (mode == "off" || channels < 2 || pcm.isEmpty()) return false
-        val frameCount = pcm.size / channels
-        if (frameCount <= 0) return false
-        val output = ByteArray(frameCount * 8)
-        var input = 0
-        var outputOffset = 0
-        repeat(frameCount) {
-            writeScaledS16(output, outputOffset, pcm[input])
-            writeScaledS16(output, outputOffset + 2, pcm[input + 1])
-            // 3/4 intentionally remain zero: native haptics is delivered by
-            // receive(), not derived from or mixed into game speaker audio.
-            input += channels
-            outputOffset += 8
+    /** Route the main stream exclusively to a directly-connected DualSense jack. */
+    @JvmStatic @Synchronized fun routeStandardStreamAudio(pcm: ShortArray, channels: Int): Boolean {
+        if (!initialized || channels <= 0 || !DirectDualSenseBt.isHeadsetRoute()) {
+            if (standardStreamRoutedToHeadset) {
+                standardStreamRoutedToHeadset = false
+                LimeLog.info("Main stream audio returned to Android AudioTrack")
+            }
+            headsetStreamPcmPosition = 0
+            headsetStreamOpus = null
+            return false
         }
-        if (wiredControllerActive && DualSenseController.getActiveHeadphonesConnected() &&
-            usbRouteActive) {
-            return DualSenseIsoNative.push(output) == 0
+        if (!standardStreamRoutedToHeadset) {
+            standardStreamRoutedToHeadset = true
+            LimeLog.info("Main stream audio routed exclusively to DualSense headset")
         }
-        if (DualSenseBridge.controllerConnected &&
-            (mode == "usb_headset" || (mode == "auto" && DualSenseBridge.headphonesConnected))) {
-            btStreamSpeakerResampler.pushFourChannelPcm(output, frameCount, true)
-            return true
+
+        var sourceFrame = 0
+        val sourceFrames = pcm.size / channels
+        while (sourceFrame < sourceFrames) {
+            val left = pcm[sourceFrame * channels]
+            val right = if (channels > 1) pcm[sourceFrame * channels + 1] else left
+            headsetStreamPcm[headsetStreamPcmPosition++] = left.toByte()
+            headsetStreamPcm[headsetStreamPcmPosition++] = (left.toInt() shr 8).toByte()
+            headsetStreamPcm[headsetStreamPcmPosition++] = right.toByte()
+            headsetStreamPcm[headsetStreamPcmPosition++] = (right.toInt() shr 8).toByte()
+            sourceFrame++
+            if (headsetStreamPcmPosition == headsetStreamPcm.size) {
+                val encoded = DualSenseBtAudioNative.encodeSpeaker(headsetStreamPcm)
+                if (encoded != null) {
+                    headsetStreamOpus = encoded
+                    // Normally Apollo's native controller stream supplies the
+                    // 10.67 ms report clock and haptics. Fall back to our own
+                    // silent-haptics carrier when that endpoint is absent.
+                    if (SystemClock.elapsedRealtime() - lastNativeBtReportAtMs > 50L) {
+                        DirectDualSenseBt.sendNativeAudio(appContext, ByteArray(64), encoded, true)
+                    }
+                } else {
+                    btSpeakerEncodeFailures++
+                }
+                headsetStreamPcmPosition = 0
+            }
         }
-        return false
+        return true
     }
 
     @JvmStatic fun initialize(context: Context) {
@@ -223,7 +242,8 @@ object DualSenseAudioBridge {
         // A wireless DualSense carries the original haptic waveform through its
         // native 3 kHz stereo Bluetooth audio reports. Do not derive rumble
         // amplitudes, envelopes, bass boosts, or any other synthetic feedback.
-        if (mode == "auto" || mode == "haptics_only") {
+        if (mode == "auto" || mode == "haptics_only" ||
+            (!DualSenseBridge.controllerConnected && DirectDualSenseBt.isConnected(appContext))) {
             btNativeResampler.pushFourChannelPcm(volumeAdjustedPcm, frameCount,
                 includeSpeaker = mode != "haptics_only")
             val now = SystemClock.elapsedRealtime()
@@ -296,7 +316,9 @@ object DualSenseAudioBridge {
     private fun effectiveSpeakerGainPercent(): Int {
         val internalSpeakerActive =
             (wiredControllerActive && !DualSenseController.getActiveHeadphonesConnected()) ||
-                (DualSenseBridge.controllerConnected && !DualSenseBridge.headphonesConnected)
+                (DualSenseBridge.controllerConnected && !DualSenseBridge.headphonesConnected) ||
+                (!DualSenseBridge.controllerConnected && DirectDualSenseBt.isConnected(appContext) &&
+                    !DirectDualSenseBt.isHeadsetRoute())
         val maximum = if (internalSpeakerActive) INTERNAL_SPEAKER_MAX_GAIN_PERCENT else 100
         return controllerVolume * maximum / 100
     }
@@ -423,6 +445,7 @@ object DualSenseAudioBridge {
         if (!wiredControllerActive) closeUsbRoute()
         btNativeResampler.stop()
         DualSenseBridge.stopNativeBluetoothHaptics()
+        DirectDualSenseBt.stopNativeAudio(appContext)
         expectedSequence = -1
         pendingPackets.clear()
     }

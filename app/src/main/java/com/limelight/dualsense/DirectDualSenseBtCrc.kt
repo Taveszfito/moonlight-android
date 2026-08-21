@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
+
+package com.limelight.dualsense
+
+object DirectDualSenseBtCrc
+{
+    private const val CRC_SEED = 0xEADA2D49.toInt()
+
+    fun compute(buffer: ByteArray, length: Int): Int
+    {
+        var result = CRC_SEED
+        for(i in 0 until length)
+        {
+            val index = (result xor (buffer[i].toInt() and 0xFF)) and 0xFF
+            result = CRC_TABLE[index] xor (result ushr 8)
+        }
+        return result
+    }
+
+    private val CRC_TABLE = intArrayOf(
+        0xD202EF8D.toInt(), 0xA505DF1B.toInt(), 0x3C0C8EA1, 0x4B0BBE37,
+        0xD56F2B94.toInt(), 0xA2681B02.toInt(), 0x3B614AB8, 0x4C667A2E,
+        0xDCD967BF.toInt(), 0xABDE5729.toInt(), 0x32D70693, 0x45D03605,
+        0xDBB4A3A6.toInt(), 0xACB39330.toInt(), 0x35BAC28A, 0x42BDF21C,
+        0xCFB5FFE9.toInt(), 0xB8B2CF7F.toInt(), 0x21BB9EC5, 0x56BCAE53,
+        0xC8D83BF0.toInt(), 0xBFDF0B66.toInt(), 0x26D65ADC, 0x51D16A4A,
+        0xC16E77DB.toInt(), 0xB669474D.toInt(), 0x2F6016F7, 0x58672661,
+        0xC603B3C2.toInt(), 0xB1048354.toInt(), 0x280DD2EE, 0x5F0AE278,
+        0xE96CCF45.toInt(), 0x9E6BFFD3.toInt(), 0x0762AE69, 0x70659EFF,
+        0xEE010B5C.toInt(), 0x99063BCA.toInt(), 0x000F6A70, 0x77085AE6,
+        0xE7B74777.toInt(), 0x90B077E1.toInt(), 0x09B9265B, 0x7EBE16CD,
+        0xE0DA836E.toInt(), 0x97DDB3F8.toInt(), 0x0ED4E242, 0x79D3D2D4,
+        0xF4DBDF21.toInt(), 0x83DCEFB7.toInt(), 0x1AD5BE0D, 0x6DD28E9B,
+        0xF3B61B38.toInt(), 0x84B12BAE.toInt(), 0x1DB87A14, 0x6ABF4A82,
+        0xFA005713.toInt(), 0x8D076785.toInt(), 0x140E363F, 0x630906A9,
+        0xFD6D930A.toInt(), 0x8A6AA39C.toInt(), 0x1363F226, 0x6464C2B0,
+        0xA4DEAE1D.toInt(), 0xD3D99E8B.toInt(), 0x4AD0CF31, 0x3DD7FFA7,
+        0xA3B36A04.toInt(), 0xD4B45A92.toInt(), 0x4DBD0B28, 0x3ABA3BBE,
+        0xAA05262F.toInt(), 0xDD0216B9.toInt(), 0x440B4703, 0x330C7795,
+        0xAD68E236.toInt(), 0xDA6FD2A0.toInt(), 0x4366831A, 0x3461B38C,
+        0xB969BE79.toInt(), 0xCE6E8EEF.toInt(), 0x5767DF55, 0x2060EFC3,
+        0xBE047A60.toInt(), 0xC9034AF6.toInt(), 0x500A1B4C, 0x270D2BDA,
+        0xB7B2364B.toInt(), 0xC0B506DD.toInt(), 0x59BC5767, 0x2EBB67F1,
+        0xB0DFF252.toInt(), 0xC7D8C2C4.toInt(), 0x5ED1937E, 0x29D6A3E8,
+        0x9FB08ED5.toInt(), 0xE8B7BE43.toInt(), 0x71BEEFF9, 0x06B9DF6F,
+        0x98DD4ACC.toInt(), 0xEFDA7A5A.toInt(), 0x76D32BE0, 0x01D41B76,
+        0x916B06E7.toInt(), 0xE66C3671.toInt(), 0x7F6567CB, 0x0862575D,
+        0x9606C2FE.toInt(), 0xE101F268.toInt(), 0x7808A3D2, 0x0F0F9344,
+        0x82079EB1.toInt(), 0xF500AE27.toInt(), 0x6C09FF9D, 0x1B0ECF0B,
+        0x856A5AA8.toInt(), 0xF26D6A3E.toInt(), 0x6B643B84, 0x1C630B12,
+        0x8CDC1683.toInt(), 0xFBDB2615.toInt(), 0x62D277AF, 0x15D54739,
+        0x8BB1D29A.toInt(), 0xFCB6E20C.toInt(), 0x65BFB3B6, 0x12B88320,
+        0x3FBA6CAD, 0x48BD5C3B, 0xD1B40D81.toInt(), 0xA6B33D17.toInt(),
+        0x38D7A8B4, 0x4FD09822, 0xD6D9C998.toInt(), 0xA1DEF90E.toInt(),
+        0x3161E49F, 0x4666D409, 0xDF6F85B3.toInt(), 0xA868B525.toInt(),
+        0x360C2086, 0x410B1010, 0xD80241AA.toInt(), 0xAF05713C.toInt(),
+        0x220D7CC9, 0x550A4C5F, 0xCC031DE5.toInt(), 0xBB042D73.toInt(),
+        0x2560B8D0, 0x52678846, 0xCB6ED9FC.toInt(), 0xBC69E96A.toInt(),
+        0x2CD6F4FB, 0x5BD1C46D, 0xC2D895D7.toInt(), 0xB5DFA541.toInt(),
+        0x2BBB30E2, 0x5CBC0074, 0xC5B551CE.toInt(), 0xB2B26158.toInt(),
+        0x04D44C65, 0x73D37CF3, 0xEADA2D49.toInt(), 0x9DDD1DDF.toInt(),
+        0x03B9887C, 0x74BEB8EA, 0xEDB7E950.toInt(), 0x9AB0D9C6.toInt(),
+        0x0A0FC457, 0x7D08F4C1, 0xE401A57B.toInt(), 0x930695ED.toInt(),
+        0x0D62004E, 0x7A6530D8, 0xE36C6162.toInt(), 0x946B51F4.toInt(),
+        0x19635C01, 0x6E646C97, 0xF76D3D2D.toInt(), 0x806A0DBB.toInt(),
+        0x1E0E9818, 0x6909A88E, 0xF000F934.toInt(), 0x8707C9A2.toInt(),
+        0x17B8D433, 0x60BFE4A5, 0xF9B6B51F.toInt(), 0x8EB18589.toInt(),
+        0x10D5102A, 0x67D220BC, 0xFEDB7106.toInt(), 0x89DC4190.toInt(),
+        0x49662D3D, 0x3E611DAB, 0xA7684C11.toInt(), 0xD06F7C87.toInt(),
+        0x4E0BE924, 0x390CD9B2, 0xA0058808.toInt(), 0xD702B89E.toInt(),
+        0x47BDA50F, 0x30BA9599, 0xA9B3C423.toInt(), 0xDEB4F4B5.toInt(),
+        0x40D06116, 0x37D75180, 0xAEDE003A.toInt(), 0xD9D930AC.toInt(),
+        0x54D13D59, 0x23D60DCF, 0xBADF5C75.toInt(), 0xCDD86CE3.toInt(),
+        0x53BCF940, 0x24BBC9D6, 0xBDB2986C.toInt(), 0xCAB5A8FA.toInt(),
+        0x5A0AB56B, 0x2D0D85FD, 0xB404D447.toInt(), 0xC303E4D1.toInt(),
+        0x5D677172, 0x2A6041E4, 0xB369105E.toInt(), 0xC46E20C8.toInt(),
+        0x72080DF5, 0x050F3D63, 0x9C066CD9.toInt(), 0xEB015C4F.toInt(),
+        0x7565C9EC, 0x0262F97A, 0x9B6BA8C0.toInt(), 0xEC6C9856.toInt(),
+        0x7CD385C7, 0x0BD4B551, 0x92DDE4EB.toInt(), 0xE5DAD47D.toInt(),
+        0x7BBE41DE, 0x0CB97148, 0x95B020F2.toInt(), 0xE2B71064.toInt(),
+        0x6FBF1D91, 0x18B82D07, 0x81B17CBD.toInt(), 0xF6B64C2B.toInt(),
+        0x68D2D988, 0x1FD5E91E, 0x86DCB8A4.toInt(), 0xF1DB8832.toInt(),
+        0x616495A3, 0x1663A535, 0x8F6AF48F.toInt(), 0xF86DC419.toInt(),
+        0x660951BA, 0x110E612C, 0x88073096.toInt(), 0xFF000000.toInt(),
+    )
+}
+

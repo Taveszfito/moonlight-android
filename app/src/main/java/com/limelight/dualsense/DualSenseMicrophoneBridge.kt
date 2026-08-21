@@ -60,6 +60,7 @@ object DualSenseMicrophoneBridge {
         muted = value
         DualSenseWiredOutput.setMicrophoneMuted(value)
         DualSenseBridge.setMicrophoneMuted(value)
+        DirectDualSenseBt.setMicrophoneMuted(value)
         LimeLog.info("DualSense microphone forwarding " + if (value) "muted" else "unmuted")
         return muted
     }
@@ -75,6 +76,10 @@ object DualSenseMicrophoneBridge {
             LimeLog.warning("DualSense microphone Opus encoder failed to start")
             return false
         }
+
+        // A new stream starts with forwarding enabled. The first physical mute
+        // button press must therefore perform a real mute, not restore stale state.
+        setMuted(false)
 
         // The USB bridge is a raw Bluetooth HCI transport, not an Android
         // AudioDevice. Its DualSense microphone returns Opus frames inside BT
@@ -103,6 +108,37 @@ object DualSenseMicrophoneBridge {
                 start()
             }
             LimeLog.info("DualSense Bridge microphone capture armed")
+            return true
+        }
+
+        if (selectedSource == SOURCE_DUALSENSE && DirectDualSenseBt.isDirectHidConnected(context)) {
+            if (!DualSenseMicrophoneNative.startBluetooth()) {
+                DualSenseMicrophoneNative.stop()
+                return false
+            }
+            bluetoothFrameQueue.clear()
+            bluetoothFramesDropped = 0
+            bluetoothFramesReceived.set(0)
+            bluetoothStreamFramesSent.set(0)
+            bluetoothStreamFailures.set(0)
+            bluetoothCaptureStartedAtMs = android.os.SystemClock.elapsedRealtime()
+            lastBluetoothFrameAtMs = 0L
+            lastBluetoothStreamSendAtMs = 0L
+            stopRequested.set(false)
+            running = true
+            bluetoothDecodeThread = Thread(::bluetoothDecodeLoop,
+                "DirectDualSenseBluetoothMicrophone").apply {
+                isDaemon = true
+                start()
+            }
+            if (!DirectDualSenseBt.setBluetoothMicrophoneCapture(true)) {
+                running = false
+                bluetoothDecodeThread?.interrupt()
+                bluetoothDecodeThread = null
+                DualSenseMicrophoneNative.stop()
+                return false
+            }
+            LimeLog.info("Direct DualSense Bluetooth microphone capture armed")
             return true
         }
 
@@ -158,6 +194,7 @@ object DualSenseMicrophoneBridge {
             start()
         }
         DualSenseWiredOutput.setMicrophoneMuted(muted)
+        DirectDualSenseBt.setMicrophoneMuted(muted)
         LimeLog.info("Client microphone capture started: $selectedSource")
         return true
     }
@@ -260,6 +297,7 @@ object DualSenseMicrophoneBridge {
     @JvmStatic @Synchronized fun stop() {
         if (selectedSource == SOURCE_DUALSENSE) {
             DualSenseBridge.setBluetoothMicrophoneCapture(false)
+            DirectDualSenseBt.setBluetoothMicrophoneCapture(false)
         }
         stopRequested.set(true)
         bluetoothDecodeThread?.interrupt()
@@ -274,6 +312,7 @@ object DualSenseMicrophoneBridge {
         running = false
         DualSenseMicrophoneNative.stop()
         DualSenseBridge.setMicrophoneMuted(muted)
+        DirectDualSenseBt.setMicrophoneMuted(muted)
     }
 
     /** Compact, live end-to-end client-side status for the in-stream bridge popup. */

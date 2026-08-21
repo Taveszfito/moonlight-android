@@ -259,6 +259,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     private static final int CONTROLLER_LOW_BATTERY_PERCENT = 15;
     private static final long CONTROLLER_LOW_BATTERY_REMINDER_MS = 5 * 60 * 1000L;
     private static final int MICROPHONE_PERMISSION_REQUEST = 741;
+    private static final int BLUETOOTH_CONTROLLER_PERMISSION_REQUEST = 742;
     private final Runnable hideControllerMicrophoneOverlay = () -> {
         if (controllerMicrophoneOverlayView != null) {
             controllerMicrophoneOverlayView.animate().cancel();
@@ -417,6 +418,12 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
         instance = this;
         timerHandler = new Handler(Looper.getMainLooper());
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT},
+                    BLUETOOTH_CONTROLLER_PERMISSION_REQUEST);
+        }
 
         UiHelper.setLocale(this);
 
@@ -3199,7 +3206,15 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
         int eventSource = event.getSource();
         int deviceSources = event.getDevice() != null ? event.getDevice().getSources() : 0;
-        if ((eventSource & InputDevice.SOURCE_CLASS_JOYSTICK) != 0) {
+        // A DualSense touchpad is exposed as a separate Linux event node on some
+        // Android devices. Its MotionEvent is a touchpad event, not a joystick
+        // event, even though the consolidated InputDevice also has joystick
+        // sources. Route it explicitly before the generic pointer/mouse path.
+        if ((eventSource & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD &&
+                controllerHandler.tryHandleTouchpadEvent(event)) {
+            return true;
+        }
+        else if ((eventSource & InputDevice.SOURCE_CLASS_JOYSTICK) != 0) {
             if (controllerHandler.handleMotionEvent(event)) {
                 return true;
             }
@@ -3783,6 +3798,37 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
     }
 
+    @Override
+    public boolean dispatchGenericMotionEvent(MotionEvent event) {
+        final int source = event.getSource();
+        if (controllerHandler != null && grabbedInput &&
+                (source & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD) {
+            LimeLog.info("DualSense touchpad dispatch: device=" + event.getDeviceId() +
+                    ", source=0x" + Integer.toHexString(source) +
+                    ", action=" + event.getActionMasked() +
+                    ", pointers=" + event.getPointerCount());
+            if (controllerHandler.tryHandleTouchpadEvent(event)) {
+                return true;
+            }
+        }
+        return super.dispatchGenericMotionEvent(event);
+    }
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        // On Samsung builds the standalone DualSense touch node can be routed
+        // through the Activity touch dispatcher rather than generic motion.
+        // Consume only genuine external touchpad events; touchscreen input must
+        // continue through Moonlight's normal absolute-touch path.
+        final int source = event.getSource();
+        if (controllerHandler != null && grabbedInput &&
+                (source & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD &&
+                controllerHandler.tryHandleTouchpadEvent(event)) {
+            return true;
+        }
+        return super.dispatchTouchEvent(event);
+    }
+
     private void updateMousePosition(View touchedView, MotionEvent event) {
         // X and Y are already relative to the provided view object
         float eventX, eventY;
@@ -4214,7 +4260,8 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         controllerMicrophoneOverlayView.animate().cancel();
         controllerMicrophoneOverlayView.setAlpha(0f);
         controllerMicrophoneOverlayView.setText(muted ?
-                "DualSense microphone muted" : "DualSense microphone enabled");
+                "Client microphone forwarding disabled" :
+                "Client microphone forwarding enabled");
         controllerMicrophoneOverlayView.setBackgroundResource(muted ?
                 R.drawable.controller_low_battery_overlay_background :
                 R.drawable.controller_status_overlay_green);
@@ -4274,6 +4321,8 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
     @Override
     public void setControllerLED(short controllerNumber, byte r, byte g, byte b) {
+        LimeLog.info("Host controller LED: controller=" + controllerNumber +
+                ", rgb=" + (r & 0xFF) + "," + (g & 0xFF) + "," + (b & 0xFF));
         controllerHandler.handleSetControllerLED(controllerNumber, r, g, b);
     }
 
@@ -4281,6 +4330,12 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     public void setAdaptiveTriggers(short controllerNumber, byte eventFlags,
                                     byte typeLeft, byte typeRight,
                                     byte[] left, byte[] right) {
+        LimeLog.info("Host DualSense extension: controller=" + controllerNumber +
+                ", flags=0x" + Integer.toHexString(eventFlags & 0xFF) +
+                ", leftType=0x" + Integer.toHexString(typeLeft & 0xFF) +
+                ", rightType=0x" + Integer.toHexString(typeRight & 0xFF) +
+                ", playerLed=" + (((eventFlags & 0x80) != 0 && left != null && left.length > 0) ?
+                (left[0] & 0x1F) : -1));
         if ((eventFlags & 0x40) != 0 && typeLeft == 0x41 && typeRight == 0x45 &&
                 left != null && left.length >= 5 && left[0] == 0x58 && left[1] == 1) {
             int requested = left[2] & 0xFF;
