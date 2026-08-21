@@ -493,6 +493,7 @@ object DualSenseAudioBridge {
         private var reportPosition = 0
         private var speakerPosition = 0
         private var directSilenceSignalled = false
+        private var directSilentSpeakerFrames = 0
 
         fun pushFourChannelPcm(pcm: ByteArray, frameCount: Int, includeSpeaker: Boolean) {
             var offset = 0
@@ -505,11 +506,23 @@ object DualSenseAudioBridge {
                 speakerPosition += 4
                 if (speakerPosition == speakerPcm.size) {
                     val speakerIsSilent = speakerPcm.all { it == 0.toByte() }
-                    // Preserve the bridge's proven continuous clock. For the
-                    // direct Android route, exact decoded PCM silence need not
-                    // be encoded and queued merely to retain old latency.
-                    latestSpeakerOpus = if (includeSpeaker &&
-                        (DualSenseBridge.controllerConnected || !speakerIsSilent)) {
+                    if (!DualSenseBridge.controllerConnected) {
+                        if (speakerIsSilent) {
+                            directSilentSpeakerFrames++
+                        } else {
+                            directSilentSpeakerFrames = 0
+                            directSilenceSignalled = false
+                        }
+                        if (directSilentSpeakerFrames >= DIRECT_REBASE_SILENCE_FRAMES &&
+                            !directSilenceSignalled) {
+                            // A sustained quiet interval is a safe point to discard
+                            // accumulated vendor/controller queue drift. Brief gaps
+                            // inside music never reconfigure the live decoder.
+                            directSilenceSignalled = true
+                            onDirectSilence()
+                        }
+                    }
+                    latestSpeakerOpus = if (includeSpeaker) {
                         DualSenseBtAudioNative.encodeSpeaker(speakerPcm).also {
                             if (it == null) btSpeakerEncodeFailures++
                         }
@@ -533,19 +546,8 @@ object DualSenseAudioBridge {
                     if (reportPosition == report.size) {
                         val hasHaptics = report.any { it != 0.toByte() }
                         val speaker = if (includeSpeaker) latestSpeakerOpus else null
-                        // USB isochronous endpoints require a continuous clock,
-                        // but the wireless DualSense audio transport is carried
-                        // in HID output reports. Do not consume radio airtime,
-                        // USB bandwidth, or encoder time for an entirely silent
-                        // real-time block. The next non-silent block resumes the
-                        // native stream immediately.
                         if (hasHaptics || speaker != null) {
-                            directSilenceSignalled = false
                             sendReport(report.copyOf(), speaker)
-                        } else if (!DualSenseBridge.controllerConnected &&
-                            !directSilenceSignalled) {
-                            directSilenceSignalled = true
-                            onDirectSilence()
                         }
                         reportPosition = 0
                     }
@@ -565,6 +567,7 @@ object DualSenseAudioBridge {
             decimationPhase = 0
             reportPosition = 0
             speakerPosition = 0
+            directSilentSpeakerFrames = 0
             directSilenceSignalled = false
         }
 
@@ -590,6 +593,8 @@ object DualSenseAudioBridge {
                 (data[offset + 1].toInt() shl 8)).toShort().toInt()
 
         companion object {
+            // Opus speaker frames are 10 ms each.
+            private const val DIRECT_REBASE_SILENCE_FRAMES = 50
             private const val INPUT_RATE = 48_000.0
             private const val CUTOFF_HZ = 1_400.0
             private const val DECIMATION = 16

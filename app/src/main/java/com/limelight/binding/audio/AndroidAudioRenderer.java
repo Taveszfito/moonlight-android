@@ -198,10 +198,12 @@ public class AndroidAudioRenderer implements AudioRenderer {
         }
         // Only queue up to 40 ms of pending audio data in addition to what AudioTrack is buffering for us.
         if (MoonBridge.getPendingAudioDuration() < 40) {
-            // This will block until the write is completed. That can cause a backlog
-            // of pending audio data, so we do the above check to be able to bound
-            // latency at 40 ms in that situation.
-            track.write(audioData, 0, audioData.length);
+            // Never let a vendor AudioTrack stall the native decoder callback.
+            // Blocking here also starves dedicated controller-audio processing,
+            // which then arrives in bursts and overruns its real-time HID queue.
+            // A partial non-blocking write is intentionally not retried: stale
+            // game audio is less useful than preserving live stream cadence.
+            track.write(audioData, 0, audioData.length, AudioTrack.WRITE_NON_BLOCKING);
         }
         else {
             LimeLog.info("Too much pending audio data: " + MoonBridge.getPendingAudioDuration() +" ms");
