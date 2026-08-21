@@ -94,6 +94,8 @@ object DirectDualSenseBt {
     private val adaptiveSendSamplesUs = ArrayDeque<Long>()
     private var adaptiveSlowSendWindows = 0
     private var adaptiveCalibrationComplete = false
+    private val runtimeGapSamplesUs = ArrayDeque<Long>()
+    private var pendingAdaptiveLatencyScale = 0
 
     @JvmStatic fun initialize(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || initialized) return
@@ -372,6 +374,8 @@ object DirectDualSenseBt {
             adaptiveSendSamplesUs.clear()
             adaptiveSlowSendWindows = 0
             adaptiveCalibrationComplete = false
+            runtimeGapSamplesUs.clear()
+            pendingAdaptiveLatencyScale = 0
         }
         // A scheduled drain may still run, but it will find no payload. Do not append
         // a final audio packet: Android's HID service has its own asynchronous queue,
@@ -395,6 +399,14 @@ object DirectDualSenseBt {
         // already learned for this phone/controller connection.
         lastAudioDrainStartNs = 0L
         synchronized(adaptiveAudioLock) {
+            if (pendingAdaptiveLatencyScale > adaptiveLatencyScale) {
+                val oldScale = adaptiveLatencyScale
+                adaptiveLatencyScale = pendingAdaptiveLatencyScale
+                LimeLog.info("Direct DualSense BT deferred audio guard: latency " +
+                    "0x${oldScale.toString(16)} -> 0x${adaptiveLatencyScale.toString(16)}")
+            }
+            pendingAdaptiveLatencyScale = 0
+            runtimeGapSamplesUs.clear()
             adaptiveGapSamplesUs.clear()
             adaptiveSendSamplesUs.clear()
             adaptiveSlowSendWindows = 0
@@ -568,8 +580,12 @@ object DirectDualSenseBt {
     }
 
     private fun tuneAudioTransport(received: Int, sent: Int, averageUs: Long) {
+        val maxGapUs = audioMaxDrainGapWindowNs / 1_000L
         synchronized(adaptiveAudioLock) {
-            if (adaptiveCalibrationComplete) return
+            if (adaptiveCalibrationComplete) {
+                stageRuntimeLatencyGuardLocked(maxGapUs)
+                return
+            }
         }
         // A partial window means the stream/controller-audio source stopped or
         // arrived late. Controller prefill cannot repair missing source frames,
@@ -583,7 +599,6 @@ object DirectDualSenseBt {
             }
             return
         }
-        val maxGapUs = audioMaxDrainGapWindowNs / 1_000L
         val maxSendUs = audioMaxSendTimeWindowNs / 1_000L
         var oldScale: Int
         var robustGapUs: Long
@@ -649,6 +664,34 @@ object DirectDualSenseBt {
         }
     }
 
+    /**
+     * Learn from repeated post-calibration scheduler stalls without touching the
+     * live decoder. A single Android hiccup is ignored. If at least two recent
+     * diagnostic windows exceed the active controller prefill, the larger guard
+     * is staged and applied only at the next sustained-silence transport rebase.
+     */
+    private fun stageRuntimeLatencyGuardLocked(maxGapUs: Long) {
+        runtimeGapSamplesUs.addLast(maxGapUs)
+        while (runtimeGapSamplesUs.size > RUNTIME_GUARD_WINDOW_COUNT) {
+            runtimeGapSamplesUs.removeFirst()
+        }
+        if (runtimeGapSamplesUs.size < RUNTIME_GUARD_MIN_SAMPLES) return
+
+        val sorted = runtimeGapSamplesUs.sorted()
+        val repeatedGapUs = sorted[sorted.lastIndex - 1]
+        val activePrefillUs = adaptiveLatencyScale * 1_000L / 12L
+        if (repeatedGapUs <= activePrefillUs + RUNTIME_GUARD_MARGIN_US) return
+
+        val desired = (((repeatedGapUs + RUNTIME_GUARD_SAFETY_US) * 12L + 999L) / 1_000L)
+            .coerceIn(adaptiveLatencyScale.toLong(), 0xffL).toInt()
+        if (desired > pendingAdaptiveLatencyScale) {
+            pendingAdaptiveLatencyScale = desired
+            LimeLog.info("Direct DualSense BT runtime audio guard staged: " +
+                "latency=0x${desired.toString(16)} repeatedGapUs=$repeatedGapUs " +
+                "activePrefillUs=$activePrefillUs")
+        }
+    }
+
     private fun armAudioRoute(): Boolean {
         if (audioRouteArmed) return true
         val active = bridge ?: return false
@@ -689,6 +732,10 @@ object DirectDualSenseBt {
     private const val ADAPTIVE_MAX_USEFUL_GAP_US = 25_000L
     private const val ADAPTIVE_MIN_CONTINUOUS_FRAMES = 150
     private const val ADAPTIVE_MAX_FRAME_IMBALANCE = 8
+    private const val RUNTIME_GUARD_WINDOW_COUNT = 8
+    private const val RUNTIME_GUARD_MIN_SAMPLES = 4
+    private const val RUNTIME_GUARD_MARGIN_US = 500L
+    private const val RUNTIME_GUARD_SAFETY_US = 3_000L
     private const val STATE_INTERVAL_IDLE_NS = 16_000_000L
     // Samsung's BluetoothHidHost accepts writes before they reach the radio. Keep
     // repeated host feedback from filling that hidden queue ahead of live audio.
