@@ -38,10 +38,20 @@ object DualSenseBtAudioBuilder {
     fun build(haptics: ByteArray, sequence: Int, packetCounter: Int,
               speakerOpus: ByteArray? = null, headsetRoute: Boolean = false,
               microphoneEnabled: Boolean = false, latencyScale: Int = 64): ByteArray {
+        return write(ByteArray(if (speakerOpus != null) 334 else 206), haptics, sequence,
+            packetCounter, speakerOpus, headsetRoute, microphoneEnabled, latencyScale)
+    }
+
+    /** Writes a live one-frame report into a reusable transport buffer. */
+    fun write(report: ByteArray, haptics: ByteArray, sequence: Int, packetCounter: Int,
+              speakerOpus: ByteArray? = null, headsetRoute: Boolean = false,
+              microphoneEnabled: Boolean = false, latencyScale: Int = 64,
+              crc: CRC32 = CRC32()): ByteArray {
         require(haptics.size == HAPTICS_BYTES_PER_REPORT)
         require(speakerOpus == null || speakerOpus.size == SPEAKER_BYTES_PER_REPORT)
+        require(report.size == if (speakerOpus != null) 334 else 206)
 
-        val report = ByteArray(if (speakerOpus != null) 334 else 206)
+        report.fill(0)
         report[0] = if (speakerOpus != null) 0x35 else 0x33
         report[1] = ((sequence and 0x0f) shl 4).toByte()
         report[2] = 0x91.toByte()
@@ -70,7 +80,7 @@ object DualSenseBtAudioBuilder {
         }
 
         // The final four bytes are the standard DualSense Bluetooth output CRC.
-        val crc = CRC32()
+        crc.reset()
         crc.update(0xa2)
         crc.update(report, 0, report.size - 4)
         val value = crc.value

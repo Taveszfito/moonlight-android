@@ -19,6 +19,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import java.util.zip.CRC32
 
 /**
  * Complete output path for a DualSense paired directly with Android's Bluetooth stack.
@@ -38,13 +39,21 @@ object DirectDualSenseBt {
         Thread(task, "DirectDualSenseBtJack").apply { isDaemon = true }
     }
     private enum class AudioSource { NONE, COMBINED, STANDALONE }
-    private data class AudioPayload(
-        val haptics: ByteArray,
-        val speaker: ByteArray?,
-        val source: AudioSource,
-    )
+    private class AudioPayload {
+        val haptics = ByteArray(DualSenseBtAudioBuilder.HAPTICS_BYTES_PER_REPORT)
+        val speaker = ByteArray(200)
+        var hasSpeaker = false
+        var source = AudioSource.NONE
+    }
     private val audioQueueLock = Any()
     private val audioQueue = ArrayDeque<AudioPayload>()
+    private val freeAudioPayloads = ArrayDeque<AudioPayload>().apply {
+        repeat(AUDIO_PAYLOAD_POOL_SIZE) { addLast(AudioPayload()) }
+    }
+    private val audioReport = ByteArray(334)
+    private val hapticsReport = ByteArray(206)
+    private val audioReportCrc = CRC32()
+    private val silentHaptics = ByteArray(DualSenseBtAudioBuilder.HAPTICS_BYTES_PER_REPORT)
     private val audioDrainScheduled = AtomicBoolean(false)
     private val pendingState = AtomicReference<ByteArray?>(null)
     private val stateDrainScheduled = AtomicBoolean(false)
@@ -347,7 +356,7 @@ object DirectDualSenseBt {
                     // The native combined carrier owns both speaker and haptics.
                     // Discard any standalone frames immediately so two producers
                     // can never drain the controller at roughly twice its clock.
-                    audioQueue.clear()
+                    clearAudioQueueLocked()
                     nextAudioDeadlineNs = 0L
                     activeAudioSource = AudioSource.COMBINED
                     LimeLog.info("Direct DualSense BT audio owner: COMBINED")
@@ -358,26 +367,26 @@ object DirectDualSenseBt {
                 // demonstrably stopped for several report periods.
                 if (nowNs - lastCombinedAudioAtNs < COMBINED_ROUTE_RELEASE_NS) return true
                 if (activeAudioSource != AudioSource.STANDALONE) {
-                    audioQueue.clear()
+                    clearAudioQueueLocked()
                     nextAudioDeadlineNs = 0L
                     activeAudioSource = AudioSource.STANDALONE
                     LimeLog.info("Direct DualSense BT audio owner: STANDALONE")
                 }
             }
 
-            val payload = AudioPayload(
-                haptics = if (speakerOnly) {
-                    ByteArray(DualSenseBtAudioBuilder.HAPTICS_BYTES_PER_REPORT)
-                } else haptics.copyOf(),
-                // A missing speaker packet must never repeat old media. Combined
-                // transport uses a real encoded CELT-stereo silence frame instead.
-                speaker = (speakerOpus ?: encodedSilence)?.copyOf(),
-                source = source,
-            )
             if (audioQueue.size >= AUDIO_QUEUE_CAPACITY) {
-                audioQueue.removeFirst()
+                recycleAudioPayloadLocked(audioQueue.removeFirst())
                 audioOverwrittenWindow.incrementAndGet()
             }
+            val payload = freeAudioPayloads.removeFirstOrNull() ?: AudioPayload()
+            if (speakerOnly) payload.haptics.fill(0)
+            else haptics.copyInto(payload.haptics)
+            // A missing speaker packet must never repeat old media. Combined
+            // transport uses a real encoded CELT-stereo silence frame instead.
+            val speaker = speakerOpus ?: encodedSilence
+            payload.hasSpeaker = speaker != null
+            if (speaker != null) speaker.copyInto(payload.speaker)
+            payload.source = source
             audioQueue.addLast(payload)
             startDrain = !audioDrainScheduled.get() && audioQueue.size >= AUDIO_START_FRAMES
         }
@@ -395,7 +404,7 @@ object DirectDualSenseBt {
     }
 
     @JvmStatic fun stopNativeAudio(context: Context) {
-        synchronized(audioQueueLock) { audioQueue.clear() }
+        synchronized(audioQueueLock) { clearAudioQueueLocked() }
         activeAudioSource = AudioSource.NONE
         lastCombinedAudioAtNs = 0L
         audioRouteArmed = false
@@ -410,7 +419,7 @@ object DirectDualSenseBt {
 
     /** Drop only stale media when the decoded direct-controller source is truly silent. */
     @JvmStatic fun discardNativeAudioBacklogOnSilence() {
-        synchronized(audioQueueLock) { audioQueue.clear() }
+        synchronized(audioQueueLock) { clearAudioQueueLocked() }
         activeAudioSource = AudioSource.NONE
         lastCombinedAudioAtNs = 0L
         lastNativeAudioAtNs = 0L
@@ -512,29 +521,29 @@ object DirectDualSenseBt {
         // Never repeat old media during an underrun. Keep the controller decoder
         // on its existing CELT-stereo stream with one genuinely encoded silence
         // packet and silent haptics until the producer recovers.
-        val payload = freshPayload ?: if (audioStillActive) encodedSilence?.let {
-            AudioPayload(
-                ByteArray(DualSenseBtAudioBuilder.HAPTICS_BYTES_PER_REPORT),
-                it,
-                activeAudioSource,
-            )
-        } else null
-        if (payload != null) {
+        val underrunSilence = if (freshPayload == null && audioStillActive) encodedSilence else null
+        if (freshPayload != null || underrunSilence != null) {
             if (!armAudioRoute()) {
+                if (freshPayload != null) synchronized(audioQueueLock) {
+                    recycleAudioPayloadLocked(freshPayload)
+                }
                 audioDrainScheduled.set(false)
                 return
             }
             // Keep the standard one-frame report on every Android Bluetooth stack.
             // Some vendor implementations accept the larger two-frame write but do
             // not deliver it to the controller, so sendData() cannot detect failure.
-            val report = DualSenseBtAudioBuilder.build(
-                haptics = payload.haptics ?: ByteArray(DualSenseBtAudioBuilder.HAPTICS_BYTES_PER_REPORT),
+            val speaker = if (freshPayload?.hasSpeaker == true) freshPayload.speaker else underrunSilence
+            val report = DualSenseBtAudioBuilder.write(
+                report = if (speaker != null) audioReport else hapticsReport,
+                haptics = freshPayload?.haptics ?: silentHaptics,
                 sequence = nextOutputSequence(),
                 packetCounter = audioSequence++ and 0xff,
-                speakerOpus = payload.speaker,
+                speakerOpus = speaker,
                 headsetRoute = headsetRoute,
                 microphoneEnabled = microphoneCaptureEnabled,
                 latencyScale = AUDIO_LATENCY_SCALE,
+                crc = audioReportCrc,
             )
             val sendStartNs = SystemClock.elapsedRealtimeNanos()
             val sent = send(report, true)
@@ -545,6 +554,9 @@ object DirectDualSenseBt {
             audioSendTimeWindowNs += sendTimeNs
             audioMaxSendTimeWindowNs = maxOf(audioMaxSendTimeWindowNs, sendTimeNs)
             logAudioTransportDiagnostics(SystemClock.elapsedRealtimeNanos())
+            if (freshPayload != null) synchronized(audioQueueLock) {
+                recycleAudioPayloadLocked(freshPayload)
+            }
         }
         val queueNotEmpty = synchronized(audioQueueLock) { audioQueue.isNotEmpty() }
         if (audioStillActive || queueNotEmpty) {
@@ -589,7 +601,7 @@ object DirectDualSenseBt {
         synchronized(audioQueueLock) {
             repeat(count) {
                 if (audioQueue.isEmpty()) return@repeat
-                audioQueue.removeFirst()
+                recycleAudioPayloadLocked(audioQueue.removeFirst())
                 dropped++
             }
         }
@@ -597,6 +609,16 @@ object DirectDualSenseBt {
             audioOverwrittenWindow.addAndGet(dropped)
             LimeLog.info("Direct DualSense BT deadline resync: skipped=$count dropped=$dropped")
         }
+    }
+
+    private fun clearAudioQueueLocked() {
+        while (audioQueue.isNotEmpty()) recycleAudioPayloadLocked(audioQueue.removeFirst())
+    }
+
+    private fun recycleAudioPayloadLocked(payload: AudioPayload) {
+        payload.hasSpeaker = false
+        payload.source = AudioSource.NONE
+        if (freeAudioPayloads.size < AUDIO_PAYLOAD_POOL_SIZE) freeAudioPayloads.addLast(payload)
     }
 
     private fun logAudioTransportDiagnostics(nowNs: Long) {
@@ -652,6 +674,7 @@ object DirectDualSenseBt {
     private const val AUDIO_LATENCY_SCALE = 0x80
     private const val AUDIO_START_FRAMES = 4
     private const val AUDIO_QUEUE_CAPACITY = 8
+    private const val AUDIO_PAYLOAD_POOL_SIZE = AUDIO_QUEUE_CAPACITY + 2
     private const val COMBINED_ROUTE_RELEASE_NS = AUDIO_REPORT_PERIOD_NS * 8L
     private const val STATE_INTERVAL_IDLE_NS = 16_000_000L
     // Samsung's BluetoothHidHost accepts writes before they reach the radio. Keep
