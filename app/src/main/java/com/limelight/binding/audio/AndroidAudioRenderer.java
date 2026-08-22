@@ -25,6 +25,7 @@ public class AndroidAudioRenderer implements AudioRenderer {
     private AudioTrack track;
     private int channelCount;
     private final ArrayBlockingQueue<short[]> audioWriteQueue = new ArrayBlockingQueue<>(4);
+    private final ArrayBlockingQueue<short[]> freeAudioBuffers = new ArrayBlockingQueue<>(6);
     private volatile boolean audioWriterRunning;
     private Thread audioWriterThread;
 
@@ -191,7 +192,7 @@ public class AndroidAudioRenderer implements AudioRenderer {
             return -2;
         }
 
-        startAudioWriter();
+        startAudioWriter(audioConfiguration.channelCount * samplesPerFrame);
 
         return 0;
     }
@@ -204,7 +205,7 @@ public class AndroidAudioRenderer implements AudioRenderer {
         if (DualSenseAudioBridge.routeStandardStreamAudio(audioData, channelCount)) {
             // Do not let already-decoded phone audio leak out after the physical
             // DualSense headset route takes ownership.
-            audioWriteQueue.clear();
+            recycleQueuedAudio();
             return;
         }
         // Only queue up to 40 ms of pending audio data in addition to what AudioTrack is buffering for us.
@@ -214,11 +215,20 @@ public class AndroidAudioRenderer implements AudioRenderer {
             // the remainder creates clicks and eventually an AudioTrack underrun.
             // The bounded queue keeps that vendor blocking away from the native
             // stream decoder and from the independent DualSense HID sender.
-            short[] queuedAudio = audioData.clone();
-            if (!audioWriteQueue.offer(queuedAudio)) {
-                audioWriteQueue.poll();
-                audioWriteQueue.offer(queuedAudio);
+            short[] queuedAudio = freeAudioBuffers.poll();
+            if (queuedAudio == null) {
+                // Reuse the oldest queued block instead of allocating or letting
+                // latency grow. The writer-owned block is never visible here.
+                queuedAudio = audioWriteQueue.poll();
                 LimeLog.warning("Android audio writer dropped one stale PCM block");
+            }
+            if (queuedAudio == null || queuedAudio.length != audioData.length) {
+                LimeLog.warning("Android audio writer has no matching PCM buffer");
+                return;
+            }
+            System.arraycopy(audioData, 0, queuedAudio, 0, audioData.length);
+            if (!audioWriteQueue.offer(queuedAudio)) {
+                freeAudioBuffers.offer(queuedAudio);
             }
         }
         else {
@@ -267,13 +277,20 @@ public class AndroidAudioRenderer implements AudioRenderer {
             }
             audioWriterThread = null;
         }
-        audioWriteQueue.clear();
+        recycleQueuedAudio();
+        freeAudioBuffers.clear();
 
         track.release();
     }
 
-    private void startAudioWriter() {
+    private void startAudioWriter(int samplesPerDecodedFrame) {
         audioWriteQueue.clear();
+        freeAudioBuffers.clear();
+        // All steady-state PCM storage is allocated once. Cloning every decoded
+        // block caused periodic 8 MB young-GC cycles and process-wide audio gaps.
+        for (int i = 0; i < 6; i++) {
+            freeAudioBuffers.add(new short[samplesPerDecodedFrame]);
+        }
         audioWriterRunning = true;
         audioWriterThread = new Thread(() -> {
             Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO);
@@ -297,9 +314,19 @@ public class AndroidAudioRenderer implements AudioRenderer {
                     }
                     offset += written;
                 }
+                if (audioWriterRunning) {
+                    freeAudioBuffers.offer(pcm);
+                }
             }
         }, "AndroidAudioTrackWriter");
         audioWriterThread.setDaemon(true);
         audioWriterThread.start();
+    }
+
+    private void recycleQueuedAudio() {
+        short[] pcm;
+        while ((pcm = audioWriteQueue.poll()) != null) {
+            freeAudioBuffers.offer(pcm);
+        }
     }
 }
