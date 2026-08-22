@@ -640,5 +640,6 @@ object DualSenseIsoNative {
 
 object DualSenseBtAudioNative {
     @JvmStatic external fun encodeSpeaker(pcm: ByteArray): ByteArray?
+    @JvmStatic external fun encodeSpeakerSilence(): ByteArray?
     @JvmStatic external fun resetSpeaker()
 }

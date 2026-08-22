@@ -289,13 +289,12 @@ Java_com_limelight_dualsense_DualSenseBtAudioNative_encodeSpeaker(
         const auto written = opus_encode(bt_speaker_encoder, resampled,
           output_frames_per_chunk, encoded + chunk * bytes_per_opus_chunk,
           bytes_per_opus_chunk);
-        if (written <= 0) {
+        // The Bluetooth sub-packet is exactly 200 bytes. Raw zero filling is
+        // not valid Opus padding and may be parsed as a SILK-mono TOC after a
+        // CELT-stereo packet, producing a loud decoder artifact.
+        if (written != bytes_per_opus_chunk) {
           success = false;
           break;
-        }
-        if (written < bytes_per_opus_chunk) {
-          std::memset(encoded + chunk * bytes_per_opus_chunk + written, 0,
-            bytes_per_opus_chunk - written);
         }
       }
     }
@@ -304,6 +303,35 @@ Java_com_limelight_dualsense_DualSenseBtAudioNative_encodeSpeaker(
   if (!success) return nullptr;
   auto result = env->NewByteArray(sizeof(encoded));
   env->SetByteArrayRegion(result, 0, sizeof(encoded),
+    reinterpret_cast<const jbyte *>(encoded));
+  return result;
+}
+
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_com_limelight_dualsense_DualSenseBtAudioNative_encodeSpeakerSilence(
+  JNIEnv *env, jclass
+) {
+  constexpr int frames = 480;
+  constexpr int bytes = 200;
+  int error = OPUS_OK;
+  auto *encoder = opus_encoder_create(48000, 2, OPUS_APPLICATION_AUDIO, &error);
+  if (!encoder || error != OPUS_OK) {
+    if (encoder) opus_encoder_destroy(encoder);
+    return nullptr;
+  }
+  opus_encoder_ctl(encoder, OPUS_SET_BITRATE(160000));
+  opus_encoder_ctl(encoder, OPUS_SET_VBR(0));
+  opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(0));
+  opus_encoder_ctl(encoder, OPUS_SET_EXPERT_FRAME_DURATION(OPUS_FRAMESIZE_10_MS));
+
+  std::int16_t silence[frames * 2] {};
+  std::uint8_t encoded[bytes] {};
+  const auto written = opus_encode(encoder, silence, frames, encoded, bytes);
+  opus_encoder_destroy(encoder);
+  if (written != bytes) return nullptr;
+
+  auto result = env->NewByteArray(bytes);
+  env->SetByteArrayRegion(result, 0, bytes,
     reinterpret_cast<const jbyte *>(encoded));
   return result;
 }

@@ -8,11 +8,14 @@ import android.media.AudioManager;
 import android.media.AudioTrack;
 import android.media.audiofx.AudioEffect;
 import android.os.Build;
+import android.os.Process;
 
 import com.limelight.LimeLog;
 import com.limelight.dualsense.DualSenseAudioBridge;
 import com.limelight.nvstream.av.audio.AudioRenderer;
 import com.limelight.nvstream.jni.MoonBridge;
+
+import java.util.concurrent.ArrayBlockingQueue;
 
 public class AndroidAudioRenderer implements AudioRenderer {
 
@@ -21,6 +24,9 @@ public class AndroidAudioRenderer implements AudioRenderer {
 
     private AudioTrack track;
     private int channelCount;
+    private final ArrayBlockingQueue<short[]> audioWriteQueue = new ArrayBlockingQueue<>(4);
+    private volatile boolean audioWriterRunning;
+    private Thread audioWriterThread;
 
     public AndroidAudioRenderer(Context context, boolean enableAudioFx) {
         this.context = context;
@@ -185,6 +191,8 @@ public class AndroidAudioRenderer implements AudioRenderer {
             return -2;
         }
 
+        startAudioWriter();
+
         return 0;
     }
 
@@ -194,16 +202,24 @@ public class AndroidAudioRenderer implements AudioRenderer {
         // becomes the audio sink. Do this before AudioTrack.write() so game
         // audio does not leak to the phone/tablet speakers in parallel.
         if (DualSenseAudioBridge.routeStandardStreamAudio(audioData, channelCount)) {
+            // Do not let already-decoded phone audio leak out after the physical
+            // DualSense headset route takes ownership.
+            audioWriteQueue.clear();
             return;
         }
         // Only queue up to 40 ms of pending audio data in addition to what AudioTrack is buffering for us.
         if (MoonBridge.getPendingAudioDuration() < 40) {
-            // Never let a vendor AudioTrack stall the native decoder callback.
-            // Blocking here also starves dedicated controller-audio processing,
-            // which then arrives in bursts and overruns its real-time HID queue.
-            // A partial non-blocking write is intentionally not retried: stale
-            // game audio is less useful than preserving live stream cadence.
-            track.write(audioData, 0, audioData.length, AudioTrack.WRITE_NON_BLOCKING);
+            // Keep AudioTrack blocking and exact on its own audio-priority thread.
+            // A non-blocking write may accept only part of this PCM block; dropping
+            // the remainder creates clicks and eventually an AudioTrack underrun.
+            // The bounded queue keeps that vendor blocking away from the native
+            // stream decoder and from the independent DualSense HID sender.
+            short[] queuedAudio = audioData.clone();
+            if (!audioWriteQueue.offer(queuedAudio)) {
+                audioWriteQueue.poll();
+                audioWriteQueue.offer(queuedAudio);
+                LimeLog.warning("Android audio writer dropped one stale PCM block");
+            }
         }
         else {
             LimeLog.info("Too much pending audio data: " + MoonBridge.getPendingAudioDuration() +" ms");
@@ -235,10 +251,55 @@ public class AndroidAudioRenderer implements AudioRenderer {
 
     @Override
     public void cleanup() {
+        audioWriterRunning = false;
+        if (audioWriterThread != null) {
+            audioWriterThread.interrupt();
+        }
         // Immediately drop all pending data
         track.pause();
         track.flush();
 
+        if (audioWriterThread != null) {
+            try {
+                audioWriterThread.join(250);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            audioWriterThread = null;
+        }
+        audioWriteQueue.clear();
+
         track.release();
+    }
+
+    private void startAudioWriter() {
+        audioWriteQueue.clear();
+        audioWriterRunning = true;
+        audioWriterThread = new Thread(() -> {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO);
+            while (audioWriterRunning && !Thread.currentThread().isInterrupted()) {
+                final short[] pcm;
+                try {
+                    pcm = audioWriteQueue.take();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+
+                int offset = 0;
+                while (audioWriterRunning && offset < pcm.length) {
+                    // The three-argument overload is blocking on every supported
+                    // Android version and never silently discards a partial tail.
+                    int written = track.write(pcm, offset, pcm.length - offset);
+                    if (written <= 0) {
+                        LimeLog.warning("Android audio writer failed: " + written);
+                        break;
+                    }
+                    offset += written;
+                }
+            }
+        }, "AndroidAudioTrackWriter");
+        audioWriterThread.setDaemon(true);
+        audioWriterThread.start();
     }
 }

@@ -28,17 +28,21 @@ object DirectDualSenseBt {
     private val lock = Any()
     private val writer = Executors.newSingleThreadScheduledExecutor { task ->
         Thread({
-            // HID audio has a 10.67 ms deadline. Raising only this dedicated
-            // worker avoids vendor scheduler jitter without changing report
-            // timing, codec framing, or playback speed.
-            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+            // Keep HID media above ordinary application work without starving
+            // controller input or Android's Bluetooth service threads.
+            Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
             task.run()
         }, "DirectDualSenseBt").apply { isDaemon = true }
     }
     private val jackPoller = Executors.newSingleThreadScheduledExecutor { task ->
         Thread(task, "DirectDualSenseBtJack").apply { isDaemon = true }
     }
-    private data class AudioPayload(val haptics: ByteArray?, val speaker: ByteArray?)
+    private enum class AudioSource { NONE, COMBINED, STANDALONE }
+    private data class AudioPayload(
+        val haptics: ByteArray,
+        val speaker: ByteArray?,
+        val source: AudioSource,
+    )
     private val audioQueueLock = Any()
     private val audioQueue = ArrayDeque<AudioPayload>()
     private val audioDrainScheduled = AtomicBoolean(false)
@@ -74,7 +78,9 @@ object DirectDualSenseBt {
     @Volatile private var audioRouteArmed = false
     @Volatile private var nextAudioDeadlineNs = 0L
     @Volatile private var lastNativeAudioAtNs = 0L
-    private var lastAudioPayload: AudioPayload? = null
+    @Volatile private var activeAudioSource = AudioSource.NONE
+    @Volatile private var lastCombinedAudioAtNs = 0L
+    @Volatile private var encodedSilence: ByteArray? = null
     @Volatile private var lastStateSendNs = 0L
     private var audioSequence = 0
     private val outputSequence = AtomicInteger(0)
@@ -88,14 +94,6 @@ object DirectDualSenseBt {
     private var audioMaxDrainGapWindowNs = 0L
     private var lastAudioDrainStartNs = 0L
     private var lastAudioDiagnosticsNs = 0L
-    @Volatile private var adaptiveLatencyScale = 0x80
-    private val adaptiveAudioLock = Any()
-    private val adaptiveGapSamplesUs = ArrayDeque<Long>()
-    private val adaptiveSendSamplesUs = ArrayDeque<Long>()
-    private var adaptiveSlowSendWindows = 0
-    private var adaptiveCalibrationComplete = false
-    private val runtimeGapSamplesUs = ArrayDeque<Long>()
-    private var pendingAdaptiveLatencyScale = 0
 
     @JvmStatic fun initialize(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || initialized) return
@@ -339,44 +337,71 @@ object DirectDualSenseBt {
         // used even if the bridge's global priority flag is stale/also active.
         if (!isConnected(context) && !headsetRoute) return false
         audioReceivedWindow.incrementAndGet()
+        val nowNs = SystemClock.elapsedRealtimeNanos()
+        val source = if (speakerOnly) AudioSource.STANDALONE else AudioSource.COMBINED
         var startDrain = false
         synchronized(audioQueueLock) {
-            val previous = audioQueue.lastOrNull()
+            if (source == AudioSource.COMBINED) {
+                lastCombinedAudioAtNs = nowNs
+                if (activeAudioSource != AudioSource.COMBINED) {
+                    // The native combined carrier owns both speaker and haptics.
+                    // Discard any standalone frames immediately so two producers
+                    // can never drain the controller at roughly twice its clock.
+                    audioQueue.clear()
+                    nextAudioDeadlineNs = 0L
+                    activeAudioSource = AudioSource.COMBINED
+                    LimeLog.info("Direct DualSense BT audio owner: COMBINED")
+                }
+            } else {
+                // A short native-stream gap is not permission to start a second
+                // producer. Only take ownership after the combined carrier has
+                // demonstrably stopped for several report periods.
+                if (nowNs - lastCombinedAudioAtNs < COMBINED_ROUTE_RELEASE_NS) return true
+                if (activeAudioSource != AudioSource.STANDALONE) {
+                    audioQueue.clear()
+                    nextAudioDeadlineNs = 0L
+                    activeAudioSource = AudioSource.STANDALONE
+                    LimeLog.info("Direct DualSense BT audio owner: STANDALONE")
+                }
+            }
+
             val payload = AudioPayload(
-                haptics = if (speakerOnly) previous?.haptics else haptics.copyOf(),
-                speaker = speakerOpus?.copyOf() ?: previous?.speaker,
+                haptics = if (speakerOnly) {
+                    ByteArray(DualSenseBtAudioBuilder.HAPTICS_BYTES_PER_REPORT)
+                } else haptics.copyOf(),
+                // A missing speaker packet must never repeat old media. Combined
+                // transport uses a real encoded CELT-stereo silence frame instead.
+                speaker = (speakerOpus ?: encodedSilence)?.copyOf(),
+                source = source,
             )
             if (audioQueue.size >= AUDIO_QUEUE_CAPACITY) {
                 audioQueue.removeFirst()
                 audioOverwrittenWindow.incrementAndGet()
             }
-            startDrain = audioQueue.isEmpty()
             audioQueue.addLast(payload)
+            startDrain = !audioDrainScheduled.get() && audioQueue.size >= AUDIO_START_FRAMES
         }
-        lastNativeAudioAtNs = SystemClock.elapsedRealtimeNanos()
-        // Start with a tiny lead so bursty 3 ms network delivery can be emitted
-        // later in strict Opus order instead of alternating drops and repeats.
-        scheduleAudioDrain(if (startDrain && lastAudioPayload == null)
-            AUDIO_START_BUFFER_NS else 0L)
+        lastNativeAudioAtNs = nowNs
+        if (encodedSilence == null) {
+            encodedSilence = DualSenseBtAudioNative.encodeSpeakerSilence()
+            if (encodedSilence == null) {
+                LimeLog.warning("Direct DualSense BT failed to create encoded silence frame")
+            }
+        }
+        // Arm from actual queue depth, not elapsed wall time. Network jitter can
+        // otherwise leave fewer than the intended four frames available.
+        if (startDrain) scheduleAudioDrain(0L)
         return true
     }
 
     @JvmStatic fun stopNativeAudio(context: Context) {
         synchronized(audioQueueLock) { audioQueue.clear() }
-        lastAudioPayload = null
+        activeAudioSource = AudioSource.NONE
+        lastCombinedAudioAtNs = 0L
         audioRouteArmed = false
         nextAudioDeadlineNs = 0L
         lastNativeAudioAtNs = 0L
         lastAudioDrainStartNs = 0L
-        synchronized(adaptiveAudioLock) {
-            adaptiveLatencyScale = 0x80
-            adaptiveGapSamplesUs.clear()
-            adaptiveSendSamplesUs.clear()
-            adaptiveSlowSendWindows = 0
-            adaptiveCalibrationComplete = false
-            runtimeGapSamplesUs.clear()
-            pendingAdaptiveLatencyScale = 0
-        }
         // A scheduled drain may still run, but it will find no payload. Do not append
         // a final audio packet: Android's HID service has its own asynchronous queue,
         // and adding silence there only extends the tail after the stream has stopped.
@@ -386,31 +411,17 @@ object DirectDualSenseBt {
     /** Drop only stale media when the decoded direct-controller source is truly silent. */
     @JvmStatic fun discardNativeAudioBacklogOnSilence() {
         synchronized(audioQueueLock) { audioQueue.clear() }
-        lastAudioPayload = null
+        activeAudioSource = AudioSource.NONE
+        lastCombinedAudioAtNs = 0L
         lastNativeAudioAtNs = 0L
         nextAudioDeadlineNs = 0L
         // Force the proven setup/state wake sequence at this safe silent point.
-        // This rebases controller-side and vendor HID queues without changing
-        // the latency value already calibrated for the current stream.
+        // This rebases controller-side and vendor HID queues on a clean boundary.
         audioRouteArmed = false
         LimeLog.info("Direct DualSense BT silent transport rebase")
         // A silence interval is not Bluetooth scheduling jitter. Start the next
-        // audible segment with a fresh timing baseline, but retain the latency
-        // already learned for this phone/controller connection.
+        // audible segment with a fresh timing baseline.
         lastAudioDrainStartNs = 0L
-        synchronized(adaptiveAudioLock) {
-            if (pendingAdaptiveLatencyScale > adaptiveLatencyScale) {
-                val oldScale = adaptiveLatencyScale
-                adaptiveLatencyScale = pendingAdaptiveLatencyScale
-                LimeLog.info("Direct DualSense BT deferred audio guard: latency " +
-                    "0x${oldScale.toString(16)} -> 0x${adaptiveLatencyScale.toString(16)}")
-            }
-            pendingAdaptiveLatencyScale = 0
-            runtimeGapSamplesUs.clear()
-            adaptiveGapSamplesUs.clear()
-            adaptiveSendSamplesUs.clear()
-            adaptiveSlowSendWindows = 0
-        }
     }
 
     private fun packTrigger(type: Byte, data: ByteArray?): ByteArray = ByteArray(11).also { packed ->
@@ -496,14 +507,18 @@ object DirectDualSenseBt {
         val freshPayload = synchronized(audioQueueLock) {
             if (audioQueue.isNotEmpty()) audioQueue.removeFirst() else null
         }
-        if (freshPayload != null) lastAudioPayload = freshPayload
         val audioStillActive = lastNativeAudioAtNs != 0L &&
             drainStartNs - lastNativeAudioAtNs < NATIVE_AUDIO_ACTIVE_GRACE_NS
-        // Never conceal a missing transport frame by repeating the previous
-        // Opus+haptics payload. Replaying a non-silent 10.67 ms block produces
-        // a loud robotic buzz; a brief controller-side underflow is both safer
-        // and much less audible until the next genuine frame arrives.
-        val payload = freshPayload
+        // Never repeat old media during an underrun. Keep the controller decoder
+        // on its existing CELT-stereo stream with one genuinely encoded silence
+        // packet and silent haptics until the producer recovers.
+        val payload = freshPayload ?: if (audioStillActive) encodedSilence?.let {
+            AudioPayload(
+                ByteArray(DualSenseBtAudioBuilder.HAPTICS_BYTES_PER_REPORT),
+                it,
+                activeAudioSource,
+            )
+        } else null
         if (payload != null) {
             if (!armAudioRoute()) {
                 audioDrainScheduled.set(false)
@@ -519,7 +534,7 @@ object DirectDualSenseBt {
                 speakerOpus = payload.speaker,
                 headsetRoute = headsetRoute,
                 microphoneEnabled = microphoneCaptureEnabled,
-                latencyScale = adaptiveLatencyScale,
+                latencyScale = AUDIO_LATENCY_SCALE,
             )
             val sendStartNs = SystemClock.elapsedRealtimeNanos()
             val sent = send(report, true)
@@ -533,27 +548,54 @@ object DirectDualSenseBt {
         }
         val queueNotEmpty = synchronized(audioQueueLock) { audioQueue.isNotEmpty() }
         if (audioStillActive || queueNotEmpty) {
-            val now = SystemClock.elapsedRealtimeNanos()
-            if (nextAudioDeadlineNs == 0L) nextAudioDeadlineNs = now
-            nextAudioDeadlineNs += AUDIO_REPORT_PERIOD_NS
-            while (nextAudioDeadlineNs <= now) {
-                // Never burst Opus frames to catch up. DualSense playback is
-                // cadence-sensitive and closely spaced reports decode as noisy,
-                // accelerated audio on some controller/phone combinations.
-                nextAudioDeadlineNs += AUDIO_REPORT_PERIOD_NS
+            val sendFinishedNs = SystemClock.elapsedRealtimeNanos()
+            val currentDeadlineNs = if (nextAudioDeadlineNs == 0L) {
+                drainStartNs
+            } else nextAudioDeadlineNs
+            var followingDeadlineNs = currentDeadlineNs + AUDIO_REPORT_PERIOD_NS
+            var skippedSlots = 0
+
+            // Stay on the original report grid. Only enter resync when the next
+            // grid slot has actually elapsed by the time sendData() completes.
+            // Ordinary sub-period scheduler lateness is not a missed slot. Once
+            // a slot really is missed, advance by whole periods until at least
+            // one complete period is ahead and discard the matching old frames.
+            if (followingDeadlineNs <= sendFinishedNs) {
+                val safeDeadlineNs = sendFinishedNs + AUDIO_REPORT_PERIOD_NS
+                while (followingDeadlineNs < safeDeadlineNs) {
+                    followingDeadlineNs += AUDIO_REPORT_PERIOD_NS
+                    skippedSlots++
+                }
             }
+            if (skippedSlots > 0) dropSkippedAudioSlots(skippedSlots)
+            nextAudioDeadlineNs = followingDeadlineNs
             writer.schedule(::drainAudio,
-                (nextAudioDeadlineNs - now).coerceAtLeast(0L), TimeUnit.NANOSECONDS)
+                (followingDeadlineNs - sendFinishedNs).coerceAtLeast(0L), TimeUnit.NANOSECONDS)
         } else {
             audioDrainScheduled.set(false)
             nextAudioDeadlineNs = 0L
-            lastAudioPayload = null
+            activeAudioSource = AudioSource.NONE
             // Do not measure the idle source interval as writer scheduler jitter
             // when a later audio segment starts.
             lastAudioDrainStartNs = 0L
             if (synchronized(audioQueueLock) { audioQueue.isNotEmpty() }) {
-                scheduleAudioDrain(AUDIO_REPORT_PERIOD_NS)
+                scheduleAudioDrain(0L)
             }
+        }
+    }
+
+    private fun dropSkippedAudioSlots(count: Int) {
+        var dropped = 0
+        synchronized(audioQueueLock) {
+            repeat(count) {
+                if (audioQueue.isEmpty()) return@repeat
+                audioQueue.removeFirst()
+                dropped++
+            }
+        }
+        if (dropped > 0) {
+            audioOverwrittenWindow.addAndGet(dropped)
+            LimeLog.info("Direct DualSense BT deadline resync: skipped=$count dropped=$dropped")
         }
     }
 
@@ -563,10 +605,9 @@ object DirectDualSenseBt {
         val sent = audioSentWindow
         val received = audioReceivedWindow.getAndSet(0)
         val averageUs = if (sent == 0) 0L else audioSendTimeWindowNs / sent / 1_000L
-        tuneAudioTransport(received, sent, averageUs)
         LimeLog.info("Direct DualSense BT transport: received=$received " +
             "overwritten=${audioOverwrittenWindow.getAndSet(0)} sent=$sent failed=$audioFailedWindow " +
-            "profile=SINGLE_FRAME_AUTO latency=0x${adaptiveLatencyScale.toString(16)} " +
+            "profile=ABSOLUTE_GRID latency=0x${AUDIO_LATENCY_SCALE.toString(16)} " +
             "slow5ms=$audioSlowWindow avgSendUs=$averageUs " +
             "maxSendUs=${audioMaxSendTimeWindowNs / 1_000L} " +
             "maxDrainGapUs=${audioMaxDrainGapWindowNs / 1_000L}")
@@ -577,119 +618,6 @@ object DirectDualSenseBt {
         audioMaxSendTimeWindowNs = 0L
         audioMaxDrainGapWindowNs = 0L
         lastAudioDiagnosticsNs = nowNs
-    }
-
-    private fun tuneAudioTransport(received: Int, sent: Int, averageUs: Long) {
-        val maxGapUs = audioMaxDrainGapWindowNs / 1_000L
-        synchronized(adaptiveAudioLock) {
-            if (adaptiveCalibrationComplete) {
-                stageRuntimeLatencyGuardLocked(maxGapUs)
-                return
-            }
-        }
-        // A partial window means the stream/controller-audio source stopped or
-        // arrived late. Controller prefill cannot repair missing source frames,
-        // so never use that interval to tune the Android HID transport.
-        if (sent < ADAPTIVE_MIN_CONTINUOUS_FRAMES ||
-            kotlin.math.abs(received - sent) > ADAPTIVE_MAX_FRAME_IMBALANCE) {
-            synchronized(adaptiveAudioLock) {
-                adaptiveGapSamplesUs.clear()
-                adaptiveSendSamplesUs.clear()
-                adaptiveSlowSendWindows = 0
-            }
-            return
-        }
-        val maxSendUs = audioMaxSendTimeWindowNs / 1_000L
-        var oldScale: Int
-        var robustGapUs: Long
-        var robustSendUs: Long
-        var sampleCount: Int
-        synchronized(adaptiveAudioLock) {
-            oldScale = adaptiveLatencyScale
-            adaptiveGapSamplesUs.addLast(maxGapUs)
-            adaptiveSendSamplesUs.addLast(maxSendUs)
-            while (adaptiveGapSamplesUs.size > ADAPTIVE_GAP_WINDOW_COUNT) {
-                adaptiveGapSamplesUs.removeFirst()
-                adaptiveSendSamplesUs.removeFirst()
-            }
-
-            // The second-largest value deliberately rejects one isolated Android
-            // scheduler freeze. Two or more bad diagnostic windows are a pattern
-            // which controller-side prefill can actually compensate for.
-            val sortedGaps = adaptiveGapSamplesUs.sorted()
-            sampleCount = sortedGaps.size
-            robustGapUs = if (sampleCount >= ADAPTIVE_MIN_GAP_SAMPLES) {
-                sortedGaps[sortedGaps.lastIndex - 1]
-            } else 0L
-            val sortedSends = adaptiveSendSamplesUs.sorted()
-            robustSendUs = if (sampleCount >= ADAPTIVE_MIN_GAP_SAMPLES) {
-                sortedSends[sortedSends.lastIndex - 1]
-            } else 0L
-
-            adaptiveSlowSendWindows = if (averageUs >= ADAPTIVE_SLOW_SEND_US) {
-                adaptiveSlowSendWindows + 1
-            } else 0
-
-            // Measure a complete rolling window before touching the controller.
-            // Changing this field repeatedly during playback forces audible
-            // decoder resynchronization on some vendor Bluetooth stacks.
-            if (sampleCount < ADAPTIVE_GAP_WINDOW_COUNT) return
-
-            // The nominal cadence is 10.67 ms. Size the prefill from the robust
-            // upper tail of each phone's normal cadence too, rather than waiting
-            // for a dramatic 14+ ms stall that has already caused an underflow.
-            val repeatedGap = robustGapUs >= AUDIO_REPORT_PERIOD_US + ADAPTIVE_CADENCE_MARGIN_US
-            // Individual slow sendData() calls describe Android's hidden queue,
-            // not the controller's required decoder prefill. Only a sustained
-            // increase in the average is actionable here.
-            val sustainedSlowSend = adaptiveSlowSendWindows >= ADAPTIVE_SLOW_SEND_WINDOWS
-            if (repeatedGap || sustainedSlowSend) {
-                val effectiveGapUs = if (sustainedSlowSend) {
-                    maxOf(robustGapUs, AUDIO_REPORT_PERIOD_US + averageUs)
-                        .coerceAtMost(ADAPTIVE_MAX_USEFUL_GAP_US)
-                } else robustGapUs
-                // DSX expresses the controller prefill in twelfths of a millisecond.
-                val desired = (((effectiveGapUs + 3_000L) * 12L + 999L) / 1_000L)
-                    .coerceIn(0x80L, 0xffL).toInt()
-                // Never hunt downwards during audible playback. A new silent-to-audio
-                // segment starts from the minimum again and performs a fresh tune.
-                if (desired > adaptiveLatencyScale) adaptiveLatencyScale = desired
-            }
-            adaptiveCalibrationComplete = true
-        }
-        if (adaptiveLatencyScale != oldScale) {
-            LimeLog.info("Direct DualSense BT auto audio: latency 0x${oldScale.toString(16)} -> " +
-                "0x${adaptiveLatencyScale.toString(16)} (avgSendUs=$averageUs maxGapUs=$maxGapUs " +
-                "robustGapUs=$robustGapUs robustSendUs=$robustSendUs samples=$sampleCount)")
-        }
-    }
-
-    /**
-     * Learn from repeated post-calibration scheduler stalls without touching the
-     * live decoder. A single Android hiccup is ignored. If at least two recent
-     * diagnostic windows exceed the active controller prefill, the larger guard
-     * is staged and applied only at the next sustained-silence transport rebase.
-     */
-    private fun stageRuntimeLatencyGuardLocked(maxGapUs: Long) {
-        runtimeGapSamplesUs.addLast(maxGapUs)
-        while (runtimeGapSamplesUs.size > RUNTIME_GUARD_WINDOW_COUNT) {
-            runtimeGapSamplesUs.removeFirst()
-        }
-        if (runtimeGapSamplesUs.size < RUNTIME_GUARD_MIN_SAMPLES) return
-
-        val sorted = runtimeGapSamplesUs.sorted()
-        val repeatedGapUs = sorted[sorted.lastIndex - 1]
-        val activePrefillUs = adaptiveLatencyScale * 1_000L / 12L
-        if (repeatedGapUs <= activePrefillUs + RUNTIME_GUARD_MARGIN_US) return
-
-        val desired = (((repeatedGapUs + RUNTIME_GUARD_SAFETY_US) * 12L + 999L) / 1_000L)
-            .coerceIn(adaptiveLatencyScale.toLong(), 0xffL).toInt()
-        if (desired > pendingAdaptiveLatencyScale) {
-            pendingAdaptiveLatencyScale = desired
-            LimeLog.info("Direct DualSense BT runtime audio guard staged: " +
-                "latency=0x${desired.toString(16)} repeatedGapUs=$repeatedGapUs " +
-                "activePrefillUs=$activePrefillUs")
-        }
     }
 
     private fun armAudioRoute(): Boolean {
@@ -721,21 +649,10 @@ object DirectDualSenseBt {
     }
 
     private const val AUDIO_REPORT_PERIOD_NS = 10_666_667L
-    private const val AUDIO_REPORT_PERIOD_US = 10_667L
-    private const val AUDIO_START_BUFFER_NS = AUDIO_REPORT_PERIOD_NS * 3L
+    private const val AUDIO_LATENCY_SCALE = 0x80
+    private const val AUDIO_START_FRAMES = 4
     private const val AUDIO_QUEUE_CAPACITY = 8
-    private const val ADAPTIVE_GAP_WINDOW_COUNT = 6
-    private const val ADAPTIVE_MIN_GAP_SAMPLES = 3
-    private const val ADAPTIVE_CADENCE_MARGIN_US = 500L
-    private const val ADAPTIVE_SLOW_SEND_US = 2_000L
-    private const val ADAPTIVE_SLOW_SEND_WINDOWS = 2
-    private const val ADAPTIVE_MAX_USEFUL_GAP_US = 25_000L
-    private const val ADAPTIVE_MIN_CONTINUOUS_FRAMES = 150
-    private const val ADAPTIVE_MAX_FRAME_IMBALANCE = 8
-    private const val RUNTIME_GUARD_WINDOW_COUNT = 8
-    private const val RUNTIME_GUARD_MIN_SAMPLES = 4
-    private const val RUNTIME_GUARD_MARGIN_US = 500L
-    private const val RUNTIME_GUARD_SAFETY_US = 3_000L
+    private const val COMBINED_ROUTE_RELEASE_NS = AUDIO_REPORT_PERIOD_NS * 8L
     private const val STATE_INTERVAL_IDLE_NS = 16_000_000L
     // Samsung's BluetoothHidHost accepts writes before they reach the radio. Keep
     // repeated host feedback from filling that hidden queue ahead of live audio.
